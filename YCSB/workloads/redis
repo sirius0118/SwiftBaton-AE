@@ -1,0 +1,37 @@
+# Yahoo! Cloud System Benchmark
+# Workload A: Update heavy workload
+#   Application example: Session store recording recent actions
+#                        
+#   Read/update ratio: 50/50
+#   Default data size: 1 KB records (10 fields, 100 bytes each, plus key)
+#   Request distribution: zipfian
+
+threadcount=4
+# 控制key的长度
+zeropadding=32
+
+#控制value的大小(二者相乘为总大小)
+fieldcount=1
+fieldlength=1024
+
+# 控制记录数量，乘上key+value为内存总消耗
+recordcount=1000000
+
+# 操作数量和workload
+operationcount=10000000
+workload=site.ycsb.workloads.CoreWorkload
+
+# 写全部字段可以最大化脏页？大概
+# readallfields=true
+# writeallfields=true
+
+# 各个操作的比例
+readproportion=0.5
+updateproportion=0.5
+scanproportion=0
+insertproportion=0
+
+# 请求分布
+requestdistribution=zipfian
+zipfzeta=0.99
+

@@ -1,0 +1,143 @@
+name: validate
+on:
+  push:
+    tags:
+      - v*
+    branches:
+      - master
+  pull_request:
+
+jobs:
+
+  lint:
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v2
+      - name: install deps
+        run: |
+          sudo apt -q update
+          sudo apt -q install libseccomp-dev
+      - uses: golangci/golangci-lint-action@v2
+        with:
+          # must be specified without patch version
+          version: v1.36
+          # Only show new issues for a pull request.
+          only-new-issues: true
+
+  shfmt:
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/checkout@v2
+    - name: vars
+      run: |
+        echo "VERSION=3.2.0" >> $GITHUB_ENV
+        echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+    - name: cache go mod and $GOCACHE
+      uses: actions/cache@v2
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-shfmt-${{ env.VERSION }}
+        restore-keys: ${{ runner.os }}-shfmt-
+    - name: install shfmt
+      run: |
+        command -v shfmt || \
+          (cd ~ && GO111MODULE=on time go get mvdan.cc/sh/v3/cmd/shfmt@v$VERSION)
+    - name: shfmt
+      run: make shfmt
+
+  shellcheck:
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v2
+      - name: vars
+        run: |
+          echo 'VERSION=v0.7.1' >> $GITHUB_ENV
+          echo 'BASEURL=https://github.com/koalaman/shellcheck/releases/download' >> $GITHUB_ENV
+          echo 'SHA256SUM=1e8499d6f90481bfa2af7a4dce86dd9bcba5c0fbd88bf4793b34ec679c8bb98a' >> $GITHUB_ENV
+          echo ~/bin >> $GITHUB_PATH
+      - name: install shellcheck
+        run: |
+          mkdir ~/bin
+          curl -sSfL --retry 5 $BASEURL/$VERSION/shellcheck-$VERSION.linux.x86_64.tar.xz |
+            tar xfJ - -C ~/bin --strip 1 shellcheck-$VERSION/shellcheck
+          sha256sum ~/bin/shellcheck | grep -q $SHA256SUM
+          # make sure to remove the old version
+          sudo rm -f /usr/bin/shellcheck
+      - uses: lumaxis/shellcheck-problem-matchers@v1
+      - name: shellcheck
+        run: |
+          make shellcheck
+
+  deps:
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/checkout@v2
+    - name: cache go mod and $GOCACHE
+      uses: actions/cache@v2
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go.sum-${{ hashFiles('**/go.sum') }}
+        restore-keys: ${{ runner.os }}-go.sum-
+    - name: verify deps
+      run: make verify-dependencies
+
+
+  commit:
+    runs-on: ubuntu-20.04
+    # Only check commits on pull requests.
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: get pr commits
+        id: 'get-pr-commits'
+        uses: tim-actions/get-pr-commits@v1.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: check subject line length
+        uses: tim-actions/commit-message-checker-with-regex@v0.3.1
+        with:
+          commits: ${{ steps.get-pr-commits.outputs.commits }}
+          pattern: '^.{0,72}(\n.*)*$'
+          error: 'Subject too long (max 72)'
+
+
+  cross:
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/checkout@v2
+      # We have to run this under Docker as Ubuntu (host) does not support all
+      # the architectures we want to compile test against, and Dockerfile uses
+      # Debian (which does).
+      #
+      # XXX: as currently this is the only job that is using Docker, we are
+      # building and using the runcimage locally. In case more jobs running
+      # under Docker will emerge, it will be good to have a separate make
+      # runcimage job and share its result (the docker image) with whoever
+      # needs it.
+    - uses: satackey/action-docker-layer-caching@v0.0.11
+      continue-on-error: true
+    - name: build docker image
+      run: make runcimage
+    - name: cross
+      run: make cross
+
+
+  misc:
+    runs-on: ubuntu-20.04
+    steps:
+    - name: checkout
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+    - name: install deps
+      run: |
+        sudo apt -qq update
+        sudo apt -qq install libseccomp-dev indent
+    - name: make validate
+      run: make validate
+    - name: make release
+      run: make release
