@@ -12,3 +12,5 @@ The repository includes modified copies of the following projects. Preserve thei
 | containerd | `643fa70a7d7716e1e8138a3f2b2ce0532886676c` |
 
 Local implementation changes are included directly in the source files. Vendored dependencies retain their upstream notices. The protobuf descriptor under `criu/images/google/protobuf/` retains its original copyright and license header.
+
+SwiftBaton-K adds a Linux 5.15.167 MM/PTE patch and a kernel module under `kernel/`. Linux retains its GPL-2.0 licensing; the module declares its license in its source. Both CRIU trees derive from the CRIU baseline above. The runtime source trees are retained from the published artifact; the prepared hosts currently run containerd 1.5.8 and runc 1.0.3, which are not identical to the included development checkout baselines.

@@ -19,6 +19,7 @@
 #include "version.h"
 #include "crtools.h"
 #include "cr_options.h"
+#include "common/sb-numa.h"
 #include "external.h"
 #include "util.h"
 #include "criu-log.h"
@@ -945,6 +946,14 @@ pr_warn("执行到这\n");
 			}else if (!strncmp(buf, "copy-workers=", 13)) {
 				opts.sb_copy_workers = atoi(buf + 13);
 				if (!opts.sb_copy_workers || opts.sb_copy_workers > 32) goto exit;
+			}else if (!strncmp(buf, "serial-ps-prepare=", 18)) {
+                opts.sb_serial_ps_prepare = !strncmp(buf + 18, "yes", 3);
+            }else if (!strncmp(buf, "defer-fault-credits=", 20)) {
+                opts.sb_defer_fault_credits = !strncmp(buf + 20, "yes", 3);
+			}else if (!strncmp(buf, "stage-numa-node=", 16)) {
+                if (sb_numa_parse_node(buf + 16, &opts.sb_stage_numa_node)) goto exit;
+			}else if (!strncmp(buf, "compact-bg-wire=", 16)) {
+                opts.sb_compact_bg_wire = !strncmp(buf + 16, "yes", 3);
 			}else if (!strncmp(buf, "bg-segment-pages=", 17)) {
                 opts.sb_bg_segment_pages = atoi(buf + 17);
                 if (opts.sb_bg_segment_pages && (opts.sb_bg_segment_pages < 8 || opts.sb_bg_segment_pages > 256)) goto exit;
@@ -1107,6 +1116,14 @@ static int restore_using_req(int sk, CriuOpts *req)
 			}else if (!strncmp(buf, "copy-workers=", 13)) {
 				opts.sb_copy_workers = atoi(buf + 13);
 				if (!opts.sb_copy_workers || opts.sb_copy_workers > 32) goto exit;
+			}else if (!strncmp(buf, "serial-ps-prepare=", 18)) {
+                opts.sb_serial_ps_prepare = !strncmp(buf + 18, "yes", 3);
+            }else if (!strncmp(buf, "defer-fault-credits=", 20)) {
+                opts.sb_defer_fault_credits = !strncmp(buf + 20, "yes", 3);
+			}else if (!strncmp(buf, "stage-numa-node=", 16)) {
+                if (sb_numa_parse_node(buf + 16, &opts.sb_stage_numa_node)) goto exit;
+			}else if (!strncmp(buf, "compact-bg-wire=", 16)) {
+                opts.sb_compact_bg_wire = !strncmp(buf + 16, "yes", 3);
 			}else if (!strncmp(buf, "bg-segment-pages=", 17)) {
                 opts.sb_bg_segment_pages = atoi(buf + 17);
                 if (opts.sb_bg_segment_pages && (opts.sb_bg_segment_pages < 8 || opts.sb_bg_segment_pages > 256)) goto exit;

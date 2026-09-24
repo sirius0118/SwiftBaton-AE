@@ -1,247 +1,210 @@
 # SwiftBaton Artifact Evaluation
 
-Source code and experiment scripts for **SwiftBaton: Dependency-Aware Staged Reconstruction for Live Migration of Stateful Containers**, ACM ATC 2026.
+Source code for **SwiftBaton: Dependency-Aware Staged Reconstruction for Live Migration of Stateful Containers**, ACM ATC 2026.
 
-This artifact runs a Redis container on a source machine, generates continuous YCSB traffic from a client machine, migrates the container to a destination machine using SwiftBaton-U, and validates the restored application. The workflow includes pre-transfer, demand-fault transfer, adjacent prefetch, and heat-ordered background transfer. A separate stress profile adds COW descendants and dynamic memory mappings.
+This artifact migrates a running Redis container from **knode2 to knode3**, while the modified YCSB client on **knode1** continues issuing requests. It includes both **SwiftBaton-U** and **SwiftBaton-K**, with pre-transfer, demand-fault transfer, adjacent prefetch, and hot-first background batch transfer. K uses a patched host kernel and a loadable module for direct RDMA reads and anonymous-page installation.
 
-This repository contains source code and instructions. Build outputs and experiment results are generated locally.
+The repository contains source and instructions. It does not contain precompiled programs, historical measurements, checkpoint images, or development reports. Build products are generated under `build/` and ignored by Git. Run results are written **outside the repository**, by default to `/home/k8s/SwiftBaton-AE-work/`.
 
-## 1. Source layout
+## 1. Contents
 
-| Path | Contents |
+| Path | Purpose |
 | --- | --- |
-| `criu/` | Modified CRIU and the AccessCollector kernel-module source |
-| `Fluid/` | Fluid management-plane source |
-| `YCSB/` | Modified YCSB, including millisecond sampling and Redis retry handling |
-| `dependencies/docker-ce/` | Custom Docker engine and CLI source |
-| `dependencies/runc/` | Custom low-level container runtime source |
-| `dependencies/containerd/` | Containerd source |
-| `DualDriver/script/` | Migration driver, cutover helper, validators, cleanup, and memory fixtures |
-| `scripts/` | Build, deployment, experiment profiles, preflight, and analysis scripts |
-| `configs/lab.json` | Required topology and Redis image references |
+| `criu/` | Current SwiftBaton-U CRIU implementation |
+| `criu-k/` | Current SwiftBaton-K CRIU integration, including the userspace coordinator and restore plan |
+| `kernel/` | Linux 5.15.167 MM/PTE patch, matching configuration, module, UAPI, and isolated kernel build helper |
+| `YCSB/` | Modified Java client; millisecond throughput sampling and Redis reconnect/retry behavior |
+| `scripts/ae/u/`, `scripts/ae/k/` | Mode-specific migration drivers, cutover, data checks, and scoped cleanup |
+| `scripts/` | Build, deployment, execution, and analysis entry points |
+| `configs/` | Accepted profiles and the prepared-cluster topology |
+| `dependencies/` | Existing custom Docker and runtime source trees |
+| `Fluid/` | Original management-plane source; not needed for this SSH-based AE entry point |
 
-The AE entry point is `scripts/run.sh`. It coordinates Docker and CRIU directly over SSH. Fluid is included for source inspection; starting its legacy API server or agents is not part of this workflow. Use the state-specific cleanup below rather than `Fluid/clean.sh`.
+The two CRIU trees intentionally remain separate: the U implementation stays unchanged while K adds its own coordinator and MM integration. Do not mix binaries from different trees or builds between hosts. See [implementation details](docs/IMPLEMENTATION.md), [kernel setup](docs/KERNEL.md), and [component licenses](THIRD_PARTY.md).
 
-## 2. Machines and prerequisites
+## 2. Prepared cluster
 
-Use three x86-64 Linux machines with a working RDMA network. During AE, request an account and a reserved experiment window through the submission's private discussion channel. Run the coordinator commands on **knode2**.
+Request access and a reserved three-node time window through the artifact submission's private discussion channel. Run the following coordinator commands on **knode2** as the prepared `k8s` account.
 
-| Role | SSH alias | Hostname | Address |
+| Role | SSH alias | Address | Current kernel |
 | --- | --- | --- | --- |
-| YCSB client | `knode1` | `skv-node1` | `10.0.0.61` |
-| Migration source and coordinator | `knode2` | `skv-node2` | `10.0.0.62` |
-| Migration destination | `knode3` | `skv-node3` | `10.0.0.63` |
+| Client | `knode1` | `10.0.0.61` | Java workload host |
+| Source | `knode2` | `10.0.0.62` | `5.15.167` |
+| Destination | `knode3` | `10.0.0.63` | `5.15.167-swiftbaton-k1` |
 
-The supplied driver targets this topology, the directory `/home/k8s/SwiftBaton-AE` on every host, RDMA device `mlx5_1` (port 1), and network interface `ens4f1`. Addresses and device selection also occur in the implementation; editing the JSON alone does not port it to another network.
+The current setup has two NUMA nodes and ConnectX-6 RDMA, device `mlx5_1`, port 1, GID index 3, interface `ens4f1`. The driver and parts of U's transport use this fixed lab topology; editing `configs/lab.json` alone does not port the implementation. Both migration hosts need the same container image and the same CRIU binary for the selected mode.
 
-Requirements:
+Prerequisites:
 
-- Ubuntu 20.04 build environment; source and destination use Linux `5.15.167`, with userfaultfd, privileged pagemap/soft-dirty access, page-idle tracking, and usable BPF syscall tracepoints. Reserve compatible hardware and kernels before evaluation.
-- The custom Docker/containerd/runc stack installed on both migration hosts, with Docker experimental mode enabled. Stock Docker is insufficient for the checkpoint/restore coordination used here. See Section 4.
-- Noninteractive SSH from knode2 to knode1/knode3, noninteractive `sudo -n`, and Docker access on the migration hosts. Configure SSH aliases and known hosts before running the scripts.
-- Java 8 on knode1 and on the build host; Maven on the build host; Python 3.8+, SSH, rsync, redis-cli, iptables, conntrack, RDMA tools, and `mlnx_qos` from the NIC software stack.
-- Reserve ports `6390`, `12346`, and `4568`, subnet `172.30.52.0/24`, and container address `172.30.52.3`. The cutover helper also opens an ephemeral TCP listener on knode1.
-- Allow at least 10 GiB of free experiment storage and 8 GiB available RAM on each migration host as a starting allowance; additional diagnostic/stress runs may need more. These are planning allowances, not measured minimum requirements.
+- Noninteractive SSH from knode2 to knode1/knode3, known host keys, `sudo -n`, and Docker access.
+- The prepared custom Docker/containerd/runc stack and Docker experimental checkpoint support. Do not replace the shared services for a reviewer run.
+- For U: userfaultfd, privileged pagemap/soft-dirty access, page-idle tracking, and BPF syscall tracepoints for the selected VMA-cache profile. The older AccessCollector module is not required by this profile.
+- For K: the patched destination kernel and matching, already-loaded `swiftbaton_k` module on both migration hosts, with `session_dispatch=1`. The source may retain its stock kernel. [Kernel setup](docs/KERNEL.md) is an administrator provisioning step.
+- Python 3.8+, NumPy/Matplotlib, GCC, make, Java 8, Maven, rsync, numactl, redis-cli, iptables, conntrack, RDMA tools and `mlnx_qos`.
+- Ports 6390, 12346 and 4568, Docker subnet `172.30.52.0/24`, and container IP `172.30.52.3`; an ephemeral client cutover port is also used. Run one experiment at a time.
+- For the large profile, reserve at least 16 GiB available RAM per migration host and adequate tmpfs space. Keep at least 10 GiB free for local build/results; building a complete kernel/OFED tree needs substantially more disk space.
 
-Run one experiment at a time: the runtime uses shared migration coordination paths. The default image-transfer mode uses RDMA; SSHFS is not needed for the documented profiles.
+The prepared hosts use containerd 1.5.8 and runc 1.0.3. The development runtime source baselines included by the original artifact are not exact reconstructions of every installed daemon. The **supported reviewer quickstart is the prepared cluster**. For a new cluster, see [runtime provisioning](docs/RUNTIME.md); fresh-cluster installation is not an automatically validated path.
 
-## 3. Download and build
-
-On knode2, clone into the required directory:
+## 3. Clone and compile
 
 ```bash
 cd /home/k8s
 git clone https://github.com/sirius0118/SwiftBaton-AE.git
 cd SwiftBaton-AE
-python3 scripts/preflight.py --offline
 ```
 
-For a machine that needs build dependencies, inspect and then install the Ubuntu packages:
+If the prepared directory already exists, use it instead of cloning over it. For a new Ubuntu 20.04 build host, inspect the package installation commands and run them if needed:
 
 ```bash
 bash scripts/install-build-deps.sh
 bash scripts/install-build-deps.sh --execute
 ```
 
-The package installer does not provision the kernel, RDMA drivers, or custom container runtime. On an author-provided machine, these prerequisites may already be installed.
-
-Build CRIU, the modified YCSB client and the static memory fixture:
+Build from source on knode2:
 
 ```bash
-bash scripts/build.sh all
-python3 scripts/preflight.py --offline --built
-```
-
-The final check must report `"ok": true`. The build uses two CRIU compiler jobs by default; override with `AE_BUILD_JOBS`. Maven downloads its dependencies and needs network access on the first build. No system binary is replaced, kernel module loaded, or workload started by these commands.
-
-You can rebuild a component separately:
-
-```bash
-bash scripts/build.sh criu
+bash scripts/build.sh U
+bash scripts/build.sh K
 bash scripts/build.sh ycsb
 bash scripts/build.sh fixture
 ```
 
-Generated files stay in `criu/`, `YCSB/*/target/`, and `DualDriver/script/memory_fixture` and are ignored by Git. The runner uses these newly built files. Do not substitute an upstream YCSB binary: its sampling and retry behavior differ.
+These commands compile in separate copies under `build/`. They do not install system programs, load modules, start containers, or reboot. `SB_BUILD_JOBS` controls compiler parallelism (default 12). Maven needs access to its dependencies on the first build. The client classpath includes `core/target/classes`, `redis/target/classes`, and the dependency JAR directories produced by Maven. Do not substitute upstream YCSB.
 
-The optional legacy AccessCollector module can be built with `bash scripts/build.sh module`, after installing headers for the running kernel. The documented U profile uses page-idle/soft-dirty tracking and does not install or load this module.
+Kernel/module builds are documented separately in [docs/KERNEL.md](docs/KERNEL.md). They are unnecessary for a reviewer using the already-provisioned K hosts.
 
-## 4. Container runtime setup
+## 4. Stage and inspect
 
-**Author-provided cluster:** use the preconfigured custom Docker/containerd/runc services. Do not replace or restart the shared services to evaluate this artifact.
-
-**Independent cluster:** an administrator must build and provision the custom runtime sources before following the remaining sections. Component build entry points are:
+Use the same absolute repository path on all three hosts. Preview, then copy source and locally compiled programs to knode1 and knode3:
 
 ```bash
-# Compile runc; requires Go and libseccomp development headers.
-make -C dependencies/runc
-
-# Compile containerd; see its BUILDING.md for the required Go toolchain.
-make -C dependencies/containerd
-
-# Compile the Docker engine using its containerized build environment.
-make -C dependencies/docker-ce/components/engine binary
-
-# Compile the Docker CLI using Docker Buildx.
-(cd dependencies/docker-ce/components/cli && docker buildx bake)
+python3 scripts/deploy.py
+python3 scripts/deploy.py --execute
 ```
 
-Use the included sources and component build documentation. Install the resulting binaries into the paths used by the host's Docker service, configure Docker experimental mode, and provision RDMA/memlock and kernel support. This is an administrator setup step, separate from running the experiment. The repository does not automatically overwrite Docker services.
+Deployment checks that the migration hosts are idle. It leaves daemon services and installed CRIU symlinks unchanged. It copies built programs directly between machines; these files are never added to Git.
 
-The custom runtime must support the coordination files under `/var/lib/criu/migrate_<PID>/`, including `config_ck.cfg` and `config_res.cfg`. The prepared-cluster quickstart assumes this integration is already installed; successful compilation alone does not establish that a fresh cluster is configured correctly.
+The prepared Redis image is selected by its immutable local image ID in `configs/lab.json`. If using another compatible image, place the same image on both hosts and set `SB_REDIS_IMAGE` to its immutable ID or digest. The runner checks that it resolves to the same image ID on both hosts. It does not silently pull `latest`.
 
-## 5. Deploy and prepare the workload image
-
-Preview commands omit `--execute`. Run the executing forms only in your reserved machine window.
+Check both modes without starting a workload or changing the CRIU selection:
 
 ```bash
-# Read-only inspection; does not require the package on peers yet.
-python3 scripts/preflight.py --inspect
-
-# Copy sources and locally built CRIU/YCSB/fixture to knode1 and knode3.
-python3 scripts/deploy.py stage
-python3 scripts/deploy.py stage --execute
-
-# Download the pinned Redis 7.4.0 amd64 image and copy it to knode3.
-python3 scripts/deploy.py image
-python3 scripts/deploy.py image --execute
+python3 scripts/run.py U --check
+python3 scripts/run.py K --check
 ```
 
-The image is an immutable public Docker Hub reference in `configs/lab.json`. The script checks its image ID and transfers the same image with `docker save`/`docker load`. No Redis container is started during image preparation.
+Each command must exit zero and report `"ok": true`. This checks binary equality, basic host readiness, client build products, image identity, and module availability. At actual K startup, the driver additionally checks the kernel UAPI/features, RDMA device/GID and loaded mode. Resolve errors before running an experiment.
 
-Select the CRIU binary compiled from this checkout:
+## 5. Minimal end-to-end run
+
+A command without `--execute` or `--check` prints a local plan and does not access peers:
 
 ```bash
-python3 scripts/deploy.py activate
-python3 scripts/deploy.py activate --execute
-python3 scripts/preflight.py --ready
+python3 scripts/run.py U --profile smoke
+python3 scripts/run.py K --profile smoke
 ```
 
-Activation changes the existing `/usr/bin/criu` symlink on knode2/knode3 and records its previous target in `runtime-backup/`. It refuses to replace a regular system file or proceed with active CRIU processes or retained AE containers. On a fresh cluster, the administrator must first arrange this runtime integration. Preflight checks that installed and deployed CRIU binaries match the locally built binary, that the image is present, and that required services, kernel features and ports are available. Resolve every error before proceeding.
-
-## 6. Run the minimal migration
-
-Preview the complete profile:
+Run each mode sequentially:
 
 ```bash
-bash scripts/run.sh smoke
+python3 scripts/run.py U --profile smoke --execute
+python3 scripts/run.py K --profile smoke --execute
 ```
 
-Start the workload and real container migration:
+The smoke profile uses 100,000 records with a 1,024-byte value, 16 clients, a 45-second workload, a 10-second warmup before migration, and an 8 MiB immutable canary. Reads/updates are each 50%, with the configured YCSB request distribution. Allow several minutes for loading, post-migration measurement, and validation.
 
-```bash
-bash scripts/run.sh smoke --execute
-```
+The runner:
 
-This loads 100,000 records with a 1,024-byte field, starts a 45-second workload with 16 client threads, waits 10 seconds before migration, and includes an 8 MiB immutable canary. Reads and updates each account for 50% of operations, using a Zipfian distribution. Allow several minutes for loading and validation in addition to the workload duration.
+1. Acquires the local experiment lock and confirms both hosts are idle.
+2. Temporarily selects the newly built U or K CRIU on both hosts, then verifies root/Docker/containerd resolve that exact binary.
+3. Creates labelled Redis containers, loads data, and starts YCSB on knode1.
+4. Prepares PS state, checkpoints on knode2, transfers CRIU images through RAM/RDMA, restores on knode3, and redirects client traffic with an experiment-specific iptables rule.
+5. Completes page transfer, retires the source, verifies records/sentinel/canary, and analyzes throughput/recovery. K requires all remote PTE markers and background work to drain before source retirement.
+6. Verifies image checksums while checkpoint images still exist, cleans the experiment, and restores the previous CRIU symlinks.
 
-The driver creates labelled containers, loads Redis, starts YCSB on knode1, checkpoints the source, transfers images over RDMA, restores on knode3, completes page transfer and redirects client traffic. It retires the source and checks the destination data. It does not automatically delete the run's resources, so checkpoint images remain available for verification.
-
-At exit, the driver prints:
+Success ends with `SWIFTBATON_AE_PASS mode=U` or `mode=K`. The command prints both:
 
 ```text
-STATE=/home/k8s/SwiftBaton-AE/ae-work/sb_ae_YYYYMMDD_HHMMSS/state.json
+STATE=/home/k8s/SwiftBaton-AE-work/sb_ae_YYYYMMDD_HHMMSS/state.json
+RESULT=/home/k8s/SwiftBaton-AE-work/driver-U-YYYYMMDD_HHMMSS/result.json
 ```
 
-Copy the **exact printed path** for verification and cleanup. A state path is also printed after a failed run and does not by itself indicate success.
+A printed state path alone does not indicate success. `result.json` must contain `success: true`, zero driver/analysis/cleanup return codes, and successful restoration on both hosts. The corresponding state must report successful migration, source retirement, and data checks. Keep results outside the source repository.
 
-## 7. Verify the result
+## 6. Larger Redis experiment and parameters
 
-Set `STATE` to the path printed by your run. Verify images **before cleanup**, while source/destination checkpoint files still exist:
+After smoke passes, run one mode at a time:
 
 ```bash
-STATE=/home/k8s/SwiftBaton-AE/ae-work/sb_ae_YYYYMMDD_HHMMSS/state.json
-python3 DualDriver/script/verify_images.py "$STATE" > "$(dirname "$STATE")/image-verification.json"
-python3 scripts/check_result.py "$STATE"
+python3 scripts/run.py U --profile redis --execute
+python3 scripts/run.py K --profile redis --execute
 ```
 
-Expected results:
+This uses **500,000 records × 10 KiB**, 32 clients, a 90-second workload, and an 8 MiB canary. The total Redis RSS is larger than the raw value size. Exact options are in `configs/profiles.json`.
 
-- `check_result.py` exits zero and prints `"ok": true`.
-- The state contains `success: true` and `source_retired: true`.
-- Every requested record is checked, with zero missing or wrong-length values; the sentinel is correct.
-- The immutable canary passes bytewise verification.
-- Checkpoint image hashes match, with `equal: true` and `files_checked > 0`.
-- For the stress profile, memory-child outcomes also pass.
+| Setting | U | K |
+| --- | --- | --- |
+| NUMA node | 1 | 0 |
+| Demand | 1 worker | 2 independent QP/CQ slots |
+| Prefetch | 1 worker, window 4 | 2 session workers |
+| Background | 4 copy / 4 install workers, 16-page batches | 4 session workers, 32-page RDMA batches |
+| PS budget | 8 GiB | 2 GiB; 64 MiB PS chunks |
+| Final MR registration | U path | 4 workers |
 
-The record scan validates presence and field length; it does not checksum every concurrently updated value or establish full application linearizability. The client includes reconnect/retry handling. This artifact's scope is the U migration workflow and correctness checks; the commands do not reproduce every paper figure or the K path.
+These retain each implementation's accepted configuration and favor lower fault latency. They are **not a controlled U-versus-K comparison**: NUMA placement, PS budget, and timing boundaries differ. For a controlled comparison, equalize those settings and report the actual parameters. Do not claim a speedup from the default profiles alone.
 
-## 8. Larger and stress experiments
+To change a profile, edit `configs/profiles.json`, stage again, and retain that configuration alongside the generated results. Individual driver options are listed by `python3 scripts/ae/u/run_ae.py --help` and the corresponding K command. The main wrapper provides locking, binary selection, validation and cleanup; invoking a driver directly bypasses that wrapper.
 
-After verifying and cleaning the previous run, select one profile:
+## 7. RDMA bandwidth limit
 
-| Profile | Records | Duration | Warmup | Threads | Additional coverage |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `smoke` | 100,000 | 45 s | 10 s | 16 | 8 MiB canary |
-| `redis` | 1,000,000 | 90 s | 15 s | 32 | 8 MiB canary |
-| `stress` | 1,000,000 | 90 s | 15 s | 32 | Canary, 3 memory parents, 3 COW descendants, dynamic mappings |
+The prepared cluster uses a 25 Gbps hardware transmit cap on both hosts. An administrator can inspect or change it with:
 
 ```bash
-bash scripts/run.sh redis --execute
-# Verify and clean that run before starting the next one.
-bash scripts/run.sh stress --execute
+sudo mlnx_qos -i ens4f1 -a
+sudo mlnx_qos -i ens4f1 --prio_tc=1,1,1,1,1,1,1,1 --ratelimit=0,25,0,0,0,0,0,0
 ```
 
-Omit `--execute` to preview either command. The stress profile uses 64 MiB and four workers per memory parent and exercises changing mappings and fork/COW behavior. See `python3 DualDriver/script/run_ae.py --help` for individual options.
+Apply the configuration on both migration hosts. The physical link remains 100 Gbps. All priorities share TC1, including ordinary Ethernet traffic on this interface. This is **not** hardware prioritization of demand faults; CPU scheduling and independent QPs are separate mechanisms. The commands do not configure persistence across reboot. Coordinate changes with the cluster owner.
 
-To analyze your newly generated results:
+## 8. Results and metric definitions
+
+The wrapper runs the analyzers automatically. To reanalyze a saved run:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements-analysis.txt
-.venv/bin/python scripts/analyze_run.py "$(dirname "$STATE")"
-python3 scripts/analyze_phases.py "$(dirname "$STATE")"
+RUN=/home/k8s/SwiftBaton-AE-work/sb_ae_YYYYMMDD_HHMMSS
+python3 scripts/analyze_run.py "$RUN"
+python3 scripts/analyze_recovery.py "$RUN"
+# U transport and fault timing:
+python3 scripts/analyze_transport.py "$RUN"
+python3 scripts/analyze_faults.py "$RUN"
 ```
 
-Outputs include throughput CSVs, `metrics.json`, `throughput.png`, and internal phase measurements. The log analysis assumes UTC+8 timestamps; use consistent host timezones. Zero-throughput sampling intervals are not exact CRIU freeze durations. No reference experiment records are bundled.
+Use the exact run directory printed by the runner. Generated files include throughput CSV/plots, `metrics.json`, `recovery-metrics.json`, raw logs, and mode-specific validation. The log parser assumes UTC+8; keep the documented host timezone consistent.
 
-## 9. Cleanup and restore
+- **Downtime:** the consecutive zero-throughput client samples are an observed interruption at 10 ms resolution, not an exact CRIU freeze interval. Internal cross-host timestamps require clock-offset measurement before comparing them.
+- **TTR50/80/90:** recovery to 50/80/90% of this run's **destination throughput after migration has fully finished**, sustained for one second. Report the stable-reference validity checks and the chosen 100 ms or 500 ms window; the analyzer saves both. Do not substitute source throughput when hosts differ.
+- **Full migration time:** checkpoint-command start through verified source retirement, including PS and coordination.
+- **U fault latency:** demand enqueue to installation, with all-lane UFFD waits reported separately. **K fault latency:** kernel bridge callback duration, including READY hits/waiting/installation; it is not identical to the count or latency of demand RDMA reads. K histogram quantiles are intervals. Neither measurement is the complete application instruction-to-return time.
+- **Correctness:** all indexed keys are checked for presence/length, plus a sentinel and bytewise immutable canary. This is not a full checksum of every concurrently updated YCSB value or proof of application linearizability.
 
-Preview, then clean only your run using its exact state file:
+No historical measurements are bundled or substituted for new runs.
+
+## 9. Failure recovery
+
+The wrapper attempts scoped cleanup and restoration even when analysis fails. Inspect its `result.json` and `cleanup.log`. If a run is interrupted before that cleanup finishes, use only its exact state path:
 
 ```bash
-python3 DualDriver/script/cleanup_ae.py "$STATE"
-python3 DualDriver/script/cleanup_ae.py "$STATE" --execute
+python3 scripts/ae/u/cleanup_ae.py /home/k8s/SwiftBaton-AE-work/sb_ae_YYYYMMDD_HHMMSS/state.json
+# Use scripts/ae/k/cleanup_ae.py for a K run.
 ```
 
-Cleanup uses recorded process IDs, labelled containers, owned mounts and the run-specific NAT rule. Results remain in `ae-work/`. The shared Docker network and global CRIU logs may remain for reuse. Use this procedure after a failed run as well, and inspect any reported cleanup errors before another experiment.
+These commands execute cleanup; they do not merely preview it. They check recorded ownership, remove the run-specific NAT rule and owned containers/images, and retain logs. The K cleanup destroys the owned destination before dropping source controllers/MRs. Do not use global Docker pruning, `iptables -F`, or `killall criu`.
 
-After all your runs are cleaned and the nodes are idle, restore the previous CRIU symlinks:
+If `restored` reports an error, inspect `/usr/bin/criu` on both hosts and compare it with `previous` in the wrapper's result. Restore the previous link only after the exact experiment has been cleaned and no active CRIU remains. A concurrently changed link is deliberately not overwritten. Do not restart shared daemons or reboot to solve a routine path mismatch.
 
-```bash
-python3 scripts/deploy.py restore
-python3 scripts/deploy.py restore --execute
-```
+## 10. Current scope
 
-If a symlink has been changed since activation, restoration stops for manual inspection.
+The implementation includes all four page-transfer paths and host K migration. It does not yet provide NIC hardware demand priority, K adjacent prefetch across MR boundaries, arbitrary FD semantics (including the documented EFD_SEMAPHORE/queued UDP/timerfd restrictions), or automatic source recovery after a fatal migration-controller failure. The K source-retirement protections prevent unsafe reuse of exposed source pages; a fatal controller failure may terminate the source process.
 
-## 10. Troubleshooting and support
-
-- **Missing classes/binaries:** run `scripts/build.sh all`, then repeat staging. The public checkout contains no precompiled binaries.
-- **Maven download failures:** check network access and Java 8; rerun the YCSB build. Maven offline mode works only after all dependencies have been cached.
-- **Readiness failure:** inspect the reported host and prerequisite. A running CRIU process or retained AE container can belong to another experiment; reserve the nodes and clean only your own run.
-- **Image missing:** rerun the image preparation step. Source and destination must use the same configured image ID.
-- **Dump/restore failure:** retain `state.json`, driver output and the dump/restore/pageclient logs in your run directory. Check custom-runtime installation, kernel features and RDMA connectivity.
-- **Image verification failure after cleanup:** image verification must precede cleanup because it reads the live checkpoint files.
-
-Use the AE submission's private discussion channel for machine access and evaluation support; public code issues can be filed in this repository. Preserve upstream licenses and notices; see [THIRD_PARTY.md](THIRD_PARTY.md).
+This workflow reproduces the implementation and collects the required metrics. It does not promise every paper figure, a fixed downtime threshold, or a theoretical minimum fault latency. Use the private AE discussion for access or support; provide the failing command and the generated state/result files privately rather than committing them to the repository.

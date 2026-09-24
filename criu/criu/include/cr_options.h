@@ -165,6 +165,10 @@ struct cr_options {
 	unsigned sb_fault_workers, sb_prefetch_workers;
 	unsigned sb_batch_pages;
 	unsigned sb_bg_segment_pages; /* 0: one write; 8..256: maximum RDMA write size in pages. */
+	bool sb_compact_bg_wire;
+	int sb_stage_numa_node;
+	bool sb_serial_ps_prepare; /* Ablation: serial full memset of a new PS receive buffer. */
+	bool sb_defer_fault_credits; /* Accept demand before TX credit; coalesce consumed-ring acknowledgements. */
 	unsigned sb_precopy_workers;
 	unsigned sb_validation_workers;
 	unsigned sb_precopy_limit_mb;

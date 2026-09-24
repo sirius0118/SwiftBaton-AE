@@ -88,6 +88,11 @@ metrics = dict(sample_count=len(raw), observed_duration_seconds=raw[-1][1],
                zero_sample_span_ms=(zero_end-zero_start)*1000,
                ycsb_return_counts=return_counts, events_elapsed_seconds=event_times,
                note='Zero span describes client sampling, not CRIU freeze time. Missing samples are not filled.')
+retired = event_times.get('source_retired', math.nan)
+metrics['full_migration_seconds'] = retired - checkpoint
+metrics['full_migration_definition'] = ('Source checkpoint command start to verified source retirement. '
+    'K uses the source command completion timestamp after drain/ACK/MR revocation; '
+    'this is a conservative control-plane interval, including PS and orchestration.')
 (root / 'metrics.json').write_text(json.dumps(metrics, indent=2) + '\n')
 
 plt.rcParams.update({'font.size': 10, 'axes.spines.top': False, 'axes.spines.right': False})

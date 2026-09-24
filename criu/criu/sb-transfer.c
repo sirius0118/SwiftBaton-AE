@@ -27,6 +27,7 @@
 #include "sb-precopy.h"
 #include "sb-sched.h"
 #include "sb-transfer.h"
+#include "sb-trace.h"
 #include "sb-rdma-tx.h"
 #include "sb-rdma-write.h"
 #include "sb-install-queue.h"
@@ -50,7 +51,7 @@ static struct span *spans;
 static size_t span_count, begin_span[MAX_PROCESS], end_span[MAX_PROCESS];
 static uint64_t source_pages, seed_pages;
 static struct sb_sched *scheduler;
-static bool feed_done, source_done, client_done;
+static bool feed_done, source_done, source_demand_drained, client_done;
 static bool source_seed_committing;
 static pthread_mutex_t pf_client_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool client_producers_done;
@@ -69,7 +70,7 @@ struct fault_trace {
     unsigned linux_tid, origin_pid;
     const char *role;
     struct fault_event *events;
-    unsigned count;
+    unsigned count, capacity;
     uint64_t dropped;
     struct install_event *installs;
     unsigned install_count;
@@ -93,6 +94,7 @@ static bool ft_installers_stop;
 _Static_assert(SB_INSTALL_QUEUE_SLOTS==PREFETCH_BUFFER_SIZE,"FT descriptor capacity");
 _Static_assert(SB_BG_SLOTS==TRANSFER_BUFFER_SIZE && SB_BG_MAX_PAGES==MAX_BATCH,"BG descriptor capacity");
 enum { PF_TARGET_DISPATCH=23 };
+enum { PF_SOURCE_OBSERVE=24 };
 static struct fault_trace target_pf_dispatch_trace;
 static struct pf_installer {
     struct fault_trace trace;
@@ -142,13 +144,16 @@ static void fault_trace_bind(struct fault_trace *t,const char *role,unsigned pid
     if (!t->events && !t->installs) return;
     t->linux_tid=syscall(SYS_gettid);t->origin_pid=pid;t->role=role;
 }
-static void fault_trace_init(struct fault_trace *t)
+static void fault_trace_init_capacity(struct fault_trace *t,unsigned capacity)
 {
     if (!opts.sb_fault_trace) return;
-    t->events=mmap(NULL,FAULT_TRACE_CAPACITY*sizeof(*t->events),PROT_READ|PROT_WRITE,
+    t->capacity=capacity;
+    t->events=mmap(NULL,(size_t)t->capacity*sizeof(*t->events),PROT_READ|PROT_WRITE,
         MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE,-1,0);
     if (t->events==MAP_FAILED) die("fault trace allocation");
 }
+static void fault_trace_init(struct fault_trace *t)
+{ fault_trace_init_capacity(t,FAULT_TRACE_CAPACITY); }
 /* Each target worker owns its entire buffer. Prefault before service starts;
  * no output, allocation or shared logging lock on the installation path. */
 static void target_trace_init(struct fault_trace *t)
@@ -181,7 +186,7 @@ static void install_trace_finish(struct fault_trace *t)
 static void fault_trace_note_at(struct fault_trace *t,unsigned stage,uint64_t pid,uint64_t address,uint64_t ns)
 {
     if (!t->events) return;
-    if (t->count==FAULT_TRACE_CAPACITY) { t->dropped++; return; }
+    if (t->count==t->capacity) { t->dropped++; return; }
     t->events[t->count++]=(struct fault_event){ns,address,pid,stage};
 }
 static void fault_trace_note(struct fault_trace *t,unsigned stage,uint64_t pid,uint64_t address)
@@ -191,14 +196,14 @@ static void fault_trace_finish(struct fault_trace *t,const char *side)
     if (t->linux_tid) pr_info("SB_TRACE_OWNER tid=%u role=%s pid=%u\n",t->linux_tid,t->role,t->origin_pid);
     install_trace_finish(t);
     if (!t->events) return;
-    pr_info("SB_PF_TRACE_SUMMARY side=%s count=%u dropped=%llu clock=host_monotonic\n",
-        side,t->count,(unsigned long long)t->dropped);
+    pr_info("SB_PF_TRACE_SUMMARY side=%s count=%u dropped=%llu capacity=%u clock=host_monotonic\n",
+        side,t->count,(unsigned long long)t->dropped,t->capacity);
     for (unsigned i=0;i<t->count;i++) {
         struct fault_event *e=&t->events[i];
         pr_info("SB_PF_TRACE side=%s stage=%u pid=%u address=%llu ns=%llu\n",side,e->stage,e->pid,
             (unsigned long long)e->address,(unsigned long long)e->ns);
     }
-    munmap(t->events,FAULT_TRACE_CAPACITY*sizeof(*t->events));t->events=NULL;
+    munmap(t->events,(size_t)t->capacity*sizeof(*t->events));t->events=NULL;
 }
 
 /* One owner per QP/CQ; only the synchronous ablation uses pf_client_lock. Never
@@ -261,6 +266,7 @@ int sb_parallel_negotiate(int socket)
     if (sync_transfer(socket, &local, sizeof(local), true) ||
         sync_transfer(socket, &remote, sizeof(remote), false)) return -1;
     if (memcmp(&local, &remote, sizeof(local)) ||
+        (opts.sb_defer_fault_credits && (!opts.sb_parallel_transfer || opts.sb_sync_fault_transport)) ||
         (!opts.sb_parallel_transfer && (opts.sb_no_prefetch || opts.sb_no_hot_first || opts.sb_no_pretransfer)) ||
         (opts.sb_parallel_transfer && (!opts.sb_u_precopy || !opts.sb_image_rdma))) {
         pr_err("SB_TRANSFER incompatible peer/options; requires u-precopy and image-rdma\n");
@@ -385,7 +391,28 @@ struct pf_pending {
     struct fast_pending fast;
     struct sb_job sent[MAX_THREADS];
     unsigned acknowledged;
+    bool request_observed;
+    unsigned request_credited;
 };
+/* The peer can publish at most MAX_THREADS-1 entries beyond the most recently
+ * advertised tail. Consequently equal ring positions mean no credit is due,
+ * even across wraps. This acknowledgement only releases consumed request
+ * slots; page ownership and response-buffer credit still require install ACK. */
+static bool request_credit_due(volatile struct page_request_set_t *wire,struct pf_pending *pending)
+{
+    for (int p=0;p<item_num;p++) if (pending[p].request_credited!=wire->tail[p]) return true;
+    return false;
+}
+static bool post_request_credit(struct sb_rdma_tx *tx,volatile struct page_request_set_t *wire,
+                                struct pf_pending *q,int p)
+{
+    unsigned tail=wire->tail[p];
+    if (q->request_credited==tail || sb_rdma_tx_pending(tx)==SB_RDMA_TX_DEPTH) return false;
+    struct sb_rdma_part part={NULL,&tail,sizeof(tail),offsetof(struct page_data_set_t,request_tail)+p*sizeof(int)};
+    fault_post(tx,&part,1,0);
+    q->request_credited=tail;
+    return true;
+}
 static int fast_submit(struct fast_pending *pending, int process, unsigned lane, const struct sb_job *job)
 {
     volatile struct sb_fast_queue *q = &SharedRegions->shregions[process]->fast[lane];
@@ -444,11 +471,15 @@ static void *source_demand(void *unused)
     bool holding = false, seed_ack = false;
     uint64_t seen_state[SB_PAGE_PRECOPY_PENDING + 1] = {0}, neighbors = 0, hints_queued = 0, hints_busy = 0;
     uint64_t requests_during_seed_ack = 0, responses_during_seed_ack = 0;
+    uint64_t observed = 0, accepted = 0, queue_retries = 0, tx_blocked_polls = 0;
+    uint64_t consumed = 0, credit_updates = 0, admitted_without_tx = 0;
     struct sb_rdma_tx tx = fault_tx();
     uint64_t cookies[SB_RDMA_TX_DEPTH], polls=0;
     unsigned first_process=0;
     (void)unused;
     if (!pending) die("demand bookkeeping");
+    if (opts.sb_defer_fault_credits && opts.sb_sync_fault_transport) die("deferred credit requires asynchronous transport");
+    fault_trace_bind(&source_trace,"source_demand",0);
     while (!__atomic_load_n(&source_done, __ATOMIC_ACQUIRE)) {
         if (!opts.sb_sync_fault_transport) {
             int n = fault_poll(&tx,cookies,&polls);
@@ -474,8 +505,20 @@ static void *source_demand(void *unused)
                 commit(&q->sent[q->acknowledged]);
                 q->acknowledged = (q->acknowledged + 1) % MAX_THREADS;
             }
-            if ((opts.sb_sync_fault_transport || sb_rdma_tx_pending(&tx)<SB_RDMA_TX_DEPTH) &&
-                wire->tail[p] != __atomic_load_n(&wire->head[p], __ATOMIC_ACQUIRE)) {
+            bool request_waiting = wire->tail[p] != __atomic_load_n(&wire->head[p], __ATOMIC_ACQUIRE);
+            bool tx_available = opts.sb_sync_fault_transport || sb_rdma_tx_pending(&tx)<SB_RDMA_TX_DEPTH;
+            /* First observation precedes TX-credit and scheduler admission.
+             * Retain one observation across EAGAIN retries of this ring slot;
+             * it does not mean NIC arrival, and all timestamps stay local. */
+            if (source_trace.events && request_waiting) {
+                if (!q->request_observed) {
+                    fault_trace_note(&source_trace,PF_SOURCE_OBSERVE,vpidset[p],wire->addr[p][wire->tail[p]]);
+                    q->request_observed = true;
+                    observed++;
+                }
+                tx_blocked_polls += !tx_available;
+            }
+            if ((tx_available || opts.sb_defer_fault_credits) && request_waiting) {
                 uint64_t address = wire->addr[p][wire->tail[p]];
                 struct span *s = locate(p, address);
                 enum sb_page_state state = s ? sb_sched_state(scheduler, s->first + (address - s->start) / P) : SB_PAGE_IDLE;
@@ -483,6 +526,8 @@ static void *source_demand(void *unused)
                 if (rc != -EAGAIN) {
                     if (rc < 0) die("demand address/queue");
                     fault_trace_note(&source_trace,PF_SOURCE_RECEIVE,vpidset[p],address);
+                    consumed++; admitted_without_tx += !tx_available;
+                    if (q->request_observed) { accepted++; q->request_observed = false; }
                     seen_state[state]++;
                     requests_during_seed_ack += __atomic_load_n(&source_seed_committing, __ATOMIC_ACQUIRE);
                     for (unsigned d = 1; !opts.sb_no_prefetch && d <= 2; d++) {
@@ -500,11 +545,14 @@ static void *source_demand(void *unused)
                     wire->tail[p] = (wire->tail[p] + 1) % MAX_THREADS;
                     if (opts.sb_sync_fault_transport)
                         PUT(&PF_res, PF_res.mr_buf, &wire->tail[p], sizeof(int), offsetof(struct page_data_set_t, request_tail) + p * sizeof(int));
-                    else {
+                    else if (!opts.sb_defer_fault_credits) {
                         struct sb_rdma_part part={NULL,(const void *)&wire->tail[p],sizeof(int),offsetof(struct page_data_set_t,request_tail)+p*sizeof(int)};
                         fault_post(&tx,&part,1,0);
                     }
-                }
+                    if (!opts.sb_defer_fault_credits) {
+                        q->request_credited=wire->tail[p];credit_updates++;
+                    }
+                } else if (source_trace.events) queue_retries++;
             }
             volatile struct sb_fast_queue *copies = &sh->fast[0];
             for (unsigned issued = 0; issued < SB_FAST_SLOTS; issued++) {
@@ -538,6 +586,10 @@ static void *source_demand(void *unused)
                 }
                 responses_during_seed_ack += __atomic_load_n(&source_seed_committing, __ATOMIC_ACQUIRE);
             }
+            /* Ready demand data has first use of SQ space. The single SQ owner
+             * can advertise several consumed requests in one inline write. */
+            if (opts.sb_defer_fault_credits)
+                credit_updates += post_request_credit(&tx,wire,q,p);
         }
         first_process=(first_process+1)%item_num;
         for (unsigned issued = 0; issued < SB_FAST_SLOTS; issued++) {
@@ -553,7 +605,7 @@ static void *source_demand(void *unused)
         }
         relax_cpu();
     }
-    while (!opts.sb_sync_fault_transport && sb_rdma_tx_pending(&tx)) {
+    while (!opts.sb_sync_fault_transport && (sb_rdma_tx_pending(&tx) || request_credit_due(wire,pending))) {
         int n=fault_poll(&tx,cookies,&polls);
         for (int i=0;i<n;i++) if(cookies[i]) {
             unsigned p=(cookies[i]-1)/SB_FAST_SLOTS,c=(cookies[i]-1)%SB_FAST_SLOTS;
@@ -562,6 +614,7 @@ static void *source_demand(void *unused)
             sb_fast_release(&SharedRegions->shregions[p]->fast[0],c);
             pending[p].fast.dma[c]=false;pending[p].fast.busy[c]=false;
         }
+        for (int p=0;p<item_num;p++) credit_updates += post_request_credit(&tx,wire,&pending[p],p);
         relax_cpu();
     }
     fault_stats("source",&tx);
@@ -571,7 +624,18 @@ static void *source_demand(void *unused)
         (unsigned long long)neighbors, (unsigned long long)hints_queued, (unsigned long long)hints_busy);
     pr_info("SB_DEMAND_ACK_OVERLAP requests=%llu responses=%llu\n",
         (unsigned long long)requests_during_seed_ack, (unsigned long long)responses_during_seed_ack);
+    if (source_trace.events)
+        pr_info("SB_PF_OBSERVE observed=%llu accepted=%llu pending=%llu queue_retries=%llu tx_blocked_polls=%llu\n",
+            (unsigned long long)observed,(unsigned long long)accepted,(unsigned long long)(observed-accepted),
+            (unsigned long long)queue_retries,(unsigned long long)tx_blocked_polls);
+    if (credit_updates>consumed || request_credit_due(wire,pending)) die("request credit accounting");
+    pr_info("SB_PF_CREDIT deferred=%u accepted=%llu updates=%llu coalesced=%llu admitted_without_tx=%llu pending=%u\n",
+        opts.sb_defer_fault_credits,(unsigned long long)consumed,(unsigned long long)credit_updates,
+        (unsigned long long)(consumed-credit_updates),(unsigned long long)admitted_without_tx,
+        request_credit_due(wire,pending));
     free(pending);
+    sb_trace("source.pf_drained");
+    __atomic_store_n(&source_demand_drained,true,__ATOMIC_RELEASE);
     return NULL;
 }
 
@@ -591,6 +655,7 @@ static void *source_prefetch(void *unused)
     bool holding = false;
     (void)unused;
     if (!pending) die("prefetch bookkeeping");
+    fault_trace_bind(&source_ft_trace,"source_prefetch",0);
     while (!__atomic_load_n(&source_done, __ATOMIC_ACQUIRE)) {
         unsigned tail = __atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE);
         if (tail >= PREFETCH_BUFFER_SIZE) die("prefetch credit");
@@ -685,6 +750,7 @@ static void *source_background(void *unused)
     uint64_t credit_since = 0, batches = 0, metadata_ns = 0, t;
     uint64_t participants = 0;
     uint64_t data_wrs = 0, wire_bytes = 0;
+    uint64_t omitted_bytes = 0;
     unsigned largest_write = 0;
     (void)unused;
     for (;;) {
@@ -701,6 +767,13 @@ static void *source_background(void *unused)
         if (__atomic_load_n(&feed_done, __ATOMIC_ACQUIRE) && stats.committed == source_pages &&
             __atomic_load_n(&((volatile struct page_request_set_t *)PF_res.buf)->precopy_done, __ATOMIC_ACQUIRE) == seed_pages + 1) {
             if (credit_since) { credit_ns += now_ns() - credit_since; credit_since = 0; }
+            /* The final TS frame lets the target stop and destroy its QPs.
+             * Stop admission and finish all local PF/control completions first,
+             * including consumed request credits deferred under SQ pressure.
+             * Target workers remain alive until this existing final frame. */
+            __atomic_store_n(&source_done,true,__ATOMIC_RELEASE);
+            while (!__atomic_load_n(&source_demand_drained,__ATOMIC_ACQUIRE)) relax_cpu();
+            sb_trace("source.final_frame_begin");
             t = now_ns();
             batch->nr_pi = batch->nr_page = 0; batch->id = -1;
             ring->head = (slot + 1) % TRANSFER_BUFFER_SIZE;
@@ -716,11 +789,13 @@ static void *source_background(void *unused)
             pr_info("SB_BG_SEGMENT pages=%u data_wrs=%llu wire_bytes=%llu max_write_bytes=%u batches=%llu\n",
                 opts.sb_bg_segment_pages,(unsigned long long)data_wrs,(unsigned long long)wire_bytes,
                 largest_write,(unsigned long long)batches);
+            pr_info("SB_BG_WIRE compact=%u prefix_bytes=%zu descriptor_bytes=%zu full_metadata_bytes=%zu omitted_bytes=%llu\n",
+                opts.sb_compact_bg_wire,offsetof(struct transfer_t,pid_info),sizeof(struct mem_iov),sizeof(*batch),
+                (unsigned long long)omitted_bytes);
             pr_info("SB_TRANSFER complete pages=%llu committed=%llu precopy=%llu demand=%llu prefetch=%llu background=%llu promotions=%llu\n",
                     (unsigned long long)source_pages, (unsigned long long)stats.committed, (unsigned long long)seed_pages,
                     (unsigned long long)stats.claimed[SB_DEMAND], (unsigned long long)stats.claimed[SB_PREFETCH],
                     (unsigned long long)stats.claimed[SB_BACKGROUND], (unsigned long long)stats.promoted);
-            __atomic_store_n(&source_done, true, __ATOMIC_RELEASE);
             return NULL;
         }
         if ((slot + 1) % TRANSFER_BUFFER_SIZE == tail) {
@@ -754,22 +829,41 @@ static void *source_background(void *unused)
         ring->head = (slot + 1) % TRANSFER_BUFFER_SIZE;
         unsigned bytes=sizeof(*batch)+jobs->count*P;
         uint64_t offset=2*sizeof(int)+(uint64_t)slot*TRANSFER_REGION_SIZE;
-        if (opts.sb_bg_segment_pages) {
+        if (opts.sb_bg_segment_pages || opts.sb_compact_bg_wire) {
             struct write_part parts[SB_RDMA_WRITE_MAX];
             struct write_part publish={TS_res.mr_buf,(const void *)&ring->head,sizeof(int),0};
-            int n=sb_rdma_segment_frame(parts,SB_RDMA_WRITE_MAX,TS_res.mr[0],batch,bytes,offset,
-                                        opts.sb_bg_segment_pages*P,publish);
+            struct write_part ranges[3]={{TS_res.mr[0],batch,bytes,offset}};
+            unsigned count=1;
+            if (opts.sb_compact_bg_wire) {
+                /* The target reads only prefix counts/ID, live page_info, and
+                 * payload. Source helper mailboxes and unused entries remain
+                 * local. Keep their destination holes and payload offset so
+                 * both target installers retain the same layout and protocol. */
+                ranges[0].length=offsetof(struct transfer_t,pid_info);
+                ranges[1]=(struct write_part){TS_res.mr[0],batch->page_info,jobs->count*sizeof(struct mem_iov),
+                                             offset+offsetof(struct transfer_t,page_info)};
+                ranges[2]=(struct write_part){TS_res.mr[0],get_mem(batch),jobs->count*P,offset+sizeof(*batch)};
+                count=3;
+            }
+            int n=sb_rdma_write_ranges(parts,SB_RDMA_WRITE_MAX,ranges,count,opts.sb_bg_segment_pages*P,publish);
             if (n<0) die("background RDMA segments");
             putv(&TS_res,parts,n);
             data_wrs+=n-1;
-            if (parts[0].length>largest_write) largest_write=parts[0].length;
+            unsigned sent_bytes=0;
+            for (int i=0;i<n-1;i++) {
+                sent_bytes+=parts[i].length;
+                if (parts[i].length>largest_write) largest_write=parts[i].length;
+            }
+            if (sent_bytes>bytes) die("background wire accounting");
+            omitted_bytes+=bytes-sent_bytes;
+            wire_bytes+=sent_bytes;
         } else {
             put(&TS_res,TS_res.mr[0],batch,bytes,offset,
                 TS_res.mr_buf,(const void *)&ring->head,sizeof(int),0);
             data_wrs++;
             if (bytes>largest_write) largest_write=bytes;
+            wire_bytes+=bytes;
         }
-        wire_bytes+=bytes;
         publish_ns += now_ns() - t; batches++;
     }
 }
@@ -794,7 +888,9 @@ int sb_parallel_server(int socket)
         !opts.sb_no_pretransfer, !opts.sb_no_prefetch, !opts.sb_no_hot_first);
     pr_info("SB_READY_SCAN fixed=%u\n",opts.sb_fixed_ready_scan);
     build_catalog();
-    fault_trace_init(&source_trace);
+    /* This one buffer aggregates six PF stages plus coalesced requests from
+     * every process. Keep a bounded larger capacity than per-worker traces. */
+    fault_trace_init_capacity(&source_trace,4*FAULT_TRACE_CAPACITY);
     fault_trace_init(&source_ft_trace);
     if (!opts.sb_serial_precopy_ack && pthread_create(&precopy_ack, NULL, source_precopy_ack, NULL))
         die("source precopy ACK thread");

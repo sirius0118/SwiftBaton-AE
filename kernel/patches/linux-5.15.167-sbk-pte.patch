@@ -1,0 +1,628 @@
+--- a/include/linux/swap.h
++++ b/include/linux/swap.h
+@@ -98,9 +98,17 @@
+ #define SWP_HWPOISON_NUM 0
+ #endif
+ 
++/* SwiftBaton uses an explicit nonpresent PTE type, never a present-PTE bit. */
++#ifdef CONFIG_SWIFTBATON_PTE
++#define SWP_SWIFTBATON_NUM 1
++#define SWP_SWIFTBATON (MAX_SWAPFILES + SWP_DEVICE_NUM + SWP_MIGRATION_NUM + SWP_HWPOISON_NUM)
++#else
++#define SWP_SWIFTBATON_NUM 0
++#endif
++
+ #define MAX_SWAPFILES \
+ 	((1 << MAX_SWAPFILES_SHIFT) - SWP_DEVICE_NUM - \
+-	SWP_MIGRATION_NUM - SWP_HWPOISON_NUM)
++	SWP_MIGRATION_NUM - SWP_HWPOISON_NUM - SWP_SWIFTBATON_NUM)
+ 
+ /*
+  * Magic header for a swap area. The first part of the union is
+--- a/include/linux/swapops.h
++++ b/include/linux/swapops.h
+@@ -387,8 +387,17 @@
+ }
+ #endif
+ 
++static inline bool is_swiftbaton_entry(swp_entry_t entry)
++{
++#ifdef CONFIG_SWIFTBATON_PTE
++	return swp_type(entry) == SWP_SWIFTBATON;
++#else
++	return false;
++#endif
++}
++
+ #if defined(CONFIG_MEMORY_FAILURE) || defined(CONFIG_MIGRATION) || \
+-    defined(CONFIG_DEVICE_PRIVATE)
++    defined(CONFIG_DEVICE_PRIVATE) || defined(CONFIG_SWIFTBATON_PTE)
+ static inline int non_swap_entry(swp_entry_t entry)
+ {
+ 	return swp_type(entry) >= MAX_SWAPFILES;
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -61,6 +61,7 @@
+ #include <linux/memcontrol.h>
+ #include <linux/mmu_notifier.h>
+ #include <linux/swapops.h>
++#include <linux/swiftbaton_pte.h>
+ #include <linux/elf.h>
+ #include <linux/gfp.h>
+ #include <linux/migrate.h>
+@@ -777,7 +778,10 @@
+ 	struct page *page;
+ 	swp_entry_t entry = pte_to_swp_entry(pte);
+ 
+-	if (likely(!non_swap_entry(entry))) {
++	if (is_swiftbaton_entry(entry)) {
++		if (!sbk_pte_token_get(swp_offset(entry)))
++			return -EIO;
++	} else if (likely(!non_swap_entry(entry))) {
+ 		if (swap_duplicate(entry) < 0)
+ 			return -EIO;
+ 
+@@ -1382,6 +1386,13 @@
+ 		}
+ 
+ 		entry = pte_to_swp_entry(ptent);
++		if (is_swiftbaton_entry(entry)) {
++			if (!should_zap_cows(details))
++				continue;
++			pte_clear_not_present_full(mm, addr, pte, tlb->fullmm);
++			sbk_pte_token_put(swp_offset(entry));
++			continue;
++		}
+ 		if (is_device_private_entry(entry) ||
+ 		    is_device_exclusive_entry(entry)) {
+ 			struct page *page = pfn_swap_entry_to_page(entry);
+@@ -3533,7 +3544,9 @@
+ 
+ 	entry = pte_to_swp_entry(vmf->orig_pte);
+ 	if (unlikely(non_swap_entry(entry))) {
+-		if (is_migration_entry(entry)) {
++		if (is_swiftbaton_entry(entry)) {
++			ret = sbk_pte_fault(vmf, SBK_PTE_DEMAND);
++		} else if (is_migration_entry(entry)) {
+ 			migration_entry_wait(vma->vm_mm, vmf->pmd,
+ 					     vmf->address);
+ 		} else if (is_device_exclusive_entry(entry)) {
+--- a/mm/mincore.c
++++ b/mm/mincore.c
+@@ -129,7 +129,9 @@
+ 		else { /* pte is a swap entry */
+ 			swp_entry_t entry = pte_to_swp_entry(pte);
+ 
+-			if (non_swap_entry(entry)) {
++			if (is_swiftbaton_entry(entry)) {
++				*vec = 0; /* A remote marker is not a resident page. */
++			} else if (non_swap_entry(entry)) {
+ 				/*
+ 				 * migration or hwpoison entries are always
+ 				 * uptodate
+--- a/mm/khugepaged.c
++++ b/mm/khugepaged.c
+@@ -1255,6 +1255,11 @@
+ 	     _pte++, _address += PAGE_SIZE) {
+ 		pte_t pteval = *_pte;
+ 		if (is_swap_pte(pteval)) {
++			/* The migration scheduler owns remote-page prefetch priority. */
++			if (is_swiftbaton_entry(pte_to_swp_entry(pteval))) {
++				result = SCAN_EXCEED_SWAP_PTE;
++				goto out_unmap;
++			}
+ 			if (++unmapped <= khugepaged_max_ptes_swap) {
+ 				/*
+ 				 * Always be strict with uffd-wp
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -130,3 +130,5 @@
+ obj-$(CONFIG_IO_MAPPING) += io-mapping.o
+ obj-$(CONFIG_HAVE_BOOTMEM_INFO_NODE) += bootmem_info.o
+ obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
++
++obj-$(CONFIG_SWIFTBATON_PTE) += swiftbaton_pte.o
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -900,3 +900,12 @@
+ source "mm/damon/Kconfig"
+ 
+ endmenu
++
++config SWIFTBATON_PTE
++	bool "SwiftBaton experimental remote anonymous PTE bridge"
++	depends on X86_64 && MMU && SWAP
++	default n
++	help
++	  Reserve a nonpresent PTE type for opaque, reference-counted remote-page
++	  tokens. Faults adopt pages from a module provider as normal anonymous
++	  memory. Experimental: validate in an isolated machine before use.
+--- /dev/null
++++ b/include/linux/swiftbaton_pte.h
+@@ -0,0 +1,47 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_SWIFTBATON_PTE_H
++#define _LINUX_SWIFTBATON_PTE_H
++#include <linux/mm.h>
++#include <linux/module.h>
++
++/* Built-in MM bridge; providers remain modules. Never encode a kernel pointer. */
++#define SBK_PTE_DEMAND 0
++#define SBK_PTE_PREFETCH 1
++#define SBK_PTE_BACKGROUND 2
++struct sbk_pte_provider {
++	struct module *owner;
++	/* Return an exclusive, unmapped order-0 page reference, with DMA finished.
++	 * The MM bridge charges it and adopts it as a normal anonymous page.
++	 * Source/prefetch cache pages may be handed off, never shared writable.
++	 */
++	struct page *(*get_page)(void *cookie, struct vm_area_struct *vma,
++				 unsigned long address, unsigned int lane, bool user_fault);
++	void (*installed)(void *cookie, struct mm_struct *mm,
++			  unsigned long address, unsigned int lane, bool user_fault);
++	/* USER faults: entry to this bridge through PTE install/prefetch scheduling.
++	 * Does not include x86 fault entry or the eventual return to userspace. */
++	void (*fault_done)(void *cookie, u64 elapsed_ns, vm_fault_t result);
++	/* Non-sleeping: last marker can disappear under a page-table spinlock. */
++	void (*release)(void *cookie);
++};
++
++#ifdef CONFIG_SWIFTBATON_PTE
++int sbk_pte_token_create(const struct sbk_pte_provider *ops, void *cookie,
++			unsigned long *id);
++bool sbk_pte_token_get(unsigned long id);
++void sbk_pte_token_put(unsigned long id);
++int sbk_pte_arm(struct mm_struct *mm, unsigned long start, unsigned long count,
++		const unsigned long *ids);
++int sbk_pte_populate(struct mm_struct *mm, unsigned long address,
++		     unsigned long expected_id, unsigned int lane);
++int sbk_pte_populate_all(unsigned long expected_id, unsigned int lane);
++vm_fault_t sbk_pte_fault(struct vm_fault *vmf, unsigned int lane);
++#else
++static inline bool sbk_pte_token_get(unsigned long id) { return false; }
++static inline void sbk_pte_token_put(unsigned long id) { }
++static inline vm_fault_t sbk_pte_fault(struct vm_fault *vmf, unsigned int lane)
++{
++	return VM_FAULT_SIGBUS;
++}
++#endif
++#endif
+--- /dev/null
++++ b/mm/swiftbaton_pte.c
+@@ -0,0 +1,436 @@
++// SPDX-License-Identifier: GPL-2.0
++/* SwiftBaton's nonpresent-PTE bridge for the isolated Linux 5.15 test kernel.
++ * A marker owns a provider token, not an RSS or swap-accounting reference.
++ * Resolution adopts an exclusive page using normal anonymous rmap/memcg/LRU.
++ */
++#include <linux/swiftbaton_pte.h>
++#include <linux/swap.h>
++#include <linux/swapops.h>
++#include <linux/rmap.h>
++#include <linux/pagemap.h>
++#include <linux/memcontrol.h>
++#include <linux/userfaultfd_k.h>
++#include <linux/sched/mm.h>
++#include <linux/xarray.h>
++#include <linux/kref.h>
++#include <linux/slab.h>
++#include <linux/overflow.h>
++#include <linux/oom.h>
++#include <linux/ktime.h>
++#include <linux/workqueue.h>
++#include <asm/tlbflush.h>
++#include "internal.h"
++
++/* The ordinary anon_vma interval tree follows fork, split and mremap. One
++ * shared anchor per ARM range avoids maintaining a second set of MM hooks. */
++struct sbk_pte_anchor {
++	struct kref refs;
++	struct anon_vma *anon_vma;
++	struct work_struct destroy;
++};
++struct sbk_pte_token {
++	struct kref refs;
++	struct mutex resolve;
++	unsigned long id;
++	const struct sbk_pte_provider *ops;
++	void *cookie;
++	struct sbk_pte_anchor *anchor;
++	pgoff_t offset;
++};
++static DEFINE_XARRAY(sbk_tokens);
++/* IDs must not alias stale asynchronous populate requests after unmap/reuse. */
++static atomic64_t sbk_next_token = ATOMIC64_INIT(0);
++
++static void sbk_anchor_destroy(struct work_struct *work)
++{
++	struct sbk_pte_anchor *a = container_of(work, struct sbk_pte_anchor, destroy);
++	put_anon_vma(a->anon_vma);
++	kfree(a);
++}
++static void sbk_anchor_release(struct kref *ref)
++{
++	struct sbk_pte_anchor *a = container_of(ref, struct sbk_pte_anchor, refs);
++	/* The last token may disappear under a page-table spinlock. anon_vma
++ * destruction may acquire its rwsem, so defer only the shared anchor. */
++	schedule_work(&a->destroy);
++}
++
++static void sbk_token_release(struct kref *ref)
++{
++	struct sbk_pte_token *t = container_of(ref, struct sbk_pte_token, refs);
++	xa_erase(&sbk_tokens, t->id);
++	t->ops->release(t->cookie);
++	module_put(t->ops->owner);
++	if (t->anchor)
++		kref_put(&t->anchor->refs, sbk_anchor_release);
++	kfree(t);
++}
++
++static struct sbk_pte_token *sbk_token_lookup(unsigned long id)
++{
++	struct sbk_pte_token *t;
++	xa_lock(&sbk_tokens);
++	t = xa_load(&sbk_tokens, id);
++	if (t && !kref_get_unless_zero(&t->refs))
++		t = NULL;
++	xa_unlock(&sbk_tokens);
++	return t;
++}
++
++int sbk_pte_token_create(const struct sbk_pte_provider *ops, void *cookie,
++			unsigned long *id)
++{
++	struct sbk_pte_token *t;
++	u64 index;
++	int ret;
++	if (!ops || !ops->get_page || !ops->release || !id ||
++	    !try_module_get(ops->owner))
++		return -EINVAL;
++	t = kzalloc(sizeof(*t), GFP_KERNEL);
++	if (!t) {
++		module_put(ops->owner);
++		return -ENOMEM;
++	}
++	kref_init(&t->refs);
++	mutex_init(&t->resolve);
++	t->ops = ops;
++	t->cookie = cookie;
++	index = atomic64_inc_return(&sbk_next_token);
++	t->id = index;
++	ret = index > U32_MAX ? -ENOSPC : xa_insert(&sbk_tokens, index, t, GFP_KERNEL);
++	if (ret) {
++		module_put(ops->owner);
++		kfree(t);
++		return ret;
++	}
++	*id = index;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(sbk_pte_token_create);
++
++bool sbk_pte_token_get(unsigned long id)
++{
++	return sbk_token_lookup(id) != NULL;
++}
++EXPORT_SYMBOL_GPL(sbk_pte_token_get);
++
++void sbk_pte_token_put(unsigned long id)
++{
++	struct sbk_pte_token *t;
++	/* Caller owns a live reference; no concurrent last release is possible. */
++	rcu_read_lock();
++	t = xa_load(&sbk_tokens, id);
++	rcu_read_unlock();
++	if (t)
++		kref_put(&t->refs, sbk_token_release);
++}
++EXPORT_SYMBOL_GPL(sbk_pte_token_put);
++
++/* mmap_lock stabilizes upper tables. Reject huge/special entries before walking. */
++static pmd_t *sbk_find_pmd(struct mm_struct *mm, unsigned long addr)
++{
++	pgd_t *pgd = pgd_offset(mm, addr);
++	p4d_t *p4d;
++	pud_t *pud;
++	pmd_t *pmd;
++	if (pgd_none(*pgd))
++		return NULL;
++	if (pgd_bad(*pgd))
++		return ERR_PTR(-EINVAL);
++	p4d = p4d_offset(pgd, addr);
++	if (p4d_none(*p4d))
++		return NULL;
++	if (p4d_bad(*p4d))
++		return ERR_PTR(-EINVAL);
++	pud = pud_offset(p4d, addr);
++	if (pud_none(*pud))
++		return NULL;
++	if (pud_trans_huge(*pud) || pud_devmap(*pud) || pud_bad(*pud))
++		return ERR_PTR(-EINVAL);
++	pmd = pmd_offset(pud, addr);
++	if (pmd_none(*pmd))
++		return NULL;
++	if (pmd_trans_huge(*pmd) || pmd_devmap(*pmd) || pmd_bad(*pmd))
++		return ERR_PTR(-EINVAL);
++	return pmd;
++}
++
++struct sbk_arm {
++	struct mm_struct *mm;
++	struct vm_area_struct *vma;
++	struct sbk_pte_anchor *anchor;
++	unsigned long start;
++	struct sbk_pte_token **tokens;
++	unsigned long installed;
++};
++static int sbk_arm_one(pte_t *pte, unsigned long addr, void *data)
++{
++	struct sbk_arm *arm = data;
++	struct sbk_pte_token *t = arm->tokens[(addr - arm->start) >> PAGE_SHIFT];
++	if (!pte_none(*pte) || t->anchor)
++		return -EEXIST;
++	t->anchor = arm->anchor;
++	t->offset = linear_page_index(arm->vma, addr);
++	kref_get(&arm->anchor->refs);
++	kref_get(&t->refs);
++	set_pte_at(arm->mm, addr, pte, swp_entry_to_pte(swp_entry(SWP_SWIFTBATON, t->id)));
++	arm->installed++;
++	return 0;
++}
++
++int sbk_pte_arm(struct mm_struct *mm, unsigned long start, unsigned long count,
++		const unsigned long *ids)
++{
++	struct sbk_arm arm = {.mm = mm, .start = start};
++	struct vm_area_struct *vma;
++	unsigned long len, end, i, refs = 0;
++	int ret = 0;
++	if (mm != current->mm || (start & ~PAGE_MASK) || !count || count > (1UL << 20) ||
++	    check_mul_overflow(count, PAGE_SIZE, &len) || check_add_overflow(start, len, &end))
++		return -EINVAL;
++	arm.tokens = kvcalloc(count, sizeof(*arm.tokens), GFP_KERNEL);
++	if (!arm.tokens)
++		return -ENOMEM;
++	for (i = 0; i < count; i++) {
++		arm.tokens[i] = sbk_token_lookup(ids[i]);
++		if (!arm.tokens[i]) {
++			ret = -ENOENT;
++			goto out;
++		}
++		refs++;
++	}
++	mmap_write_lock(mm);
++	vma = find_vma(mm, start);
++	if (!vma || vma->vm_start > start || vma->vm_end < end || !vma_is_anonymous(vma) ||
++	    (vma->vm_flags & (VM_SHARED | VM_HUGETLB | VM_PFNMAP | VM_MIXEDMAP | VM_UFFD_MISSING | VM_UFFD_WP))) {
++		ret = -EINVAL;
++		goto unlock;
++	}
++	/* anon_vma also makes fork copy these nonpresent PTEs before the first fault. */
++	ret = anon_vma_prepare(vma);
++	if (ret)
++		goto unlock;
++	arm.anchor = kzalloc(sizeof(*arm.anchor), GFP_KERNEL);
++	if (!arm.anchor) {
++		ret = -ENOMEM;
++		goto unlock;
++	}
++	kref_init(&arm.anchor->refs);
++	INIT_WORK(&arm.anchor->destroy, sbk_anchor_destroy);
++	arm.anchor->anon_vma = vma->anon_vma;
++	get_anon_vma(vma->anon_vma);
++	arm.vma = vma;
++	for (i = 0; i < count; i++) {
++		unsigned long addr = start + (i << PAGE_SHIFT);
++		pmd_t *pmd = sbk_find_pmd(mm, addr);
++		spinlock_t *ptl;
++		pte_t *pte;
++		if (IS_ERR(pmd)) {
++			ret = PTR_ERR(pmd);
++			goto unlock;
++		}
++		if (!pmd)
++			continue;
++		pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
++		if (!pte_none(*pte))
++			ret = -EEXIST;
++		pte_unmap_unlock(pte, ptl);
++		if (ret)
++			goto unlock;
++	}
++	ret = apply_to_page_range(mm, start, len, sbk_arm_one, &arm);
++	/* Page-table allocation can fail halfway; roll back only our installed prefix. */
++	if (ret && arm.installed)
++		zap_page_range(vma, start, arm.installed << PAGE_SHIFT);
++unlock:
++	mmap_write_unlock(mm);
++	if (arm.anchor)
++		kref_put(&arm.anchor->refs, sbk_anchor_release);
++out:
++	for (i = 0; i < refs; i++)
++		kref_put(&arm.tokens[i]->refs, sbk_token_release);
++	kvfree(arm.tokens);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(sbk_pte_arm);
++
++vm_fault_t sbk_pte_fault(struct vm_fault *vmf, unsigned int lane)
++{
++	u64 started = ktime_get_ns();
++	struct vm_area_struct *vma = vmf->vma;
++	struct sbk_pte_token *t;
++	struct page *page;
++	vm_fault_t ret = 0;
++	bool installed = false;
++	pte_t newpte;
++	/* Acquire a token reference while its PTE is locked against MADV_DONTNEED. */
++	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
++	if (!pte_same(*vmf->pte, vmf->orig_pte)) {
++		pte_unmap_unlock(vmf->pte, vmf->ptl);
++		return 0;
++	}
++	t = sbk_token_lookup(swp_offset(pte_to_swp_entry(vmf->orig_pte)));
++	pte_unmap_unlock(vmf->pte, vmf->ptl);
++	if (!t)
++		return VM_FAULT_SIGBUS;
++	if (mutex_lock_killable(&t->resolve)) {
++		ret = VM_FAULT_SIGBUS;
++		goto put;
++	}
++	/* A competing resolver may already have installed the page. */
++	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
++	if (!pte_same(*vmf->pte, vmf->orig_pte)) {
++		pte_unmap_unlock(vmf->pte, vmf->ptl);
++		goto done;
++	}
++	pte_unmap_unlock(vmf->pte, vmf->ptl);
++	page = t->ops->get_page(t->cookie, vma, vmf->address, lane,
++				!!(vmf->flags & FAULT_FLAG_USER));
++	if (IS_ERR_OR_NULL(page)) {
++		ret = !page || PTR_ERR(page) == -ENOMEM ? VM_FAULT_OOM : VM_FAULT_SIGBUS;
++		goto done;
++	}
++	if (PageCompound(page) || PageAnon(page) || page_mapping(page) || page_count(page) != 1) {
++		pr_err_ratelimited("swiftbaton: provider returned a nonexclusive/nonfresh page\n");
++		ret = VM_FAULT_SIGBUS;
++		goto free;
++	}
++	if (mem_cgroup_charge(page, vma->vm_mm, GFP_KERNEL)) {
++		ret = VM_FAULT_OOM;
++		goto free;
++	}
++	cgroup_throttle_swaprate(page, GFP_KERNEL);
++	__SetPageUptodate(page);
++	newpte = pte_sw_mkyoung(mk_pte(page, vma->vm_page_prot));
++	if ((vma->vm_flags & VM_WRITE) && !pte_swp_uffd_wp(vmf->orig_pte))
++		newpte = pte_mkwrite(pte_mkdirty(newpte));
++	if (pte_swp_uffd_wp(vmf->orig_pte))
++		newpte = pte_mkuffd_wp(newpte);
++	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
++	if (!pte_same(*vmf->pte, vmf->orig_pte))
++		goto unlock_free;
++	ret = check_stable_address_space(vma->vm_mm);
++	if (ret)
++		goto unlock_free;
++	inc_mm_counter(vma->vm_mm, MM_ANONPAGES);
++	page_add_new_anon_rmap(page, vma, vmf->address, false);
++	lru_cache_add_inactive_or_unevictable(page, vma);
++	set_pte_at(vma->vm_mm, vmf->address, vmf->pte, newpte);
++	update_mmu_cache(vma, vmf->address, vmf->pte);
++	pte_unmap_unlock(vmf->pte, vmf->ptl);
++	kref_put(&t->refs, sbk_token_release); /* consumed nonpresent PTE reference */
++	installed = true;
++	goto done;
++unlock_free:
++	pte_unmap_unlock(vmf->pte, vmf->ptl);
++free:
++	put_page(page);
++done:
++	mutex_unlock(&t->resolve);
++	if (installed && t->ops->installed)
++		t->ops->installed(t->cookie, vma->vm_mm, vmf->address, lane,
++				  !!(vmf->flags & FAULT_FLAG_USER));
++put:
++	if ((vmf->flags & FAULT_FLAG_USER) && t->ops->fault_done)
++		t->ops->fault_done(t->cookie, ktime_get_ns() - started, ret);
++	kref_put(&t->refs, sbk_token_release);
++	return ret;
++}
++
++int sbk_pte_populate(struct mm_struct *mm, unsigned long addr,
++		     unsigned long expected_id, unsigned int lane)
++{
++	struct vm_area_struct *vma;
++	pmd_t *pmd;
++	vm_fault_t fault;
++	int ret = -ENOENT;
++	if (!mm || (addr & ~PAGE_MASK) || lane > SBK_PTE_BACKGROUND || !expected_id || !mmget_not_zero(mm))
++		return -EINVAL;
++	mmap_read_lock(mm);
++	vma = find_vma(mm, addr);
++	/* Guard/execute-only VMAs may contain our markers too. Populate using
++	 * their existing vm_page_prot; the expected token below authorizes the
++	 * location, and no access permission is granted by this operation. */
++	if (!vma || vma->vm_start > addr)
++		goto out;
++	pmd = sbk_find_pmd(mm, addr);
++	if (IS_ERR_OR_NULL(pmd))
++		goto out;
++	{
++		struct vm_fault vmf = {.vma = vma, .address = addr,
++			.flags = FAULT_FLAG_REMOTE, .gfp_mask = GFP_KERNEL, .pmd = pmd};
++		pte_t *pte = pte_offset_map_lock(mm, pmd, addr, &vmf.ptl);
++		vmf.orig_pte = *pte;
++		pte_unmap_unlock(pte, vmf.ptl);
++		if (!is_swap_pte(vmf.orig_pte) ||
++		    !is_swiftbaton_entry(pte_to_swp_entry(vmf.orig_pte)) ||
++		    swp_offset(pte_to_swp_entry(vmf.orig_pte)) != expected_id) {
++			ret = -ESTALE;
++			goto out;
++		}
++		fault = sbk_pte_fault(&vmf, lane);
++		ret = fault & VM_FAULT_OOM ? -ENOMEM : fault & VM_FAULT_ERROR ? -EIO : 0;
++	}
++out:
++	mmap_read_unlock(mm);
++	mmput(mm);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(sbk_pte_populate);
++
++/* Resolve every current alias of this marker. Snapshot mm/address pairs while
++ * holding the anon_vma lock, then drop it BEFORE taking mmap_lock or doing
++ * RDMA. The expected token prevents installation into a replaced mapping.
++ * A concurrent fork/mremap is covered by the module's final coverage sweep. */
++int sbk_pte_populate_all(unsigned long expected_id, unsigned int lane)
++{
++	struct sbk_pte_token *t = sbk_token_lookup(expected_id);
++	struct sbk_location { struct mm_struct *mm; unsigned long address; } *loc;
++	struct anon_vma_chain *avc;
++	struct anon_vma *anon;
++	unsigned long capacity = 0, count = 0, i;
++	int ret = 0;
++	if (!t)
++		return 0; /* Already installed or discarded everywhere. */
++	if (!t->anchor || lane > SBK_PTE_BACKGROUND) {
++		ret = -EINVAL;
++		goto put;
++	}
++	anon = t->anchor->anon_vma;
++	anon_vma_lock_read(anon);
++	anon_vma_interval_tree_foreach(avc, &anon->rb_root, t->offset, t->offset)
++		capacity++;
++	anon_vma_unlock_read(anon);
++	if (!capacity)
++		goto put;
++	loc = kvmalloc_array(capacity, sizeof(*loc), GFP_KERNEL);
++	if (!loc) {
++		ret = -ENOMEM;
++		goto put;
++	}
++	anon_vma_lock_read(anon);
++	anon_vma_interval_tree_foreach(avc, &anon->rb_root, t->offset, t->offset) {
++		struct vm_area_struct *vma = avc->vma;
++		if (count == capacity) {
++			ret = -EAGAIN;
++			break;
++		}
++		loc[count].mm = vma->vm_mm;
++		loc[count].address = vma->vm_start + ((t->offset - vma->vm_pgoff) << PAGE_SHIFT);
++		mmgrab(vma->vm_mm);
++		count++;
++	}
++	anon_vma_unlock_read(anon);
++	for (i = 0; i < count; i++) {
++		int error = sbk_pte_populate(loc[i].mm, loc[i].address, expected_id, lane);
++		if (error && error != -ESTALE && error != -ENOENT && error != -EINVAL)
++			ret = error;
++		mmdrop(loc[i].mm);
++		cond_resched();
++	}
++	kvfree(loc);
++put:
++	kref_put(&t->refs, sbk_token_release);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(sbk_pte_populate_all);

@@ -2663,6 +2663,7 @@ int cr_restore_tasks(void)
 	if (opts.sb_parent_stage) {
 		if (!opts.sb_u_precopy || !opts.sb_image_rdma) goto err;
 		sb_trace("restore.stage_ps_begin");
+		sb_stage_set_numa_node(opts.sb_stage_numa_node);
 		if (sb_stage_receive(page_sync, opts.sb_precopy_workers ? opts.sb_precopy_workers : 4)) goto err;
 		sb_trace("restore.stage_ps_done");
 	}

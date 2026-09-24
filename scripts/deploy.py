@@ -1,91 +1,29 @@
 #!/usr/bin/env python3
-"""Stage this package on knode1/3, or activate its CRIU. Preview by default."""
-import argparse,json,os,shlex,subprocess,sys
+"""Copy source and locally compiled files to peers; preview unless --execute."""
 from pathlib import Path
-from preflight import CONFIG,ROOT,inspect,digest,offline
-
-def run(host,args):
-    cmd=args if host=='knode2' else ['ssh','-oBatchMode=yes','-oConnectTimeout=8',host,shlex.join(args)]
-    return subprocess.run(cmd,check=True,text=True,stdout=subprocess.PIPE).stdout
-
-def idle(data):
-    for host in ['knode2','knode3']:
-        v=data[host]
-        if v['active_criu']['rc']==0 or v['ae_containers']['rc'] or v['ae_containers']['text']:
-            raise SystemExit(host+': running CRIU / retained AE containers / failed Docker query. Reserve the cluster and clean only your own previous run first.')
-
-def main():
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action',choices=['stage','image','activate','restore'])
-    p.add_argument('--execute',action='store_true')
-    a=p.parse_args()
-    if a.action=='stage':
-        commands=[['rsync','-az','--checksum','--exclude=.git/','--exclude=ae-work/',
-                   '--exclude=results/','--exclude=/build/','--exclude=/.venv/',
-                   '--exclude=__pycache__/','--exclude=.run.lock','--exclude=.DS_Store',
-                   '--exclude=runtime-backup/',
-                   '-e','ssh -oBatchMode=yes',str(ROOT)+'/',host+':'+CONFIG['root']+'/'] for host in ['knode1','knode3']]
-        for cmd in commands:print(shlex.join(cmd),flush=True)
-    elif a.action=='image':
-        print(shlex.join(['docker','pull',CONFIG['redis_pull']]))
-        print('docker save '+CONFIG['redis_image']+' | ssh knode3 docker load')
-    elif a.action=='activate':
-        print('Activate '+CONFIG['root']+'/criu/criu/criu through /usr/bin/criu on knode2 and knode3; save previous symlinks in runtime-backup/.')
-    else:print('Restore the exact previous /usr/bin/criu symlinks from runtime-backup/.')
-    if not a.execute:
-        print('PREVIEW ONLY. Add --execute in a reserved experiment window.');return
-    if str(ROOT)!=CONFIG['root']:raise SystemExit('Run on knode2 from '+CONFIG['root'])
-    data=inspect();idle(data)
-    if data['knode2']['hostname']!=CONFIG['hostnames']['knode2']:raise SystemExit('This command must run on knode2')
-    if a.action=='image':
-        subprocess.run(['docker','pull',CONFIG['redis_pull']],check=True)
-        actual=run('knode2',['docker','image','inspect','--format','{{.Id}}',CONFIG['redis_pull']]).strip()
-        if actual!=CONFIG['redis_image']:raise SystemExit('Downloaded image ID differs from configuration')
-        sender=subprocess.Popen(['docker','save',CONFIG['redis_image']],stdout=subprocess.PIPE)
-        try:
-            receiver=subprocess.Popen(['ssh','-oBatchMode=yes','knode3','docker','load'],stdin=sender.stdout)
-            sender.stdout.close()
-            receiver_status=receiver.wait()
-            sender_status=sender.wait()
-            if sender_status or receiver_status:raise SystemExit('Image transfer failed')
-        finally:
-            if sender.poll() is None:sender.terminate();sender.wait()
-        print('Image loaded on source and destination. No containers started.');return
-    if a.action=='stage':
-        errors=offline(built=True)
-        if errors:raise SystemExit('Build first: '+str(errors))
-        for host,cmd in zip(['knode1','knode3'],commands):
-            guard="from pathlib import Path;p=Path("+repr(str(ROOT))+");assert not p.exists() or not any(p.iterdir()) or ((p/'configs/lab.json').is_file() and (p/'DualDriver/script/run_ae.py').is_file()),'Refusing to overwrite an unrelated directory';p.mkdir(parents=True,exist_ok=True)"
-            run(host,['python3','-c',guard]);subprocess.run(cmd,check=True)
-            print(host+': package copied; no services, runtime links, containers or network rules changed.')
-        return
-    target=str(ROOT/'criu/criu/criu')
-    expected=digest(ROOT/'criu/criu/criu')
-    # The shared-lab installation is an existing symlink. Never overwrite a
-    # regular system binary. Refuse restore if another task changed the link.
-    for host in ['knode2','knode3']:
-        script='''import hashlib,json,os,pathlib
-p=pathlib.Path('/usr/bin/criu');root=pathlib.Path(ROOT)
-backup=root/'runtime-backup/criu-link.json'
-assert p.is_symlink(), 'Administrator action required: /usr/bin/criu is not a symlink'
-if ACTION=='activate':
- assert hashlib.sha256(pathlib.Path(TARGET).read_bytes()).hexdigest()==EXPECTED,'Package binary mismatch'
- if os.readlink(p)==TARGET:print('Already active');raise SystemExit(0)
- assert not backup.exists(),'Unrestored previous activation exists'
- backup.parent.mkdir(parents=True,exist_ok=True)
- backup.write_text(json.dumps({'previous':os.readlink(p),'activated':TARGET},indent=2)+'\\n')
- replacement=TARGET
-else:
- saved=json.loads(backup.read_text())
- assert os.readlink(p)==saved['activated'],'Runtime link changed since activation; inspect manually'
- replacement=saved['previous']
-temporary=p.with_name('criu.swiftbaton-ae-new')
-assert not temporary.exists() and not temporary.is_symlink(),'Temporary link already exists'
-temporary.symlink_to(replacement);os.replace(str(temporary),str(p))
-if ACTION=='restore':backup.rename(backup.with_name('criu-link-restored.json'))
-print('/usr/bin/criu -> '+replacement)
-'''
-        settings='ROOT='+repr(str(ROOT))+'\nTARGET='+repr(target)+'\nEXPECTED='+repr(expected)+'\nACTION='+repr(a.action)+'\n'
-        print(host+': '+run(host,['sudo','-n','python3','-c',settings+script]).strip())
-    print('No daemon was restarted. Run preflight.py --ready before any experiment.')
-if __name__=='__main__':main()
+import argparse,fcntl,json,os,shlex,subprocess
+R=Path(__file__).resolve().parents[1]
+p=argparse.ArgumentParser(description=__doc__);p.add_argument('--execute',action='store_true');a=p.parse_args()
+commands=[]
+for h in ('knode1','knode3'):
+ commands.append(['rsync','-az','--exclude=.git/','--exclude=/build/','--exclude=/.venv/','--exclude=__pycache__/','--exclude=.DS_Store','-e','ssh -oBatchMode=yes',str(R)+'/',h+':'+str(R)+'/'])
+ for mode in ('U','K'):
+  commands.append(['rsync','-az','--rsync-path=mkdir -p '+shlex.quote(str(R/'build'/('criu-'+mode)/'criu'))+' && rsync',str(R/'build'/('criu-'+mode)/'criu/criu'),h+':'+str(R/'build'/('criu-'+mode)/'criu/criu')])
+ commands.append(['rsync','-az','--rsync-path=mkdir -p '+shlex.quote(str(R/'build/YCSB'))+' && rsync',str(R/'build/YCSB')+'/',h+':'+str(R/'build/YCSB')+'/'])
+ if (R/'build/fixture/memory_fixture').exists():commands.append(['rsync','-az','--rsync-path=mkdir -p '+shlex.quote(str(R/'build/fixture'))+' && rsync',str(R/'build/fixture/memory_fixture'),h+':'+str(R/'build/fixture/memory_fixture')])
+for c in commands:print(shlex.join(c),flush=True)
+if not a.execute:print('PREVIEW ONLY');raise SystemExit(0)
+for f in ('build/criu-U/criu/criu','build/criu-K/criu/criu','build/YCSB/core/target/classes/site/ycsb/Client.class','build/YCSB/redis/target/classes/site/ycsb/db/RedisClient.class'):
+ if not (R/f).is_file():raise SystemExit('Build before staging: missing '+f)
+W=Path(os.environ.get('SB_AE_WORK_ROOT',str(R.parent/(R.name+'-work')))).resolve();W.mkdir(parents=True,exist_ok=True)
+lock=(W/'run.lock').open('w');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+probe="import subprocess; p=subprocess.run(['pgrep','-x','criu'],capture_output=True); assert p.returncode==1,'Active CRIU'; assert not subprocess.check_output(['docker','ps','-aq','--filter','label=swiftbaton.ae=true'],text=True).strip(),'Retained AE containers'"
+for h in ('knode2','knode3'):
+ cmd=['sudo','-n','python3','-c',probe]
+ if h!='knode2':cmd=['ssh','-oBatchMode=yes',h,shlex.join(cmd)]
+ subprocess.run(cmd,check=True,timeout=30)
+for h in ('knode1','knode3'):
+ guard="from pathlib import Path;p=Path("+repr(str(R))+");assert not p.exists() or not any(p.iterdir()) or ((p/'README.md').exists() and 'SwiftBaton' in (p/'README.md').read_text()),'Unrelated destination directory';p.mkdir(parents=True,exist_ok=True)"
+ subprocess.run(['ssh','-oBatchMode=yes',h,shlex.join(['python3','-c',guard])],check=True,timeout=30)
+for cmd in commands:subprocess.run(cmd,check=True)
+print('Staged; installed CRIU symlinks and running services are unchanged.')

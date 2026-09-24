@@ -16,6 +16,7 @@
 #include "cpu.h"
 #include "crtools.h"
 #include "cr_options.h"
+#include "common/sb-numa.h"
 #include "filesystems.h"
 #include "file-lock.h"
 #include "irmap.h"
@@ -412,6 +413,7 @@ void init_opts(void)
 
 	/* Default options */
 	opts.sb_prefetch_window = 16;
+	opts.sb_stage_numa_node = -1;
 	opts.sb_fault_install_workers = 0;
 	opts.sb_fault_read_batch = 1;
 	opts.final_state = TASK_DEAD;
@@ -722,6 +724,10 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		{ "fault-trace", no_argument, 0, 1231 },
 		{ "spin-lifecycle", no_argument, 0, 1242 },
 		{ "bg-segment-pages", required_argument, 0, 1243 },
+		{ "compact-bg-wire", no_argument, 0, 1244 },
+		{ "stage-numa-node", required_argument, 0, 1245 },
+		{ "serial-ps-prepare", no_argument, 0, 1246 },
+		{ "defer-fault-credits", no_argument, 0, 1247 },
 		{ "reader-preferred-lock", no_argument, 0, 1232 },
 		{ "prefetch-window", required_argument, 0, 1233 },
 		{ "fixed-ready-scan", no_argument, 0, 1234 },
@@ -1109,6 +1115,12 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		case 1229: opts.sb_sync_fault_transport = true; break;
 		case 1231: opts.sb_fault_trace = true; break;
 		case 1242: opts.sb_spin_lifecycle = true; break;
+		case 1244: opts.sb_compact_bg_wire = true; break;
+		case 1246: opts.sb_serial_ps_prepare = true; break;
+		case 1247: opts.sb_defer_fault_credits = true; break;
+		case 1245:
+			if (sb_numa_parse_node(optarg, &opts.sb_stage_numa_node)) goto bad_arg;
+			break;
 		case 1243:
 			opts.sb_bg_segment_pages = atoi(optarg);
 			if (opts.sb_bg_segment_pages && (opts.sb_bg_segment_pages < 8 || opts.sb_bg_segment_pages > 256)) goto bad_arg;
