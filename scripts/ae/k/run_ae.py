@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import time
 import sys
-from k_mode import KernelSettings, validate_preflight, validate_container, validate_completion, validate_ps_config, validate_export_config, validate_dispatch, validate_catalog_config, validate_dma_config
+from k_mode import KernelSettings, validate_preflight, validate_container, validate_completion, validate_ps_config, validate_export_config, validate_dispatch, validate_catalog_config, validate_dma_config, validate_ps_arm_config
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[3]
@@ -23,6 +23,7 @@ parser.add_argument('--kernel-gid', type=int, default=3)
 parser.add_argument('--kernel-timeout-ms', type=int, default=2000)
 parser.add_argument('--kernel-dense', action='store_true')
 parser.add_argument('--kernel-dma-mr', action='store_true')
+parser.add_argument('--kernel-ps-arm', action='store_true')
 parser.add_argument('--kernel-export-workers', type=int, default=1)
 parser.add_argument('--kernel-export-chunk-mb', type=int, default=0)
 parser.add_argument('--kernel-ps-chunk-mb', type=int, default=64, help='K: independently published PS span in MiB, default 64; 0 retains legacy spans')
@@ -115,7 +116,7 @@ if opts.kernel_transfer:
         no_prefetch=opts.no_prefetch, no_hot_first=opts.no_hot_first, dense=opts.kernel_dense,
         ps_chunk_mb=opts.kernel_ps_chunk_mb, export_workers=opts.kernel_export_workers,
         export_chunk_mb=opts.kernel_export_chunk_mb, validation_workers=opts.validation_workers,
-        catalog_workers=opts.kernel_catalog_workers, dma_mr=opts.kernel_dma_mr)
+        catalog_workers=opts.kernel_catalog_workers, dma_mr=opts.kernel_dma_mr, ps_arm=opts.kernel_ps_arm)
     try:
         kernel_settings.values()
     except ValueError as error:
@@ -437,7 +438,7 @@ try:
         hosts = {host: json.loads(py(host, probe + '\nprint(json.dumps(host_probe(' +
                  repr(str(CRIU_ROOT / 'criu/criu')) + ',' + repr(opts.kernel_device) + ',' + str(opts.kernel_gid) + ')))'))
                  for host in ('knode2','knode3')}
-        errors = validate_preflight(hosts, opts.kernel_export_workers, opts.kernel_dma_mr)
+        errors = validate_preflight(hosts, opts.kernel_export_workers, opts.kernel_dma_mr, opts.kernel_ps_arm)
         STATE['kernel_preflight'] = {'hosts': hosts, 'errors': errors, 'passed': not errors}
         (OUT / 'kernel-preflight.json').write_text(json.dumps(STATE['kernel_preflight'], indent=2)+'\n')
         save()
@@ -706,6 +707,8 @@ try:
             opts.kernel_catalog_workers)
         STATE['kernel_dma_settings'] = validate_dma_config((OUT/'dump.log').read_text(errors='replace'),
             (OUT/'pageclient.log').read_text(errors='replace'), opts.kernel_dma_mr)
+        STATE['kernel_ps_arm_settings'] = validate_ps_arm_config((OUT/'dump.log').read_text(errors='replace'),
+            (OUT/'pageclient.log').read_text(errors='replace'), opts.kernel_ps_arm)
         STATE['kernel_ps_settings'] = validate_ps_config((OUT/'dump.log').read_text(errors='replace'),
             opts.kernel_ps_chunk_mb, opts.no_pretransfer)
         completions = {label: json.loads(py(host, f'from pathlib import Path;print((Path({str(OUT)!r})/{label + ".completion.json"!r}).read_text())'))

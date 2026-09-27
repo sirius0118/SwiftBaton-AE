@@ -11,6 +11,8 @@
 #include "sb-kernel-hot.h"
 #include "sb-kernel-work.h"
 #include "sb-kernel-dma-wire.h"
+#include "sb-kernel-layout.h"
+#include "sb-kernel-layout-wire.h"
 #include "sb-kernel.h"
 #include "sb-trace.h"
 #include "uffd.h"
@@ -105,7 +107,7 @@ static uint64_t kernel_now_ns(void) {
 
 int sb_kernel_options(void) {
   if (!opts.sb_kernel_transfer)
-    return opts.sb_kernel_dma_mr ? -EINVAL : 0;
+    return (opts.sb_kernel_dma_mr || opts.sb_kernel_ps_arm) ? -EINVAL : 0;
   if ((!opts.lazy_pages && opts.mode != CR_LAZY_PAGES) || !opts.sb_image_rdma ||
       !opts.sb_u_precopy || opts.sb_parent_stage || opts.sb_parallel_transfer ||
       opts.track_mem || opts.sb_defer_fault_credits) {
@@ -174,6 +176,12 @@ int sb_kernel_connect(int socket_fd, int source) {
     ret = -EOPNOTSUPP;
     goto fail;
   }
+  const unsigned prepared_features = SBK_FEATURE_PREPARED_ARM | SBK_FEATURE_UNBOUND_REGION;
+  if (!source && opts.sb_kernel_ps_arm && (caps.features & prepared_features) != prepared_features) {
+    pr_err("SwiftBaton-K PS ARM requires detached plan and unbound region capabilities\n");
+    ret = -EOPNOTSUPP;
+    goto fail;
+  }
   if (ioctl(session_fd, SBK_IOC_RDMA_CREATE, &setup)) {
     ret = -errno;
     goto fail;
@@ -183,13 +191,14 @@ int sb_kernel_connect(int socket_fd, int source) {
     goto fail;
   }
   setup.local.reserved[0] = opts.sb_kernel_dma_mr ? 1 : 0;
+  setup.local.reserved[1] = opts.sb_kernel_ps_arm ? 1 : 0;
   if (sync_transfer(socket_fd, &setup.local, sizeof(setup.local), true) ||
       sync_transfer(socket_fd, &remote, sizeof(remote), false)) {
     ret = -EIO;
     goto fail;
   }
-  if (!sbk_dma_wire_mode_matches(opts.sb_kernel_dma_mr, &remote)) {
-    pr_err("SwiftBaton-K DMA address mode differs between peers\n");
+  if (!sbk_layout_mode_matches(opts.sb_kernel_dma_mr, opts.sb_kernel_ps_arm, &remote)) {
+    pr_err("SwiftBaton-K DMA/PS ARM mode differs between peers\n");
     ret = -EPROTO;
     goto fail;
   }
@@ -216,6 +225,7 @@ int sb_kernel_connect(int socket_fd, int source) {
     goto fail;
   }
   peer_fd = socket_fd;
+  pr_info("SB_KERNEL ps_arm_mode role=%s enabled=%u\n", source ? "source" : "destination", opts.sb_kernel_ps_arm);
   pr_info("SB_KERNEL connected role=%s device=%s PF=%u FT=%u BG=%u "
           "pretransfer=%s dma_mr=%u\n",
           source ? "source" : "destination", setup.device, setup.slots[0],
@@ -423,6 +433,43 @@ static void report_dma_phase(const char *phase, bool sending, const struct dma_p
             (unsigned long long)stats->pages, (unsigned long long)(stats->pages * sizeof(uint64_t)),
             (unsigned long long)(stats->ns / 1000));
 }
+static int send_ps_layout(int socket_fd) {
+  if (!opts.sb_kernel_ps_arm) return 0;
+  if (list_length < 0 || list_length > 4096) return -EINVAL;
+  uint32_t *pids = calloc(list_length ? list_length : 1, sizeof(*pids));
+  struct sbk_catalog_layout *layout = NULL;
+  struct sbk_layout_stats stats;
+  unsigned count = 0;
+  uint64_t begin = kernel_now_ns();
+  if (!pids) return -ENOMEM;
+  for (int i = 0; i < list_length; i++) pids[i] = pid_data_list[i].pid;
+  unsigned chunk_pages = (opts.sb_kernel_export_chunk_mb ? opts.sb_kernel_export_chunk_mb : 4096) * 256;
+  int ret = sbk_layout_collect(pids, list_length, chunk_pages, &layout, &count, &stats);
+  free(pids);
+  if (!ret) ret = sbk_layout_wire_transfer(socket_fd, true, &layout, &count, sync_transfer);
+  if (!ret) pr_info("SB_KERNEL ps_layout role=source regions=%u pages=%llu pids=%u skipped_pids=%u skipped_ranges=%u elapsed_us=%llu\n",
+      count, (unsigned long long)stats.pages, stats.pids, stats.skipped_pids, stats.skipped_ranges,
+      (unsigned long long)((kernel_now_ns() - begin) / 1000));
+  free(layout);
+  return ret;
+}
+static int receive_ps_layout(int socket_fd) {
+  if (!opts.sb_kernel_ps_arm) return 0;
+  struct sbk_catalog_layout *layout = NULL;
+  unsigned count = 0;
+  uint64_t begin = kernel_now_ns();
+  int ret = sbk_layout_wire_transfer(socket_fd, false, &layout, &count, sync_transfer);
+  if (!ret) ret = sbk_catalog_prepare_layout(destination, layout, count);
+  if (!ret) {
+    struct sbk_catalog_timing timing = {};
+    sbk_catalog_get_timing(destination, &timing);
+    pr_info("SB_KERNEL ps_layout role=destination regions=%u pages=%llu elapsed_us=%llu\n",
+        count, (unsigned long long)timing.ps_plan_pages,
+        (unsigned long long)((kernel_now_ns() - begin) / 1000));
+  }
+  free(layout);
+  return ret;
+}
 int sb_kernel_send_ps(int socket_fd) {
   struct dma_phase_stats dma = {};
   unsigned count = 0, sent = 0, skipped = 0;
@@ -442,10 +489,12 @@ int sb_kernel_send_ps(int socket_fd) {
   }
   /* Version 4 adds a bounded resource hint before the existing PS records.
    * Version 5 additionally carries immutable per-region device DMA vectors. */
-  struct sbk_wire_header h = {SBK_WIRE_MAGIC, sbk_dma_ps_version(opts.sb_kernel_dma_mr), count, 1}, ack;
+  struct sbk_wire_header h = {SBK_WIRE_MAGIC, sbk_layout_ps_version(opts.sb_kernel_dma_mr, opts.sb_kernel_ps_arm), count, 1}, ack;
   uint64_t tokens = token_pool_hint();
   if (sync_transfer(socket_fd, &h, sizeof(h), true) ||
       sync_transfer(socket_fd, &tokens, sizeof(tokens), true)) { ret = -EIO; goto out; }
+  ret = send_ps_layout(socket_fd);
+  if (ret) goto out;
   for (unsigned i = 0; i < count; i++) {
     struct sbk_ps_region *p;
     struct sbk_wire_region w = {};
@@ -505,7 +554,7 @@ int sb_kernel_receive_ps(int socket_fd) {
   unsigned skipped = 0;
   int ret = -EPROTO;
   if (!destination || sync_transfer(socket_fd, &h, sizeof(h), false) ||
-      h.magic != SBK_WIRE_MAGIC || !sbk_dma_ps_version_valid(opts.sb_kernel_dma_mr, h.version) || h.reserved != 1 ||
+      h.magic != SBK_WIRE_MAGIC || !sbk_layout_ps_version_valid(opts.sb_kernel_dma_mr, opts.sb_kernel_ps_arm, h.version) || h.reserved != 1 ||
       h.count > SBK_MAX_REGIONS / 2 || (opts.sb_no_pretransfer && h.count))
     return -EPROTO;
   if (h.version >= 4) {
@@ -522,6 +571,8 @@ int sb_kernel_receive_ps(int socket_fd) {
             (unsigned long long)tokens, supported,
             (unsigned long long)((kernel_now_ns() - started) / 1000));
   }
+  ret = receive_ps_layout(socket_fd);
+  if (ret) goto fail;
   if (h.count) {
     if (workers > h.count) workers = h.count;
     pool = sbk_work_create(workers, workers * 2, ps_receive_run, free);
@@ -644,11 +695,21 @@ int sb_kernel_client_receive(int socket_fd) {
   ret = sbk_catalog_seal(destination, final_regions, nr_final);
   struct sbk_catalog_timing timing = {0};
   sbk_catalog_get_timing(destination, &timing);
+  if (opts.sb_kernel_ps_arm)
+    pr_info("SB_KERNEL ps_arm_reuse prepared=%u prepared_pages=%llu reused=%u reused_pages=%llu discarded=%u discarded_pages=%llu final=%u result=%d\n",
+        timing.ps_plans, (unsigned long long)timing.ps_plan_pages,
+        timing.reused_plans, (unsigned long long)timing.reused_plan_pages,
+        timing.discarded_plans, (unsigned long long)timing.discarded_plan_pages, nr_final, ret);
   pr_info("SB_KERNEL catalog_allocation started=%u peak=%u launch_us=%llu sum_us=%llu max_us=%llu\n",
           timing.workers_started, timing.allocation_peak,
           (unsigned long long)(timing.launch_ns / 1000),
           (unsigned long long)(timing.allocation_sum_ns / 1000),
           (unsigned long long)(timing.allocation_max_ns / 1000));
+  pr_info("SB_KERNEL catalog_seal import_started=%u import_peak=%u seal_started=%u seal_peak=%u import_us=%llu io_us=%llu\n",
+          timing.import_workers_started, timing.import_peak,
+          timing.seal_workers_started, timing.seal_peak,
+          (unsigned long long)(timing.seal_import_ns / 1000),
+          (unsigned long long)(timing.seal_io_ns / 1000));
   pr_info("SB_KERNEL final_catalog regions=%u workers=%u validation_us=%llu prepare_us=%llu seal_us=%llu result=%d\n",
           nr_final, opts.sb_kernel_catalog_workers ? opts.sb_kernel_catalog_workers : 1,
           (unsigned long long)(timing.validate_ns / 1000),
@@ -750,9 +811,23 @@ int sb_kernel_client_serve(int listen_fd, int socket_fd) {
   ret = -EIO;
   if (sbk_catalog_totals(destination, &st))
     goto out;
+  uint64_t retired_unfetched = 0;
+  if (st.invalidated > st.pretransferred) { ret = -EPROTO; goto out; }
+  uint64_t accounted = st.pretransferred - st.invalidated;
+  for (unsigned lane = 0; lane < SBK_LANES; lane++) accounted += st.fetched[lane];
+  if (st.completed != st.pages || accounted != st.pages) {
+    int audit = sbk_catalog_audit_deficits(destination, report_catalog_deficit,
+                                           &retired_unfetched);
+    pr_info("SB_KERNEL deficit_audit result=%d completed=%llu pages=%llu retired_unfetched=%llu\n",
+            audit, (unsigned long long)st.completed, (unsigned long long)st.pages,
+            (unsigned long long)retired_unfetched);
+    if (audit || st.completed + retired_unfetched != st.pages ||
+        accounted + retired_unfetched != st.pages) { ret = -EPROTO; goto out; }
+  }
   pr_info("SB_KERNEL complete regions=%u pages=%llu PF=%llu FT=%llu BG=%llu "
           "errors=%llu fault_ns=%llu fault_max_ns=%llu PS=%llu invalid=%llu "
-          "faults=%llu hits=%llu waits=%llu ahead=%llu skipped=%llu batches=%llu\n",
+          "faults=%llu hits=%llu waits=%llu ahead=%llu skipped=%llu batches=%llu "
+          "retired_unfetched=%llu\n",
           nr_final, (unsigned long long)st.pages,
           (unsigned long long)st.fetched[0], (unsigned long long)st.fetched[1],
           (unsigned long long)st.fetched[2], (unsigned long long)st.errors,
@@ -761,20 +836,26 @@ int sb_kernel_client_serve(int listen_fd, int socket_fd) {
           (unsigned long long)st.invalidated, (unsigned long long)st.faults,
           (unsigned long long)st.hits, (unsigned long long)st.waits,
           (unsigned long long)st.installed_ahead,
-          (unsigned long long)st.skipped_install, (unsigned long long)st.batches);
-  if (st.completed != st.pages || st.pretransferred - st.invalidated +
-      st.fetched[0] + st.fetched[1] + st.fetched[2] != st.pages) {
-    int audit = sbk_catalog_audit_deficits(destination, report_catalog_deficit);
-    pr_info("SB_KERNEL deficit_audit result=%d completed=%llu pages=%llu\n", audit,
-            (unsigned long long)st.completed, (unsigned long long)st.pages);
-  }
+          (unsigned long long)st.skipped_install, (unsigned long long)st.batches,
+          (unsigned long long)retired_unfetched);
   struct sbk_token_pool_stats tokens;
   if (!ioctl(session_fd, SBK_IOC_TOKEN_POOL_STATS, &tokens)) {
+    struct sbk_catalog_timing catalog_timing = {};
+    uint64_t discarded_pages = 0;
+    if (opts.sb_kernel_ps_arm) {
+      sbk_catalog_get_timing(destination, &catalog_timing);
+      discarded_pages = catalog_timing.discarded_plan_pages;
+    }
     pr_info("SB_KERNEL token_pool_complete prepared=%llu claimed=%llu available=%llu fallback=%llu sealed=%u\n",
             (unsigned long long)tokens.prepared, (unsigned long long)tokens.claimed,
             (unsigned long long)tokens.available, (unsigned long long)tokens.fallback, tokens.sealed);
+    if (discarded_pages)
+      pr_info("SB_KERNEL token_pool_discarded_ps_pages=%llu final_pages=%llu\n",
+              (unsigned long long)discarded_pages, (unsigned long long)st.pages);
     if (tokens.prepared != tokens.claimed + tokens.available ||
-        tokens.claimed + tokens.fallback != st.pages) { ret = -EPROTO; goto out; }
+        tokens.claimed + tokens.fallback != st.pages + discarded_pages) {
+      ret = -EPROTO; goto out;
+    }
   } else if (errno != ENOTTY && errno != EOPNOTSUPP) { ret = -errno; goto out; }
   struct sbk_dispatch_stats dispatch;
   if (!ioctl(session_fd, SBK_IOC_DISPATCH_STATS, &dispatch)) {

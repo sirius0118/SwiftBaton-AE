@@ -29,7 +29,8 @@ struct control_range {
 struct catalog_entry {
   struct sbk_catalog_record record;
   int fd, drain_fd, ready_fd;
-  unsigned staged, final, claimed, started, drained;
+  unsigned staged, final, claimed, started, drained, prepared;
+  struct catalog_entry *deferred_next;
   uint64_t *hot;
   size_t hot_count;
 };
@@ -39,6 +40,7 @@ struct sbk_catalog {
   unsigned features, prepare_workers;
   struct sbk_config config;
   struct catalog_entry **entries;
+  struct catalog_entry *deferred;
   size_t count;
   struct sbk_catalog_timing timing;
 };
@@ -167,8 +169,18 @@ static int same_source(const struct sbk_catalog_record *a,
 }
 static struct catalog_entry *find_entry(struct sbk_catalog *c,
                                         const struct sbk_catalog_record *r) {
+  struct catalog_entry *fallback = NULL;
   for (size_t i = 0; i < c->count; i++)
-    if (same_source(&c->entries[i]->record, r))
+    if (same_source(&c->entries[i]->record, r)) {
+      if (c->entries[i]->prepared) return c->entries[i];
+      fallback = c->entries[i];
+    }
+  return fallback;
+}
+static struct catalog_entry *find_stage_entry(struct sbk_catalog *c,
+                                               const struct sbk_catalog_record *r) {
+  for (size_t i = 0; i < c->count; i++)
+    if (!c->entries[i]->prepared && same_source(&c->entries[i]->record, r))
       return c->entries[i];
   return NULL;
 }
@@ -185,7 +197,7 @@ static void free_entry(struct catalog_entry *e) {
 /* Allocation has no catalog publication side effects, so distinct final
  * entries can prepare independently. The caller joins before publication. */
 static int allocate_entry(struct sbk_catalog *c, const struct sbk_catalog_record *r,
-                          struct catalog_entry **out) {
+                          struct catalog_entry **out, int prepare) {
   struct catalog_entry *e = calloc(1, sizeof(*e));
   if (!e)
     return -ENOMEM;
@@ -195,7 +207,8 @@ static int allocate_entry(struct sbk_catalog *c, const struct sbk_catalog_record
   if (e->fd < 0)
     goto fail;
   struct sbk_region_bind bind = {.session_fd = c->session, .remote = r->remote};
-  if (ioctl(e->fd, SBK_IOC_BIND_REGION, &bind))
+  if (prepare ? ioctl(e->fd, SBK_IOC_BIND_UNBOUND, &c->session)
+              : ioctl(e->fd, SBK_IOC_BIND_REGION, &bind))
     goto fail;
   struct sbk_config cfg = c->config;
   cfg.pages = r->remote.pages;
@@ -206,6 +219,11 @@ static int allocate_entry(struct sbk_catalog *c, const struct sbk_catalog_record
     goto fail;
   if (ioctl(e->fd, SBK_IOC_WATCH_DRAIN, &e->drain_fd))
     goto fail;
+  if (prepare) {
+    struct sbk_anon_arm arm = {.address = r->address};
+    if (ioctl(e->fd, SBK_IOC_PREPARE_ANON, &arm)) goto fail;
+    e->prepared = 1;
+  }
   *out = e;
   return 0;
 fail:;
@@ -216,7 +234,7 @@ fail:;
 static int new_entry(struct sbk_catalog *c, const struct sbk_catalog_record *r,
                      struct catalog_entry **out) {
   if (c->count == SBK_MAX_REGIONS) return -E2BIG;
-  int ret = allocate_entry(c, r, out);
+  int ret = allocate_entry(c, r, out, 0);
   if (!ret) c->entries[c->count++] = *out;
   return ret;
 }
@@ -227,6 +245,58 @@ int sbk_catalog_prepare_workers(struct sbk_catalog *c, unsigned workers) {
   if (!ret) c->prepare_workers = workers;
   pthread_mutex_unlock(&c->stage_lock);
   return ret;
+}
+int sbk_catalog_prepare_layout(struct sbk_catalog *c,
+                               const struct sbk_catalog_layout *layout, size_t count) {
+  const unsigned required = SBK_FEATURE_PREPARED_ARM | SBK_FEATURE_UNBOUND_REGION;
+  uint64_t pages = 0;
+  if (!c || c->phase || (count && !layout) || count > SBK_MAX_REGIONS / 2 || c->count)
+    return -EINVAL;
+  if ((c->features & required) != required) return -EOPNOTSUPP;
+  /* Validate the whole advisory list before any descriptor/context mutation. */
+  for (size_t i = 0; i < count; i++) {
+    const struct sbk_catalog_layout *r = &layout[i];
+    if (!r->source_pid || r->source_pid > INT32_MAX || r->reserved ||
+        !r->pages || r->pages > (1ULL << 20) || (r->address & 4095) ||
+        r->address > UINT64_MAX - r->pages * 4096 ||
+        r->pages > SBK_TOKEN_POOL_MAX_PAGES - pages) return -EINVAL;
+    for (size_t j = 0; j < i; j++)
+      if (layout[j].source_pid == r->source_pid &&
+          r->address < layout[j].address + layout[j].pages * 4096 &&
+          layout[j].address < r->address + r->pages * 4096) return -EINVAL;
+    pages += r->pages;
+  }
+  for (size_t i = 0; i < count; i++) {
+    struct sbk_catalog_record record = {.source_pid = layout[i].source_pid,
+      .address = layout[i].address, .remote = {.pages = layout[i].pages}};
+    struct catalog_entry *e = NULL;
+    int ret = allocate_entry(c, &record, &e, 1);
+    if (ret) { c->phase = -1; return ret; }
+    c->entries[c->count++] = e;
+    c->timing.ps_plans++;
+    c->timing.ps_plan_pages += layout[i].pages;
+  }
+  return 0;
+}
+
+/* A changed shape cannot reuse the detached plan. Keep its unused token
+ * owners off the final critical path and free them at catalog destruction,
+ * after all live ranges drain (or an abort). They contain no PS byte cache. */
+static void retire_unmatched_plans(struct sbk_catalog *c,
+                                  const struct sbk_catalog_final *final, size_t n) {
+  for (size_t i = 0; i < c->count;) {
+    struct catalog_entry *e = c->entries[i];
+    if (!e->prepared) { i++; continue; }
+    size_t j;
+    for (j = 0; j < n; j++) if (same_source(&e->record, &final[j].record)) break;
+    if (j < n) {
+      c->timing.reused_plans++; c->timing.reused_plan_pages += e->record.remote.pages;
+      i++; continue;
+    }
+    c->timing.discarded_plans++; c->timing.discarded_plan_pages += e->record.remote.pages;
+    e->deferred_next = c->deferred; c->deferred = e;
+    c->entries[i] = c->entries[--c->count];
+  }
 }
 struct final_prepare_job {
   struct sbk_catalog *catalog;
@@ -251,7 +321,7 @@ static void *final_prepare_worker(void *arg) {
     if (++job->active > job->peak) job->peak = job->active;
     pthread_mutex_unlock(&job->lock);
     uint64_t begin = catalog_now_ns();
-    int ret = allocate_entry(job->catalog, &job->final[i].record, &job->entries[i]);
+    int ret = allocate_entry(job->catalog, &job->final[i].record, &job->entries[i], 0);
     uint64_t ns = catalog_now_ns() - begin;
     pthread_mutex_lock(&job->lock);
     job->active--;
@@ -351,6 +421,11 @@ void sbk_catalog_destroy(struct sbk_catalog *c) {
     return;
   for (size_t i = 0; i < c->count; i++)
     free_entry(c->entries[i]);
+  while (c->deferred) {
+    struct catalog_entry *e = c->deferred;
+    c->deferred = e->deferred_next;
+    free_entry(e);
+  }
   close(c->session);
   free(c->entries);
   pthread_mutex_destroy(&c->stage_lock);
@@ -365,7 +440,7 @@ int sbk_catalog_stage(struct sbk_catalog *c, const struct sbk_catalog_record *r,
   if (ret) return ret;
   pthread_mutex_lock(&c->stage_lock);
   if (c->phase) { ret = -EINVAL; goto unlock; }
-  struct catalog_entry *e = find_entry(c, r);
+  struct catalog_entry *e = find_stage_entry(c, r);
   if (!e) {
     ret = new_entry(c, r, &e);
     if (ret) goto unlock;
@@ -419,6 +494,107 @@ static int import_ps_slices(struct sbk_catalog *c, struct catalog_entry *e) {
   }
   return 0;
 }
+/* PS ownership imports must finish before any SEAL_REGION can make a staged
+ * source final. Once imported, each final region owns a distinct kernel
+ * context, so the expensive dirty invalidation ioctls can run concurrently. */
+struct final_seal_job {
+  struct sbk_catalog *catalog;
+  const struct sbk_catalog_final *final;
+  struct catalog_entry **entries;
+  size_t count, next;
+  unsigned active, peak;
+  int import_phase;
+  int error;
+  pthread_mutex_t lock;
+};
+static void *final_seal_worker(void *arg) {
+  struct final_seal_job *job = arg;
+  for (;;) {
+    pthread_mutex_lock(&job->lock);
+    size_t i = job->next++;
+    int done = job->error || i >= job->count;
+    if (!done && ++job->active > job->peak) job->peak = job->active;
+    pthread_mutex_unlock(&job->lock);
+    if (done) break;
+    const struct sbk_catalog_final *f = &job->final[i];
+    struct catalog_entry *e = job->entries[i];
+    int ret = 0;
+    if (job->import_phase) {
+      if (!e->staged) ret = import_ps_slices(job->catalog, e);
+      if (!ret && f->hot_count) {
+        e->hot = malloc(f->hot_count * sizeof(*e->hot));
+        if (!e->hot) ret = -ENOMEM;
+        else {
+          memcpy(e->hot, f->hot, f->hot_count * sizeof(*e->hot));
+          e->hot_count = f->hot_count;
+        }
+      }
+    } else {
+      struct sbk_region_seal seal = {
+        .remote = f->record.remote,
+        .dirty = {.indices = (uintptr_t)f->dirty, .count = f->dirty_count}};
+      if (ioctl(e->fd, SBK_IOC_SEAL_REGION, &seal)) ret = -errno;
+    }
+    pthread_mutex_lock(&job->lock);
+    job->active--;
+    if (ret && !job->error) job->error = ret;
+    pthread_mutex_unlock(&job->lock);
+  }
+  return NULL;
+}
+static int run_final_workers(struct final_seal_job *job, unsigned workers,
+                             unsigned *started, unsigned *peak) {
+  int ret = pthread_mutex_init(&job->lock, NULL);
+  if (ret) return -ret;
+  pthread_t threads[31];
+  unsigned nr = 0;
+  if (workers > job->count) workers = job->count;
+  for (unsigned i = 1; i < workers; i++) {
+    /* The caller drains unclaimed work if thread creation fails. All started
+     * helpers are joined before a context or its source PS pages can close. */
+    if (pthread_create(&threads[nr], NULL, final_seal_worker, job)) break;
+    nr++;
+  }
+  *started = nr + 1;
+  final_seal_worker(job);
+  for (unsigned i = 0; i < nr; i++) pthread_join(threads[i], NULL);
+  ret = job->error;
+  *peak = job->peak;
+  pthread_mutex_destroy(&job->lock);
+  return ret;
+}
+static int seal_final_parallel(struct sbk_catalog *c,
+                               const struct sbk_catalog_final *final, size_t n) {
+  struct catalog_entry **entries = calloc(n, sizeof(*entries));
+  if (!entries) return -ENOMEM;
+  int ret = 0;
+  uint64_t begin = catalog_now_ns();
+  for (size_t i = 0; i < n; i++) {
+    entries[i] = find_entry(c, &final[i].record);
+    if (!entries[i]) { ret = -ENOENT; goto out; }
+  }
+  struct final_seal_job import = {.catalog=c, .final=final, .entries=entries,
+                                  .count=n, .import_phase=1};
+  ret = run_final_workers(&import, c->prepare_workers,
+                          &c->timing.import_workers_started,
+                          &c->timing.import_peak);
+  c->timing.seal_import_ns = catalog_now_ns() - begin;
+  if (ret) goto out;
+  begin = catalog_now_ns();
+  struct final_seal_job job = {.catalog=c, .final=final, .entries=entries, .count=n};
+  ret = run_final_workers(&job, c->prepare_workers,
+                          &c->timing.seal_workers_started,
+                          &c->timing.seal_peak);
+  c->timing.seal_io_ns = catalog_now_ns() - begin;
+  if (ret) goto out;
+  for (size_t i = 0; i < n; i++) {
+    entries[i]->record = final[i].record;
+    entries[i]->final = 1;
+  }
+out:
+  free(entries);
+  return ret;
+}
 int sbk_catalog_seal(struct sbk_catalog *c,
                      const struct sbk_catalog_final *final, size_t n) {
   if (!c || c->phase || !final || !n || n > SBK_MAX_REGIONS)
@@ -451,11 +627,26 @@ int sbk_catalog_seal(struct sbk_catalog *c,
   c->phase = -1; /* Any subsequent failure requires discarding the catalog. */
   c->timing.validate_ns = catalog_now_ns() - begin;
   begin = catalog_now_ns();
+  retire_unmatched_plans(c, final, n);
   int prepare_ret = prepare_final_entries(c, final, n);
   c->timing.prepare_ns = catalog_now_ns() - begin;
   begin = catalog_now_ns();
   if (prepare_ret) return prepare_ret;
-  for (size_t i = 0; i < n; i++) {
+  /* A source range claimed by two final records needs the old serial import
+   * ordering. Ordinary CRIU layouts are disjoint and take the parallel path. */
+  int parallel = c->prepare_workers > 1;
+  for (size_t i = 0; parallel && i < n; i++)
+    for (size_t j = 0; j < i; j++)
+      if (final[i].record.source_pid == final[j].record.source_pid &&
+          final[i].record.address < final[j].record.address + (final[j].record.remote.pages << 12) &&
+          final[j].record.address < final[i].record.address + (final[i].record.remote.pages << 12)) {
+        parallel = 0;
+        break;
+      }
+  if (parallel) {
+    int ret = seal_final_parallel(c, final, n);
+    if (ret) return ret;
+  } else for (size_t i = 0; i < n; i++) {
     const struct sbk_catalog_final *f = &final[i];
     struct catalog_entry *e = find_entry(c, &f->record);
     int ret;
@@ -753,15 +944,20 @@ int sbk_catalog_totals(struct sbk_catalog *c, struct sbk_stats *out) {
 }
 
 int sbk_catalog_audit_deficits(struct sbk_catalog *c,
-                              void (*report)(const struct sbk_catalog_audit *)) {
-  if (!c || c->phase != 1 || !report) return -EINVAL;
+                              void (*report)(const struct sbk_catalog_audit *),
+                              uint64_t *retired_unfetched) {
+  if (!c || c->phase != 1 || !report || !retired_unfetched) return -EINVAL;
+  *retired_unfetched = 0;
   for (size_t i = 0; i < c->count; i++) {
     struct catalog_entry *e = c->entries[i];
     struct sbk_catalog_audit a = {.record=e->record};
     if (ioctl(e->fd, SBK_IOC_STATS, &a.stats)) return -errno;
+    if (a.stats.errors || a.stats.completed > a.stats.pages ||
+        a.stats.invalidated > a.stats.pretransferred) return -EPROTO;
     uint64_t total = a.stats.pretransferred - a.stats.invalidated;
     for (unsigned lane = 0; lane < SBK_LANES; lane++) total += a.stats.fetched[lane];
     if (a.stats.completed == a.stats.pages && total == a.stats.pages) continue;
+    if (total != a.stats.completed) return -EPROTO;
     if (ioctl(e->fd, SBK_IOC_DRAIN_STATUS, &a.drain)) return -errno;
     /* All marker owners and admitted workers must have joined before reading
      * a stable state census; refuse to draw conclusions from a live context. */
@@ -771,6 +967,12 @@ int sbk_catalog_audit_deficits(struct sbk_catalog *c,
       if (ioctl(e->fd, SBK_IOC_PAGE, &info)) return -errno;
       a.states[info.state < 7 ? info.state : 7]++;
     }
+    uint64_t unfetched = a.states[0] + a.states[1] + a.states[2];
+    if (unfetched != a.stats.pages - a.stats.completed ||
+        a.states[3] || a.states[5] || a.states[7] ||
+        a.states[4] + a.states[6] != a.stats.completed)
+      return -EPROTO;
+    *retired_unfetched += unfetched;
     report(&a);
   }
   return 0;

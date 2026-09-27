@@ -30,6 +30,7 @@ obj-y += sb-kernel-catalog.o
 obj-y += sb-kernel-transfer.o
 obj-y += sb-kernel-precopy.o
 obj-y += sb-kernel-sparse.o
+obj-y += sb-kernel-layout.o
 obj-y += sb-kernel-work.o
 obj-y			+= cr-errno.o
 obj-y			+= cr-restore.o

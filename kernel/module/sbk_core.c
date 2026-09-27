@@ -72,7 +72,7 @@ struct sbk_context {
 	struct sbk_config cfg;
 	struct sbk_rdma *rdma;
 	struct sbk_rdma_region region;
-	bool has_region;
+	bool has_region, unbound_region;
 	struct page **source;
 	unsigned long pinned;
 	struct sbk_entry *entries;
@@ -617,7 +617,7 @@ static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 	unsigned long i;
 	int ret;
 	u64 begin = 0, allocated = 0, bound = 0, bridged = 0;
-	if (!c->configured || c->mapped || c->tokens_created ||
+	if (!c->configured || c->mapped || c->unbound_region || c->tokens_created ||
 	    (c->pretransferred && !c->sealed) || atomic_read(&c->stopping))
 		return -EINVAL;
 	if (copy_from_user(&a, user, sizeof(a)))
@@ -895,7 +895,7 @@ static int sbk_configure(struct sbk_context *c, void __user *arg)
 	    (cfg.test_fail_page != SBK_NO_FAILURE && cfg.test_fail_page >= cfg.pages))
 		return -EINVAL;
 	if (cfg.backend == SBK_BACKEND_RDMA) {
-		if (!sbk_rdma_ready(c->rdma, c->has_region ? 0 : cfg.pages) ||
+		if (!sbk_rdma_ready(c->rdma, (c->has_region || c->unbound_region) ? 0 : cfg.pages) ||
 		    (c->has_region && c->region.pages != cfg.pages) || cfg.test_delay_us ||
 		    cfg.test_fail_page != SBK_NO_FAILURE || cfg.source_address)
 			return -EINVAL;
@@ -1129,6 +1129,8 @@ static int sbk_stage_list(struct sbk_context *c, struct sbk_hot_list list, bool 
 	int ret = 0;
 	if (!c->configured || c->mapped || c->sealed || atomic_read(&c->stopping))
 		return -EINVAL;
+	if (c->unbound_region && !seal)
+		return -EINVAL; /* Only PS ownership import is valid before final binding. */
 	if (list.count > c->cfg.pages || (!seal && !parallel && list.count > SBK_MAX_BATCH))
 		return -EINVAL;
 	if (list.count) {
@@ -1213,7 +1215,7 @@ static int sbk_seal_region(struct sbk_context *c, void __user *user)
 {
 	struct sbk_region_seal seal;
 	int ret;
-	if (!c->has_region || !c->configured || c->mapped || c->sealed ||
+	if ((!c->has_region && !c->unbound_region) || !c->configured || c->mapped || c->sealed ||
 	    atomic_read(&c->stopping))
 		return -EINVAL;
 	if (copy_from_user(&seal, user, sizeof(seal)))
@@ -1224,8 +1226,11 @@ static int sbk_seal_region(struct sbk_context *c, void __user *user)
 	if (ret)
 		return ret;
 	ret = sbk_stage_list(c, seal.dirty, true, false);
-	if (!ret)
+	if (!ret) {
 		c->region = seal.remote;
+		c->has_region = true;
+		c->unbound_region = false;
+	}
 	sbk_rdma_put(c->rdma);
 	return ret;
 }
@@ -1257,7 +1262,7 @@ static int sbk_bind_region(struct file *file, void __user *user)
 	parent = session->private_data;
 	mutex_lock(&parent->control);
 	r = parent->rdma;
-	ret = (parent->has_region || parent->config_attempted ||
+	ret = (parent->has_region || parent->unbound_region || parent->config_attempted ||
 	       atomic_read(&parent->stopping)) ? -EINVAL :
 		sbk_rdma_get_region(r, &bind.remote);
 #ifdef CONFIG_SWIFTBATON_PTE
@@ -1316,7 +1321,8 @@ static int sbk_import_ps(struct file *file, void __user *user)
 	second = first == src ? dst : src;
 	mutex_lock(&first->control);
 	mutex_lock_nested(&second->control, SINGLE_DEPTH_NESTING);
-	if (!src->configured || !dst->configured || !src->has_region || !dst->has_region ||
+	if (!src->configured || !dst->configured || !src->has_region ||
+	    (!dst->has_region && !dst->unbound_region) ||
 	    src->rdma != dst->rdma || src->mapped || dst->mapped || src->sealed || dst->sealed ||
 	    src->background_started || dst->background_started ||
 	    atomic_read(&src->stopping) || atomic_read(&dst->stopping) ||
@@ -1380,7 +1386,7 @@ static int sbk_export_region(struct sbk_context *c, void __user *user)
 		return -EFAULT;
 	mutex_lock(&c->control);
 	r = c->rdma;
-	if (!r || c->has_region || c->config_attempted || atomic_read(&c->stopping)) {
+	if (!r || c->has_region || c->unbound_region || c->config_attempted || atomic_read(&c->stopping)) {
 		mutex_unlock(&c->control);
 		return -EINVAL;
 	}
@@ -1470,7 +1476,7 @@ static int sbk_export_batch(struct sbk_context *c, void __user *user)
 	if (!workers) { ret = -ENOMEM; goto free_job; }
 	mutex_lock(&c->control);
 	job->rdma = c->rdma;
-	if (!job->rdma || c->has_region || c->config_attempted || atomic_read(&c->stopping)) {
+	if (!job->rdma || c->has_region || c->unbound_region || c->config_attempted || atomic_read(&c->stopping)) {
 		mutex_unlock(&c->control);
 		goto free_workers;
 	}
@@ -1549,6 +1555,10 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		return sbk_export_region(c, user);
 	if (cmd == SBK_IOC_BIND_REGION)
 		return sbk_bind_region(f, user);
+#ifdef SBK_PTE_PLAN_API
+	if (cmd == SBK_IOC_BIND_UNBOUND)
+		return sbk_bind_unbound(f, user);
+#endif
 	if (cmd == SBK_IOC_IMPORT_PS)
 		return sbk_import_ps(f, user);
 	mutex_lock(&c->control);
@@ -1561,7 +1571,7 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		caps.features |= SBK_FEATURE_ANONYMOUS_PTE | SBK_FEATURE_TOKEN_POOL;
 #endif
 #ifdef SBK_PTE_PLAN_API
-		caps.features |= SBK_FEATURE_PREPARED_ARM;
+		caps.features |= SBK_FEATURE_PREPARED_ARM | SBK_FEATURE_UNBOUND_REGION;
 #endif
 		ret = copy_to_user(user, &caps, sizeof(caps)) ? -EFAULT : 0;
 		break;
@@ -1584,13 +1594,13 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		ret = copy_to_user(user, &drain, sizeof(drain)) ? -EFAULT : 0;
 		break;
 	case SBK_IOC_DMA_ENABLE:
-		ret = c->config_attempted || c->has_region ? -EBUSY : sbk_rdma_dma_enable(c->rdma);
+		ret = c->config_attempted || c->has_region || c->unbound_region ? -EBUSY : sbk_rdma_dma_enable(c->rdma);
 		break;
 	case SBK_IOC_DMA_EXPORT_MAP:
 	case SBK_IOC_DMA_IMPORT_MAP:
 	{
 		struct sbk_dma_map map;
-		if (c->config_attempted || c->has_region) ret = -EBUSY;
+		if (c->config_attempted || c->has_region || c->unbound_region) ret = -EBUSY;
 		else if (copy_from_user(&map, user, sizeof(map))) ret = -EFAULT;
 		else ret = sbk_rdma_dma_map(c->rdma, &map, cmd == SBK_IOC_DMA_IMPORT_MAP);
 		break;
@@ -1650,7 +1660,7 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		ret = sbk_seal_region(c, user);
 		break;
 	case SBK_IOC_SEAL:
-		ret = sbk_stage(c, user, true, false);
+		ret = c->unbound_region ? -EINVAL : sbk_stage(c, user, true, false);
 		break;
 	case SBK_IOC_RDMA_CREATE:
 		if (c->rdma || c->config_attempted || atomic_read(&c->stopping)) {
@@ -1731,7 +1741,7 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	case SBK_IOC_CANCEL:
 		atomic_set(&c->stopping, 1);
 		/* A region only cancels itself; catalog controller cancels all views. */
-		if (!c->has_region)
+		if (!c->has_region && !c->unbound_region)
 			sbk_rdma_cancel(c->rdma);
 		if (c->configured)
 			for (i = 0; i < c->cfg.pages; i++)
@@ -1751,7 +1761,7 @@ static int sbk_mmap(struct file *file, struct vm_area_struct *vma)
 	/* mmap holds mmap_write_lock; configure can fault/pin source pages. */
 	if (!mutex_trylock(&c->control))
 		return -EAGAIN;
-	if (!c->configured || c->mapped || c->plan_mode || c->drain_event || atomic_read(&c->stopping) ||
+	if (!c->configured || c->mapped || c->unbound_region || c->plan_mode || c->drain_event || atomic_read(&c->stopping) ||
 	    (c->pretransferred && !c->sealed) ||
 	    vma->vm_pgoff || (vma->vm_end - vma->vm_start) != c->cfg.pages * PAGE_SIZE ||
 	    (vma->vm_flags & (VM_SHARED | VM_EXEC))) {

@@ -12,7 +12,7 @@ case "$sb_mode" in
  tsan) sb_flags=(-fsanitize=thread -fno-omit-frame-pointer -fno-pie -no-pie);;
  *) exit 2;;
 esac
-for sb_name in catalog-stage test-final-prepare; do
+for sb_name in catalog-stage test-final-prepare test-ps-layout; do
  sb_wrap=();if [[ $sb_name == test-final-prepare ]];then sb_wrap=(-Wl,--wrap=pthread_create);fi
  cc -std=gnu11 -O1 -g -Wall -Wextra -Werror -pthread "${sb_flags[@]}" \
   -iquote "$sb_repo/criu-k/criu/include" -iquote "$sb_repo/criu-k/include" \

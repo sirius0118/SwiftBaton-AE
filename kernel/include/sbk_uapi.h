@@ -59,6 +59,7 @@ struct sbk_region_seal {
 #define SBK_FEATURE_TOKEN_POOL (1U << 5)
 #define SBK_FEATURE_DMA_MR (1U << 6)
 #define SBK_FEATURE_PREPARED_ARM (1U << 7)
+#define SBK_FEATURE_UNBOUND_REGION (1U << 8)
 #define SBK_TOKEN_POOL_MAX_PAGES (1U << 22)
 struct sbk_token_pool_stats {
     __u64 available, prepared, claimed, fallback;
@@ -177,4 +178,10 @@ struct sbk_dma_map {
  * prove that PS page bytes or source PFNs are still valid. Once preparation
  * binds tokens, a failure requires closing the fd. Probe feature bit first. */
 #define SBK_IOC_PREPARE_ANON _IOW('B', 27, struct sbk_anon_arm)
+/* Borrow a connected destination catalog without an MR descriptor. CONFIG
+ * fixes the size, PREPARE_ANON may run during PS, and IMPORT_PS can move cached
+ * bytes. Reads/ARM/mmap/generic SEAL remain forbidden until SEAL_REGION
+ * validates the final MR and invalidates the final dirty/PFN set. The view's
+ * cancellation never cancels the shared catalog transport. */
+#define SBK_IOC_BIND_UNBOUND _IOW('B', 28, __s32)
 #endif

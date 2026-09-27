@@ -773,6 +773,7 @@ static int peer_test(int source_side)
 #include "dma-mr-test.inc"
 #include "creator-drop-test.inc"
 #include "prepared-arm-test.inc"
+#include "unbound-region-test.inc"
 
 int main(int argc, char **argv)
 {
@@ -806,6 +807,7 @@ int main(int argc, char **argv)
     if(use_anon){test_anonymous_fork_and_discard(0);test_guard_background();test_anonymous_background_fork_move(0);}
     puts("SBK_VM_TESTS_PASS backend=LOOPBACK_TEST not_RDMA");
     if (getenv("SBK_TEST_RDMA")) {
+        if (use_prepared_arm) test_unbound_regions();
         test_rdma_export_batch();
         test_rdma_catalog();
         test_session_dispatch();

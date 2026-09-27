@@ -14,6 +14,7 @@ p.add_argument('--precopy-limit-mb', type=int)
 p.add_argument('--kernel-export-workers', type=int, choices=range(1,33))
 p.add_argument('--kernel-catalog-workers', type=int, choices=range(1,33))
 p.add_argument('--kernel-dma-mr', action='store_true')
+p.add_argument('--kernel-ps-arm', action='store_true')
 p.add_argument('--kernel-export-chunk-mb', type=int)
 p.add_argument('--validation-workers', type=int, choices=range(1,33))
 a=p.parse_args()
@@ -31,6 +32,9 @@ for key,value in (('--kernel-catalog-workers',a.kernel_catalog_workers),('--kern
   if key=='--kernel-export-chunk-mb' and not 0<=value<=4096:raise SystemExit('kernel-export-chunk-mb must be 0..4096')
   if key in profile:profile[profile.index(key)+1]=str(value)
   else:profile += [key,str(value)]
+if a.kernel_ps_arm:
+ if a.mode!='K':raise SystemExit('--kernel-ps-arm requires K mode')
+ profile += ['--kernel-ps-arm']
 if a.kernel_dma_mr:
  if a.mode!='K':raise SystemExit('--kernel-dma-mr requires K mode')
  profile += ['--kernel-dma-mr']

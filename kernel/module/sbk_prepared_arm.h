@@ -1,6 +1,53 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Optional PS control path. Included after the anonymous token provider.
  * Normal ARM remains available on kernels without the detached-plan API. */
+static int sbk_bind_unbound(struct file *file, void __user *user)
+{
+	struct sbk_context *c = file->private_data, *parent;
+	struct sbk_rdma *r;
+	struct sbk_token_pool *pool = NULL;
+	struct file *session;
+	s32 session_fd;
+	int ret = -EINVAL;
+	if (copy_from_user(&session_fd, user, sizeof(session_fd)))
+		return -EFAULT;
+	session = fget(session_fd);
+	if (!session)
+		return -EBADF;
+	if (session == file || session->f_op != &sbk_fops)
+		goto out;
+	parent = session->private_data;
+	mutex_lock(&parent->control);
+	r = parent->rdma;
+	if (!parent->has_region && !parent->unbound_region && !parent->config_attempted &&
+	    !atomic_read(&parent->stopping) && sbk_rdma_ready(r, 0)) {
+		sbk_rdma_get(r);
+		pool = parent->token_pool;
+		sbk_token_pool_get(pool);
+		ret = 0;
+	}
+	mutex_unlock(&parent->control);
+	if (ret)
+		goto out;
+	mutex_lock(&c->control);
+	if (c->rdma || c->config_attempted || atomic_read(&c->stopping)) {
+		ret = -EBUSY;
+	} else {
+		c->rdma = r;
+		c->unbound_region = true;
+		sbk_token_pool_put(c->token_pool);
+		c->token_pool = pool;
+		pool = NULL;
+	}
+	mutex_unlock(&c->control);
+	sbk_token_pool_put(pool);
+	if (ret)
+		sbk_rdma_put(r);
+out:
+	fput(session);
+	return ret;
+}
+
 static int sbk_prepare_anonymous(struct sbk_context *c, void __user *user)
 {
 	struct sbk_anon_arm a;
