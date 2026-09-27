@@ -45,6 +45,11 @@ a bytewise checksum of all values. A smoke run in default mode
 and catalog fixtures passed. The all-range sample is small and does not
 establish a reliable sub-50 ms guarantee.
 
+A later default-mode 32 MiB PS control (`sb_ae_20260928_045423`) retained
+7,639 valid PS pages but had a 61.92 ms client gap, 7.22 ms frozen MR
+export, and 2.29 s TTR90. It passed the same integrity and rollback checks.
+Reducing the PS budget alone did not give a reliable sub-50 ms result.
+
 Run the opt-in mode with:
 
 ```sh
