@@ -2302,13 +2302,17 @@ int cr_lazy_pages(bool daemon)
         sync_fd_PC = syncClientInit(opts.addr, opts.port);
         if (page_sync < 0 || sync_fd_PC < 0 || sb_images_init(sync_fd_PC, 0) ||
             sb_parallel_negotiate(sync_fd_PC) || sb_kernel_connect(sync_fd_PC, 0)) return -1;
-        if (sb_kernel_receive_ps(sync_fd_PC) ||
-            sb_images_receive(sync_fd_PC, DUMP_NAMESPACE_DONE) ||
+        if (sb_kernel_receive_ps(sync_fd_PC)) return -1;
+        /* Bind before the final image/catalog arrives. Restore can connect
+         * and prepare its task while the catalog is sealed. Accept and serve
+         * still happen only after final validation and END_PROCESS_DUMP. */
+        lazy_sk = prepare_lazy_socket();
+        if (lazy_sk < 0) return -1;
+        if (sb_images_receive(sync_fd_PC, DUMP_NAMESPACE_DONE) ||
             sb_images_receive(sync_fd_PC, END_PROCESS_DUMP) ||
             sb_kernel_client_receive(sync_fd_PC)) return -1;
         wait_state(sync_fd_PC, END_PROCESS_DUMP);
-        lazy_sk = prepare_lazy_socket();
-        if (lazy_sk < 0 || status_ready()) return -1;
+        if (status_ready()) return -1;
         /* The existing external driver owns this page-client process. Do not
          * fork after constructing kernel contexts and notification ownership. */
         ret = sb_kernel_client_serve(lazy_sk, sync_fd_PC);
