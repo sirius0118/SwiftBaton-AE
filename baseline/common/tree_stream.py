@@ -5,6 +5,7 @@ Every inter-host byte travels over RDMA. Entries are copied incrementally, so
 large Redis image sets do not require a second in-memory copy of the tree.
 """
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -13,8 +14,9 @@ import socket
 import struct
 import time
 
-MAGIC = b'SB-TREE-1\n'
+MAGIC = b'SB-TREE-2\n'
 CHUNK = 1024 * 1024
+SEGMENT = 128 * CHUNK
 
 
 def entries(source):
@@ -26,10 +28,11 @@ def entries(source):
     return found
 
 
-def send(source, port):
+def send(source, port, data_ports):
     found = entries(source)
     digest = hashlib.sha256()
     transferred = 0
+    sessions = 0
     start = time.monotonic()
     with socket.create_connection(('127.0.0.1', port), timeout=15) as conn:
         conn.settimeout(300)
@@ -47,19 +50,32 @@ def send(source, port):
             digest.update(framed)
             if path.is_file():
                 with path.open('rb') as image:
-                    while True:
-                        block = image.read(CHUNK)
-                        if not block:
-                            break
-                        conn.sendall(block)
-                        digest.update(block)
-                        transferred += len(block)
+                    remaining = st.st_size
+                    while remaining:
+                        segment = min(remaining, SEGMENT)
+                        data_port = data_ports[sessions % len(data_ports)]
+                        with socket.create_connection(('127.0.0.1', data_port), timeout=15) as data:
+                            data.settimeout(300)
+                            part = segment
+                            while part:
+                                block = image.read(min(CHUNK, part))
+                                if not block:
+                                    raise EOFError('image changed during transfer: ' + str(path))
+                                data.sendall(block)
+                                digest.update(block)
+                                transferred += len(block)
+                                part -= len(block)
+                            data.shutdown(socket.SHUT_WR)
+                            if recv_exact(data, 2) != b'OK':
+                                raise RuntimeError('receiver rejected image segment')
+                        remaining -= segment
+                        sessions += 1
         conn.sendall(digest.digest())
         conn.shutdown(socket.SHUT_WR)
         if recv_exact(conn, 2) != b'OK':
             raise RuntimeError('receiver rejected image tree')
-    print('files=%d payload_bytes=%d sha256=%s elapsed_ms=%.3f' %
-          (len(found), transferred, digest.hexdigest(), (time.monotonic() - start) * 1000), flush=True)
+    print('files=%d payload_bytes=%d data_sessions=%d sha256=%s elapsed_ms=%.3f' %
+          (len(found), transferred, sessions, digest.hexdigest(), (time.monotonic() - start) * 1000), flush=True)
 
 
 def recv_exact(conn, count):
@@ -79,7 +95,7 @@ def safe_path(root, name):
     return root.joinpath(*rel.parts)
 
 
-def receive(destination, port, max_bytes):
+def receive(destination, port, data_ports, max_bytes):
     if destination.exists():
         raise FileExistsError(destination)
     staging = destination.with_name(destination.name + '.receiving')
@@ -87,11 +103,22 @@ def receive(destination, port, max_bytes):
         raise FileExistsError(staging)
     digest = hashlib.sha256()
     transferred = 0
+    sessions = 0
     start = time.monotonic()
-    with socket.socket() as listener:
+    with socket.socket() as listener, contextlib.ExitStack() as sockets:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(('127.0.0.1', port))
         listener.listen(1)
+        data_listeners = []
+        for data_port in data_ports:
+            if data_port == port:
+                data_listeners.append(listener)
+                continue
+            data_listener = sockets.enter_context(socket.socket())
+            data_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            data_listener.bind(('127.0.0.1', data_port))
+            data_listener.listen(1)
+            data_listeners.append(data_listener)
         with listener.accept()[0] as conn:
             conn.settimeout(300)
             if recv_exact(conn, len(MAGIC)) != MAGIC:
@@ -121,19 +148,29 @@ def receive(destination, port, max_bytes):
                     with path.open('xb') as image:
                         remaining = size
                         while remaining:
-                            block = recv_exact(conn, min(CHUNK, remaining))
-                            image.write(block)
-                            digest.update(block)
-                            transferred += len(block)
-                            remaining -= len(block)
+                            segment = min(remaining, SEGMENT)
+                            with data_listeners[sessions % len(data_listeners)].accept()[0] as data:
+                                data.settimeout(300)
+                                part = segment
+                                while part:
+                                    block = recv_exact(data, min(CHUNK, part))
+                                    image.write(block)
+                                    digest.update(block)
+                                    transferred += len(block)
+                                    part -= len(block)
+                                if data.recv(1):
+                                    raise ValueError('segment exceeds declared size')
+                                data.sendall(b'OK')
+                            remaining -= segment
+                            sessions += 1
                 os.chmod(path, info['mode'] & 0o777)
             expected = recv_exact(conn, 32)
             if digest.digest() != expected:
                 raise ValueError('image tree digest mismatch')
             staging.rename(destination)
             conn.sendall(b'OK')
-    print('files=%d payload_bytes=%d sha256=%s elapsed_ms=%.3f' %
-          (count, transferred, digest.hexdigest(), (time.monotonic() - start) * 1000), flush=True)
+    print('files=%d payload_bytes=%d data_sessions=%d sha256=%s elapsed_ms=%.3f' %
+          (count, transferred, sessions, digest.hexdigest(), (time.monotonic() - start) * 1000), flush=True)
 
 
 def main():
@@ -141,12 +178,16 @@ def main():
     parser.add_argument('mode', choices=('send', 'receive'))
     parser.add_argument('directory', type=pathlib.Path)
     parser.add_argument('--port', type=int, required=True)
+    parser.add_argument('--data-ports', help='comma-separated loopback data ports; defaults to --port')
     parser.add_argument('--max-gib', type=int, default=64)
     args = parser.parse_args()
+    data_ports = [int(port) for port in args.data_ports.split(',')] if args.data_ports else [args.port]
+    if not data_ports or len(set(data_ports)) != len(data_ports) or any(not 1 <= port <= 65535 for port in data_ports):
+        parser.error('invalid --data-ports')
     if args.mode == 'send':
-        send(args.directory, args.port)
+        send(args.directory, args.port, data_ports)
     else:
-        receive(args.directory, args.port, args.max_gib * (1 << 30))
+        receive(args.directory, args.port, data_ports, args.max_gib * (1 << 30))
 
 
 if __name__ == '__main__':

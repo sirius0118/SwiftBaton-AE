@@ -95,12 +95,27 @@ static int local_connect(const struct sockaddr_in *address)
 	}
 }
 
+static int configure_rdma_socket(int fd)
+{
+	int buffer_bytes = 8 * 1024 * 1024;
+	int queue_entries = 512;
+	if (rsetsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer_bytes, sizeof(buffer_bytes)) ||
+	    rsetsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buffer_bytes, sizeof(buffer_bytes)) ||
+	    rsetsockopt(fd, SOL_RDMA, RDMA_RQSIZE, &queue_entries, sizeof(queue_entries)) ||
+	    rsetsockopt(fd, SOL_RDMA, RDMA_SQSIZE, &queue_entries, sizeof(queue_entries))) {
+		perror("configure rsocket buffers/queues");
+		return -1;
+	}
+	return 0;
+}
+
 static int relay_rdma_connect(const struct sockaddr_in *address)
 {
 	int fd = rsocket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0)
 		return -1;
-	if (rconnect(fd, (const struct sockaddr *)address, sizeof(*address))) {
+	if (configure_rdma_socket(fd) ||
+	    rconnect(fd, (const struct sockaddr *)address, sizeof(*address))) {
 		rclose(fd);
 		return -1;
 	}
@@ -218,7 +233,8 @@ int main(int argc, char **argv)
 	int listener;
 	if (server) {
 		listener = rsocket(AF_INET, SOCK_STREAM, 0);
-		if (listener < 0 || rbind(listener, (struct sockaddr *)&local, sizeof(local)) ||
+		if (listener < 0 || configure_rdma_socket(listener) ||
+		    rbind(listener, (struct sockaddr *)&local, sizeof(local)) ||
 		    rlisten(listener, 128) || rfcntl(listener, F_SETFL, O_NONBLOCK)) {
 			perror("RDMA listen");
 			return 1;

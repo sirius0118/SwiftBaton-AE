@@ -25,7 +25,7 @@ Current verification:
 
 | Baseline | Implementation | Verified |
 | --- | --- | --- |
-| Native CRIU | Unmodified upstream v3.18 and rsocket image transfer | Standalone 64 MiB process and Redis container, Node2 to Node3; YCSB pending |
+| Native CRIU | Unmodified upstream v3.18 and rsocket image transfer | Standalone 64 MiB process; Redis container; 100k x 1 KiB Redis/YCSB with full key and 8 MiB canary verification |
 | PCLive prototype | One PS snapshot into anonymous resident staging, final validity and `mremap` adoption | 100k-key Redis/YCSB smoke, full key/canary validation |
 | Optimized post-copy prototype | PS payload disabled; independent demand and address-order BG lanes | 100k-key Redis/YCSB smoke, PF=543, BG=64,966, FT=PS=0 |
 | Hybrid-copy prototype | PS staging plus independent demand/BG; address-order BG | 100k-key Redis/YCSB smoke, PS=18,622, PF=99, BG=46,788 |
@@ -42,6 +42,13 @@ checks. Updating the resident target memory with successive dirty snapshots
 remains to be implemented before it is a full PCLive baseline. The hybrid
 profile reuses the sorted page index and validity bitmap, so it does not
 construct one pipe per surviving page; fragmentation scaling still needs a
-specific stress test. Native CRIU needs a full YCSB run and matched performance
-analysis. Cross-baseline throughput and downtime comparisons are not yet
+specific stress test. Native CRIU's matched 100k x 1 KiB trial
+(`sb_native_20260928_061945`) observed an 8314 ms common successful-operation
+gap with 177.7 MB transferred over rsocket. That gap includes the stock
+stop-and-copy checkpoint, complete image transfer, restore and client endpoint
+switch. The target's last-ten-second YCSB reference was stable at 80.3k
+ops/s; all keys and the canary passed. Run
+`SB_STOCK_CRIU=/path/to/upstream/criu/criu python3 baseline/native-criu/run_redis.py`
+to repeat it; the driver restores both installed CRIU symlinks in cleanup.
+Cross-baseline throughput and downtime comparisons are not yet
 ready; the rows above are correctness smoke tests, not measured speedups.
