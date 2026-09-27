@@ -25,6 +25,7 @@ parser.add_argument('--kernel-dense', action='store_true')
 parser.add_argument('--kernel-dma-mr', action='store_true')
 parser.add_argument('--kernel-ps-arm', action='store_true')
 parser.add_argument('--kernel-ps-mr', action='store_true')
+parser.add_argument('--kernel-ps-mr-all', action='store_true')
 parser.add_argument('--kernel-export-workers', type=int, default=1)
 parser.add_argument('--kernel-export-chunk-mb', type=int, default=0)
 parser.add_argument('--kernel-ps-chunk-mb', type=int, default=64, help='K: independently published PS span in MiB, default 64; 0 retains legacy spans')
@@ -118,7 +119,7 @@ if opts.kernel_transfer:
         ps_chunk_mb=opts.kernel_ps_chunk_mb, export_workers=opts.kernel_export_workers,
         export_chunk_mb=opts.kernel_export_chunk_mb, validation_workers=opts.validation_workers,
         catalog_workers=opts.kernel_catalog_workers, dma_mr=opts.kernel_dma_mr, ps_arm=opts.kernel_ps_arm,
-        ps_mr=opts.kernel_ps_mr)
+        ps_mr=opts.kernel_ps_mr, ps_mr_all=opts.kernel_ps_mr_all)
     try:
         kernel_settings.values()
     except ValueError as error:
@@ -713,7 +714,7 @@ try:
         STATE['kernel_ps_arm_settings'] = validate_ps_arm_config((OUT/'dump.log').read_text(errors='replace'),
             (OUT/'pageclient.log').read_text(errors='replace'), opts.kernel_ps_arm)
         STATE['kernel_ps_mr_settings'] = validate_source_prearm((OUT/'dump.log').read_text(errors='replace'),
-            opts.kernel_ps_mr)
+            opts.kernel_ps_mr, opts.kernel_ps_mr_all)
         STATE['kernel_ps_settings'] = validate_ps_config((OUT/'dump.log').read_text(errors='replace'),
             opts.kernel_ps_chunk_mb, opts.no_pretransfer)
         completions = {label: json.loads(py(host, f'from pathlib import Path;print((Path({str(OUT)!r})/{label + ".completion.json"!r}).read_text())'))

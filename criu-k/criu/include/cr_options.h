@@ -184,6 +184,7 @@ struct cr_options {
 	bool sb_kernel_dma_mr;
 	bool sb_kernel_ps_arm;
 	bool sb_kernel_ps_mr;
+	bool sb_kernel_ps_mr_all; /* Permit prearm of copied PS ranges; may invalidate them. */
 	unsigned sb_precopy_limit_mb;
 	int sync_port;
 #endif

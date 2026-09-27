@@ -42,6 +42,7 @@ class KernelSettings:
     dma_mr: bool = False
     ps_arm: bool = False
     ps_mr: bool = False
+    ps_mr_all: bool = False
 
     def values(self):
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,31}', self.device):
@@ -70,10 +71,14 @@ class KernelSettings:
                   'kernel-export-chunk-mb': self.export_chunk_mb}
         if self.ps_arm:
             values['kernel-ps-arm'] = True
+        if self.ps_mr_all and not self.ps_mr:
+            raise ValueError("All-range PS MR requires source PS MR")
         if self.ps_mr:
             if not self.ps_arm or self.dma_mr or self.dense:
                 raise ValueError('Source PS MR requires PS ARM, sparse planning and ordinary MR')
             values['kernel-ps-mr'] = True
+            if self.ps_mr_all:
+                values['kernel-ps-mr-all'] = True
         if self.dma_mr:
             values['kernel-dma-mr'] = True
         for option in ('no_pretransfer', 'no_prefetch', 'no_hot_first', 'dense'):
@@ -290,10 +295,15 @@ def validate_export_config(dump_log, workers, chunk_mb):
     rows = re.findall(r'SB_KERNEL final_export pid=(\d+) workers=(\d+) chunk_mb=(\d+) effective_pages=(\d+) peak=(\d+) regions=(\d+) result=(-?\d+)', dump_log)
     if not rows:
         raise ValueError('Missing final export runtime evidence')
+    prearm_rows = re.findall(r'SB_KERNEL final_prearm pid=(\d+) enabled=(\d+) reused=(\d+) '
+                             r'fallback=(\d+) invalid=(\d+) result=(-?\d+)', dump_log)
+    fallback_by_pid = {int(pid): int(fallback) for pid, _, _, fallback, _, status in prearm_rows
+                       if int(status) == 0}
     result = []
     for raw in rows:
         pid, actual_workers, actual_chunk, span, peak, count, status = map(int, raw)
-        if status or actual_workers != workers or actual_chunk != chunk_mb or not 1 <= peak <= min(workers, count):
+        expected_peak = peak == 0 and fallback_by_pid.get(pid) == 0
+        if status or actual_workers != workers or actual_chunk != chunk_mb or not (expected_peak or 1 <= peak <= min(workers, count)):
             raise ValueError('Failed or mismatched final export configuration')
         if not (chunk_mb or 4096)*256 <= span <= 1 << 20:
             raise ValueError('Invalid adaptive final export span')
@@ -369,11 +379,14 @@ def validate_ps_arm_config(dump_log, pageclient_log, enabled):
     return dict(enabled=True, **values)
 
 
-def validate_source_prearm(dump_log, enabled):
+def validate_source_prearm(dump_log, enabled, all_ranges=False):
     """Reject a Docker service config that silently drops the source option."""
     modes = re.findall(r'SB_KERNEL ps_mr_mode role=source enabled=(\d+)', dump_log)
     if modes != [str(int(enabled))]:
         raise ValueError('Executing source PS MR mode differs from requested mode')
+    all_modes = re.findall(r'SB_KERNEL ps_mr_all_mode role=source enabled=(\d+)', dump_log)
+    if all_modes != [str(int(all_ranges))]:
+        raise ValueError('Executing all-range PS MR mode differs from requested mode')
     summaries = re.findall(r'SB_KERNEL source_prearm_ps layout=(\d+) eligible=(\d+) '
         r'registered=(\d+) valid=(\d+) skipped_ps=(\d+) elapsed_us=(\d+)', dump_log)
     rows = re.findall(r'SB_KERNEL final_prearm pid=(\d+) enabled=(\d+) reused=(\d+) '

@@ -16,6 +16,7 @@ p.add_argument('--kernel-catalog-workers', type=int, choices=range(1,33))
 p.add_argument('--kernel-dma-mr', action='store_true')
 p.add_argument('--kernel-ps-arm', action='store_true')
 p.add_argument('--kernel-ps-mr', action='store_true')
+p.add_argument('--kernel-ps-mr-all', action='store_true')
 p.add_argument('--kernel-export-chunk-mb', type=int)
 p.add_argument('--validation-workers', type=int, choices=range(1,33))
 a=p.parse_args()
@@ -39,6 +40,9 @@ if a.kernel_ps_arm:
 if a.kernel_ps_mr:
  if a.mode!='K' or not (a.kernel_ps_arm or '--kernel-ps-arm' in profile):raise SystemExit('--kernel-ps-mr requires K and --kernel-ps-arm')
  profile += ['--kernel-ps-mr']
+if a.kernel_ps_mr_all:
+ if not a.kernel_ps_mr:raise SystemExit('--kernel-ps-mr-all requires --kernel-ps-mr')
+ profile += ['--kernel-ps-mr-all']
 if a.kernel_dma_mr:
  if a.mode!='K':raise SystemExit('--kernel-dma-mr requires K mode')
  profile += ['--kernel-dma-mr']

@@ -24,12 +24,15 @@ CRIU_OLD = '/home/k8s/exper/zxz/live_migration/SwiftBaton-K/criu-integration/cri
 parser = argparse.ArgumentParser()
 parser.add_argument('profile', choices=['smoke', 'redis'])
 parser.add_argument('--precopy-limit-mb', type=int, choices=range(1, 65537))
+parser.add_argument('--all-ps-ranges', action='store_true')
 args = parser.parse_args()
 budget_label = '-ps%d' % args.precopy_limit_mb if args.precopy_limit_mb else ''
+if args.all_ps_ranges: budget_label += '-all'
 state_file = W / ('prearm-trial-' + args.profile + budget_label + '-' +
                   time.strftime('%Y%m%d_%H%M%S') + '.json')
 log = state_file.with_suffix('.log')
 state = {'profile': args.profile, 'precopy_limit_mb': args.precopy_limit_mb,
+         'all_ps_ranges': args.all_ps_ranges,
          'source_module': str(NEW), 'old_module': str(OLD),
          'log': str(log), 'switch_attempted': False, 'success': False}
 
@@ -169,6 +172,8 @@ try:
               '--kernel-ps-arm', '--kernel-ps-mr']
     if args.precopy_limit_mb:
         common += ['--precopy-limit-mb', str(args.precopy_limit_mb)]
+    if args.all_ps_ranges:
+        common += ['--kernel-ps-mr-all']
     with log.open('w') as output:
         check = subprocess.run(common + ['--check'], env=env, stdout=output,
                                stderr=subprocess.STDOUT)

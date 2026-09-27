@@ -759,6 +759,7 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		{ "kernel-dma-mr", no_argument, 0, 1257 },
 		{ "kernel-ps-arm", no_argument, 0, 1258 },
 		{ "kernel-ps-mr", no_argument, 0, 1259 },
+		{ "kernel-ps-mr-all", no_argument, 0, 1260 },
 		{ "precopy-limit-mb", required_argument, 0, 1213 },
 		BOOL_OPT("mntns-compat-mode", &opts.mntns_compat_mode),
 		BOOL_OPT("unprivileged", &opts.unprivileged),
@@ -1209,6 +1210,9 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 			break;
 		case 1259:
 			opts.sb_kernel_ps_mr = true;
+			break;
+		case 1260:
+			opts.sb_kernel_ps_mr_all = true;
 			break;
 		case 1257:
 			opts.sb_kernel_dma_mr = true;

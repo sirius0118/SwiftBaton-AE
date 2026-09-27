@@ -140,8 +140,8 @@ static int source_range_compare(const void *a, const void *b) {
 }
 /* Split CRIU's frozen VMAs around still-valid prearmed MRs. Every omitted
  * page is pinned by a read-only MR whose notifier was installed before GUP;
- * all other pages, including PS candidates and newly faulted gaps, retain
- * the ordinary frozen pagemap scan. Return 0 to keep the old full scan. */
+ * all other pages, including newly faulted gaps, retain the ordinary
+ * frozen pagemap scan. PS candidates are still validated separately. Return 0 to keep the old full scan. */
 static int source_partition_prearmed(int pid, const struct sbk_rdma_region *input,
                                     unsigned count, unsigned capacity,
                                     struct sbk_rdma_region **scan, unsigned *scan_count,
@@ -286,7 +286,8 @@ static uint64_t kernel_now_ns(void) {
 
 int sb_kernel_options(void) {
   if (!opts.sb_kernel_transfer)
-    return (opts.sb_kernel_dma_mr || opts.sb_kernel_ps_arm || opts.sb_kernel_ps_mr) ? -EINVAL : 0;
+    return (opts.sb_kernel_dma_mr || opts.sb_kernel_ps_arm || opts.sb_kernel_ps_mr || opts.sb_kernel_ps_mr_all) ? -EINVAL : 0;
+  if (opts.sb_kernel_ps_mr_all && !opts.sb_kernel_ps_mr) return -EINVAL;
   if (opts.sb_kernel_ps_mr && (!opts.sb_kernel_ps_arm || opts.sb_kernel_dma_mr || opts.sb_kernel_dense)) {
     pr_err("K source PS MR requires PS ARM, sparse planning and ordinary MRs\n");
     return -EINVAL;
@@ -415,6 +416,7 @@ int sb_kernel_connect(int socket_fd, int source) {
   peer_fd = socket_fd;
   pr_info("SB_KERNEL ps_arm_mode role=%s enabled=%u\n", source ? "source" : "destination", opts.sb_kernel_ps_arm);
   pr_info("SB_KERNEL ps_mr_mode role=%s enabled=%u\n", source ? "source" : "destination", opts.sb_kernel_ps_mr);
+  pr_info("SB_KERNEL ps_mr_all_mode role=%s enabled=%u\n", source ? "source" : "destination", opts.sb_kernel_ps_mr_all);
   pr_info("SB_KERNEL connected role=%s device=%s PF=%u FT=%u BG=%u "
           "pretransfer=%s dma_mr=%u\n",
           source ? "source" : "destination", setup.device, setup.slots[0],
@@ -589,7 +591,8 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     const uint64_t *observed = pagemap ? sbk_pm_snapshot_find(pagemap, regions[i].address, regions[i].pages) : NULL;
     bool trusted_exact = fast_sparse && source_trusted_exact(trusted_regions, trusted_count, &regions[i]);
     if ((pagemap && !observed && !trusted_exact) ||
-        (trusted_exact && sb_kernel_ps_has_candidates(pid, regions[i].address, regions[i].pages))) {
+        (!opts.sb_kernel_ps_mr_all && trusted_exact &&
+         sb_kernel_ps_has_candidates(pid, regions[i].address, regions[i].pages))) {
       ret = -ERANGE;
       goto out;
     }
@@ -606,7 +609,8 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     if (!fallback || !fallback_index) { ret = -ENOMEM; goto out; }
     for (unsigned i = 0; i < count; i++) {
       struct sbk_catalog_final *f = &final_regions[base + i];
-      struct sbk_source_prearm *p = f->dirty_count ? NULL : source_prearm_find(pid, &regions[i]);
+      struct sbk_source_prearm *p = (!opts.sb_kernel_ps_mr_all && f->dirty_count) ?
+          NULL : source_prearm_find(pid, &regions[i]);
       const uint64_t *observed = p && pagemap ?
           sbk_pm_snapshot_find(pagemap, regions[i].address, regions[i].pages) : NULL;
       bool trusted_exact = fast_sparse && source_trusted_exact(trusted_regions, trusted_count, &regions[i]);
@@ -780,9 +784,8 @@ static int send_ps_layout(int socket_fd) {
   free(layout);
   return ret;
 }
-/* PS pre-registration is a hint. Only ranges with no copied PS candidates may
- * be pinned while the source runs: ib_umem_get(FOLL_WRITE) can itself mark
- * soft-dirty and would otherwise invalidate the PS epoch. The final frozen
+/* PS pre-registration is a hint. Writable GUP may invalidate copied PS candidates
+ * through soft-dirty; final validation marks each such page dirty. The final frozen
  * plan plus exact PFNs and notifier status decide every actual reuse. */
 static void source_prearm_ps(void) {
   if (!opts.sb_kernel_ps_mr || !source_layout_count || session_fd < 0) return;
@@ -801,10 +804,13 @@ static void source_prearm_ps(void) {
     while (cursor < source_layout_count &&
            source_layout[cursor].source_pid == (uint32_t)pid && n < SBK_MAX_BATCH) {
       const struct sbk_catalog_layout *l = &source_layout[cursor++];
-      if (sb_kernel_ps_has_candidates(pid, l->address, l->pages)) {
+      if (!opts.sb_kernel_ps_mr_all &&
+          sb_kernel_ps_has_candidates(pid, l->address, l->pages)) {
         skipped_ps++;
         continue;
       }
+      /* In all-range mode, final validation invalidates any copied PS page
+       * marked soft-dirty by the writable GUP before reusing this MR. */
       slots[n] = source_prearm_count;
       source_prearm[source_prearm_count++] = (struct sbk_source_prearm){
           .pid = pid, .region = {.address = l->address, .pages = l->pages}};
