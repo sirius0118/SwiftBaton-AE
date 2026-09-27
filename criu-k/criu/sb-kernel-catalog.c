@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #endif
 #include "sb-kernel-catalog.h"
+#include "log.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -37,6 +38,7 @@ struct catalog_entry {
 struct sbk_catalog {
   pthread_mutex_t stage_lock;
   int session, phase, early_imported;
+  unsigned demand_only;
   unsigned features, prepare_workers;
   struct sbk_config config;
   struct catalog_entry **entries;
@@ -405,6 +407,10 @@ struct sbk_catalog *sbk_catalog_create(int session,
     free(c->entries); close(c->session); free(c); errno = init; return NULL;
   }
   c->config = *config;
+  c->demand_only = getenv("SBK_DEMAND_ONLY") &&
+                   !strcmp(getenv("SBK_DEMAND_ONLY"), "1");
+  if (c->demand_only)
+    pr_info("SB_KERNEL baseline_demand_only=1 background_disabled=1\n");
   c->prepare_workers = 1;
   struct sbk_capabilities caps;
   int cap_ret = ioctl(c->session, SBK_IOC_CAPABILITIES, &caps);
@@ -916,7 +922,8 @@ int sbk_catalog_poll(struct sbk_catalog *c, int timeout) {
         }
         struct sbk_hot_list hot = {.indices = (uintptr_t)v->hot,
                                    .count = v->hot_count};
-        if (!d.drained && ioctl(v->fd, SBK_IOC_BACKGROUND, &hot)) {
+        if (!d.drained && !c->demand_only &&
+            ioctl(v->fd, SBK_IOC_BACKGROUND, &hot)) {
           int error = errno;
           if (error != EINVAL || ioctl(v->fd, SBK_IOC_DRAIN_STATUS, &d) ||
               d.retired_tokens != d.pages) {

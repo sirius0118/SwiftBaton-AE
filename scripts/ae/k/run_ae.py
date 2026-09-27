@@ -18,6 +18,7 @@ if BASE == RUN_ROOT or BASE in RUN_ROOT.parents:
     raise SystemExit('SB_AE_WORK_ROOT must be outside the source repository')
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--kernel-transfer', action='store_true', help='Use the already deployed K CRIU and anonymous-PTE module; never installs or loads them')
+parser.add_argument('--kernel-demand-only', action='store_true', help='Remote-fork baseline: use only kernel faults while serving; retire source after target shutdown')
 parser.add_argument('--kernel-device', default='mlx5_1')
 parser.add_argument('--kernel-gid', type=int, default=3)
 parser.add_argument('--kernel-timeout-ms', type=int, default=2000)
@@ -92,8 +93,11 @@ parser.add_argument('--child-mib', type=int, default=64)
 parser.add_argument('--child-workers', type=int, default=4)
 parser.add_argument('--canary-mib', type=int, default=0, help='Immutable data for bytewise migration integrity checks')
 opts = parser.parse_args()
+if opts.kernel_demand_only and not (opts.kernel_transfer and opts.no_pretransfer and opts.no_prefetch):
+    parser.error('--kernel-demand-only requires --kernel-transfer --no-pretransfer --no-prefetch')
 SCRIPT_ROOT = Path(__file__).resolve().parent
-CRIU_ROOT = BASE / ('build/criu-K' if opts.kernel_transfer else 'build/criu-U')
+CRIU_ROOT = BASE / ('build/criu-K-baseline' if opts.kernel_demand_only else
+                    'build/criu-K' if opts.kernel_transfer else 'build/criu-U')
 if opts.batch_pages is None:
     opts.batch_pages = 32 if opts.kernel_transfer else 64
 kernel_settings = None
@@ -634,7 +638,7 @@ try:
     work = '/run/containerd/io.containerd.runtime.v2.task/moby/' + STATE['knode3_cid'] + '/work'
     wait_for('knode3', work + '/sync.sock')
     if opts.kernel_transfer:
-        spawn('knode3', 'pageclient', ['/usr/bin/criu', 'lazy-pages', '-D', mig + '/imgs_dir', '-W', work,
+        spawn('knode3', 'pageclient', (['env', 'SBK_DEMAND_ONLY=1'] if opts.kernel_demand_only else []) + ['/usr/bin/criu', 'lazy-pages', '-D', mig + '/imgs_dir', '-W', work,
               '--page-server', '--address', '10.0.0.62', '--port', '12346', '-v4'] +
               kernel_settings.argv() + ['--precopy-limit-mb', str(opts.precopy_limit_mb)])
     else:
@@ -682,7 +686,7 @@ try:
         time.sleep(.5)
     else:
         raise TimeoutError('Restored Redis did not return the source sentinel')
-    if opts.kernel_transfer:
+    if opts.kernel_transfer and not opts.kernel_demand_only:
         # K returns only after marker retirement/workqueue drain and source ACK.
         # It never creates U's pages.complete, and owns source process termination.
         deadline = time.monotonic() + 120
@@ -727,7 +731,7 @@ try:
         # observation. It is a conservative marker after final ACK/MR revocation.
         event('all_pages_copied', event_time_ns=completions['checkpoint']['time_ns'], kernel_stats=stats,
               marker='source checkpoint command returned successfully after K drain/ACK')
-    else:
+    elif not opts.kernel_transfer:
         wait_for('knode3', work + '/pages.complete', 90)
         event('all_pages_copied')
         current_pid = int(cmd('knode2', ['docker', 'inspect', '-f', '{{.State.Pid}}', NAME]))
@@ -744,9 +748,10 @@ for p in Path('/proc').iterdir():
   try:os.kill(int(p.name),signal.SIGKILL)
   except ProcessLookupError:pass
 ''')
-    STATE['source_retired'] = True
-    save()
-    event('source_retired', event_time_ns=completions['checkpoint']['time_ns'] if opts.kernel_transfer else None)
+    if not opts.kernel_demand_only:
+        STATE['source_retired'] = True
+        save()
+        event('source_retired', event_time_ns=completions['checkpoint']['time_ns'] if opts.kernel_transfer else None)
     await_job('run', opts.duration + 60)
     subprocess.run(['rsync', '-az', 'knode1:' + str(OUT / 'success-gaps') + '/', str(OUT / 'success-gaps') + '/'], check=True, timeout=30)
     runtime_snapshot('knode3', 'target-after-workload')
@@ -783,6 +788,36 @@ for p in Path('/proc').iterdir():
     STATE['validation'] = json.loads(verification.stdout)
     event('all_records_verified', checked=STATE['validation']['checked_records'])
     check_memory_children('knode3', 'target')
+    if opts.kernel_demand_only:
+        # The source must remain available for every future fault while Redis
+        # serves. End the measured workload and verify all data *before* the
+        # target exits; unaccessed markers then retire without a BG sweep.
+        cmd('knode3', ['docker', 'kill', NAME])
+        event('remote_fork_target_stopped_after_validation')
+        deadline = time.monotonic() + 120
+        while True:
+            check_migration_jobs()
+            statuses = {label: py(host, f'from pathlib import Path;p=Path({str(OUT)!r})/{label + ".status"!r};print(p.read_text() if p.exists() else "running")')
+                        for host, label in [('knode2','checkpoint'),('knode3','restore'),('knode3','pageclient')]}
+            info = json.loads(cmd('knode2', ['docker','inspect', STATE['knode2_cid']]))[0]
+            if all(value == '0' for value in statuses.values()) and not info['State']['Running']:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Remote-fork source did not retire after target exit: ' + str(statuses))
+            time.sleep(.15)
+        capture_logs()
+        text = (OUT/'pageclient.log').read_text(errors='replace')
+        if text.count('SB_KERNEL baseline_demand_only=1 background_disabled=1') != 1:
+            raise RuntimeError('Remote-fork demand-only catalog was not active')
+        stats = validate_completion({key:int(value) for key,value in statuses.items()}, info,
+            STATE['knode2_cid'], (OUT/'dump.log').read_text(errors='replace'), text)
+        if not stats['PF'] or stats['FT'] or stats['BG'] or stats['PS'] or stats['invalid']:
+            raise RuntimeError('Remote-fork baseline used a non-fault page path: ' + str(stats))
+        STATE['kernel_stats'] = stats
+        STATE['source_retired'] = True
+        save()
+        event('all_pages_copied', marker='target exit retired remaining remote markers', kernel_stats=stats)
+        event('source_retired')
     if opts.cow_descendants and not opts.kernel_transfer:
         capture_logs()
         text = (OUT / 'restore.log').read_text(errors='replace')
