@@ -520,6 +520,16 @@ int sbk_catalog_import_ps_early(struct sbk_catalog *c) {
 /* PS ownership imports must finish before any SEAL_REGION can make a staged
  * source final. Once imported, each final region owns a distinct kernel
  * context, so the expensive dirty invalidation ioctls can run concurrently. */
+static int validate_final_entry(const struct sbk_catalog_final *f) {
+  const struct sbk_catalog_record *r = &f->record;
+  if (!valid_record(r) || !r->restore_pid ||
+      f->dirty_count > r->remote.pages || f->hot_count > r->remote.pages ||
+      (f->dirty_count && !f->dirty) || (f->hot_count && !f->hot))
+    return -EINVAL;
+  int ret = valid_indices(f->dirty, f->dirty_count, r->remote.pages);
+  if (ret) return ret;
+  return valid_indices(f->hot, f->hot_count, r->remote.pages);
+}
 struct final_seal_job {
   struct sbk_catalog *catalog;
   const struct sbk_catalog_final *final;
@@ -540,9 +550,11 @@ static void *final_seal_worker(void *arg) {
     pthread_mutex_unlock(&job->lock);
     if (done) break;
     const struct sbk_catalog_final *f = &job->final[i];
-    struct catalog_entry *e = job->entries[i];
+    struct catalog_entry *e = job->entries ? job->entries[i] : NULL;
     int ret = 0;
-    if (job->import_phase) {
+    if (job->import_phase == 2) {
+      ret = validate_final_entry(f);
+    } else if (job->import_phase == 1) {
       if (!e->early_imported && !e->staged)
         ret = import_ps_slices(job->catalog, e, 0);
       if (!ret && f->hot_count) {
@@ -624,21 +636,20 @@ int sbk_catalog_seal(struct sbk_catalog *c,
   if (!c || c->phase || !final || !n || n > SBK_MAX_REGIONS)
     return -EINVAL;
   uint64_t begin = catalog_now_ns();
+  if (n >= 64 && c->prepare_workers > 1) {
+    struct final_seal_job validation = {.final=final, .count=n, .import_phase=2};
+    unsigned validation_started = 0, validation_peak = 0;
+    int ret = run_final_workers(&validation, c->prepare_workers,
+                                &validation_started, &validation_peak);
+    if (ret) return ret;
+  } else for (size_t i = 0; i < n; i++) {
+    int ret = validate_final_entry(&final[i]);
+    if (ret) return ret;
+  }
+  /* Each index list is independent. Keep the cross-record identity and
+   * overlap checks serial, before publishing any final entry. */
   for (size_t i = 0; i < n; i++) {
     const struct sbk_catalog_record *r = &final[i].record;
-    if (!valid_record(r) || !r->restore_pid ||
-        final[i].dirty_count > r->remote.pages ||
-        final[i].hot_count > r->remote.pages ||
-        (final[i].dirty_count && !final[i].dirty) ||
-        (final[i].hot_count && !final[i].hot))
-      return -EINVAL;
-    int ret =
-        valid_indices(final[i].dirty, final[i].dirty_count, r->remote.pages);
-    if (ret)
-      return ret;
-    ret = valid_indices(final[i].hot, final[i].hot_count, r->remote.pages);
-    if (ret)
-      return ret;
     for (size_t j = 0; j < i; j++) {
       const struct sbk_catalog_record *p = &final[j].record;
       if (same_source(r, p) ||
