@@ -47,6 +47,10 @@ void sbk_catalog_destroy(struct sbk_catalog *catalog);
 int sbk_catalog_stage(struct sbk_catalog *catalog,
                       const struct sbk_catalog_record *record,
                       const uint64_t *indices, size_t count);
+/* After all PS workers join, move staged PS pages into prepared layout
+ * contexts while the source still runs. Final dirty validation remains at
+ * seal, before any destination PTE is exposed. */
+int sbk_catalog_import_ps_early(struct sbk_catalog *catalog);
 int sbk_catalog_seal(struct sbk_catalog *catalog,
                      const struct sbk_catalog_final *records, size_t count);
 /* Serialized local control connection. Receiver owns returned fds and malloc

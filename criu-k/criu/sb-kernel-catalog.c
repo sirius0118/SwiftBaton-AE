@@ -29,14 +29,14 @@ struct control_range {
 struct catalog_entry {
   struct sbk_catalog_record record;
   int fd, drain_fd, ready_fd;
-  unsigned staged, final, claimed, started, drained, prepared;
+  unsigned staged, final, claimed, started, drained, prepared, early_imported;
   struct catalog_entry *deferred_next;
   uint64_t *hot;
   size_t hot_count;
 };
 struct sbk_catalog {
   pthread_mutex_t stage_lock;
-  int session, phase;
+  int session, phase, early_imported;
   unsigned features, prepare_workers;
   struct sbk_config config;
   struct catalog_entry **entries;
@@ -279,9 +279,10 @@ int sbk_catalog_prepare_layout(struct sbk_catalog *c,
   return 0;
 }
 
-/* A changed shape cannot reuse the detached plan. Keep its unused token
- * owners off the final critical path and free them at catalog destruction,
- * after all live ranges drain (or an abort). They contain no PS byte cache. */
+/* A changed shape cannot reuse the detached plan. Keep its token owners off
+ * the final critical path and free them at catalog destruction, after all
+ * live ranges drain (or an abort). Early imported PS pages in such plans are
+ * not exposed; changed final ranges fetch them again from the source. */
 static void retire_unmatched_plans(struct sbk_catalog *c,
                                   const struct sbk_catalog_final *final, size_t n) {
   for (size_t i = 0; i < c->count;) {
@@ -472,26 +473,48 @@ unlock:
 
 /* Final sparse ranges can overlap several earlier PS ranges. Move ownership,
  * then invalidate the final dirty/PFN set before exposing any mapping. */
-static int import_ps_slices(struct sbk_catalog *c, struct catalog_entry *e) {
+static int import_ps_one(struct catalog_entry *e, struct catalog_entry *s) {
+  uint64_t begin = e->record.address, end = begin + e->record.remote.pages * 4096;
+  if (s == e || s->record.source_pid != e->record.source_pid) return 0;
+  uint64_t first = s->record.address > begin ? s->record.address : begin;
+  uint64_t last = s->record.address + s->record.remote.pages * 4096;
+  if (last > end) last = end;
+  if (last <= first) return 0;
+  struct sbk_ps_slice slice = {.source_fd = s->fd,
+      .source_offset = (first - s->record.address) / 4096,
+      .destination_offset = (first - begin) / 4096, .pages = (last - first) / 4096};
+  return ioctl(e->fd, SBK_IOC_IMPORT_PS, &slice) ? -errno : 0;
+}
+static int import_ps_slices(struct sbk_catalog *c, struct catalog_entry *e,
+                            int early) {
   if (!(c->features & SBK_FEATURE_PS_SLICE))
     return 0; /* Older modules safely refetch unmatched shapes. */
-  uint64_t begin = e->record.address, end = begin + e->record.remote.pages * 4096;
+  /* Imported pages live in an unbound prepared context. A changed final
+   * shape may not move them again through IMPORT_PS (its source must have a
+   * bound MR); those pages remain remote and are fetched on demand. */
+  if (!early && c->early_imported) return 0;
   for (size_t i = 0; i < c->count; i++) {
     struct catalog_entry *s = c->entries[i];
-    if (s == e || !s->staged || s->final || s->record.source_pid != e->record.source_pid)
-      continue;
-    uint64_t first = s->record.address > begin ? s->record.address : begin;
-    uint64_t last = s->record.address + s->record.remote.pages * 4096;
-    if (last > end)
-      last = end;
-    if (last <= first)
-      continue;
-    struct sbk_ps_slice slice = {.source_fd = s->fd,
-        .source_offset = (first - s->record.address) / 4096,
-        .destination_offset = (first - begin) / 4096, .pages = (last - first) / 4096};
-    if (ioctl(e->fd, SBK_IOC_IMPORT_PS, &slice))
-      return -errno;
+    if (s->final || !s->staged || s->prepared) continue;
+    int ret = import_ps_one(e, s);
+    if (ret) return ret;
   }
+  return 0;
+}
+int sbk_catalog_import_ps_early(struct sbk_catalog *c) {
+  if (!c || c->phase || c->early_imported) return -EINVAL;
+  if (!(c->features & SBK_FEATURE_PS_SLICE)) return 0;
+  size_t prepared = 0;
+  for (size_t i = 0; i < c->count; i++) prepared += !!c->entries[i]->prepared;
+  if (!prepared) return 0;
+  for (size_t i = 0; i < c->count; i++) {
+    struct catalog_entry *e = c->entries[i];
+    if (!e->prepared) continue;
+    int ret = import_ps_slices(c, e, 1);
+    if (ret) { c->phase = -1; return ret; }
+    e->early_imported = 1;
+  }
+  c->early_imported = 1;
   return 0;
 }
 /* PS ownership imports must finish before any SEAL_REGION can make a staged
@@ -520,7 +543,8 @@ static void *final_seal_worker(void *arg) {
     struct catalog_entry *e = job->entries[i];
     int ret = 0;
     if (job->import_phase) {
-      if (!e->staged) ret = import_ps_slices(job->catalog, e);
+      if (!e->early_imported && !e->staged)
+        ret = import_ps_slices(job->catalog, e, 0);
       if (!ret && f->hot_count) {
         e->hot = malloc(f->hot_count * sizeof(*e->hot));
         if (!e->hot) ret = -ENOMEM;
@@ -651,8 +675,8 @@ int sbk_catalog_seal(struct sbk_catalog *c,
     struct catalog_entry *e = find_entry(c, &f->record);
     int ret;
     if (!e) return -ENOENT; /* All final entries were published after join. */
-    if (!e->staged) {
-      ret = import_ps_slices(c, e);
+    if (!e->early_imported && !e->staged) {
+      ret = import_ps_slices(c, e, 0);
       if (ret)
         return ret;
     }

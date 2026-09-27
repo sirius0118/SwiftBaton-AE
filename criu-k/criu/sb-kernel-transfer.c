@@ -761,6 +761,13 @@ int sb_kernel_receive_ps(int socket_fd) {
   report_dma_phase("ps", false, &dma);
   ret = sbk_work_finish(pool, false, &stats);
   if (ret) return ret;
+  if (opts.sb_kernel_ps_mr) {
+    uint64_t import_begin = kernel_now_ns();
+    ret = sbk_catalog_import_ps_early(destination);
+    pr_info("SB_KERNEL ps_import_early elapsed_us=%llu result=%d\n",
+            (unsigned long long)((kernel_now_ns() - import_begin) / 1000), ret);
+    if (ret) return ret;
+  }
   pr_info("SB_KERNEL PS cached regions=%u planned=%u skipped=%u pages=%llu workers=%u peak=%u queued=%u total_us=%llu streaming=1\n",
           h.count - skipped, h.count, skipped, (unsigned long long)pages,
           h.count ? workers : 0, stats.peak_active, stats.peak_queued,
