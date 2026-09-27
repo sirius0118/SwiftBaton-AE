@@ -756,6 +756,7 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		{ "precopy-workers", required_argument, 0, 1212 },
 		{ "validation-workers", required_argument, 0, 1220 },
 		{ "kernel-catalog-workers", required_argument, 0, 1256 },
+		{ "kernel-dma-mr", no_argument, 0, 1257 },
 		{ "precopy-limit-mb", required_argument, 0, 1213 },
 		BOOL_OPT("mntns-compat-mode", &opts.mntns_compat_mode),
 		BOOL_OPT("unprivileged", &opts.unprivileged),
@@ -1200,6 +1201,9 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 			break;
 		case 1211:
 			opts.sb_u_precopy = true;
+			break;
+		case 1257:
+			opts.sb_kernel_dma_mr = true;
 			break;
 		case 1256:
 			opts.sb_kernel_catalog_workers = atoi(optarg);

@@ -15,6 +15,7 @@ PARALLEL_PS = 2
 PS_SLICE = 4
 PARALLEL_EXPORT = 8
 SESSION_DISPATCH = 16
+DMA_MR = 64
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class KernelSettings:
     export_chunk_mb: int = 0
     validation_workers: int = 1
     catalog_workers: int = 1
+    dma_mr: bool = False
 
     def values(self):
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,31}', self.device):
@@ -61,6 +63,8 @@ class KernelSettings:
                   'kernel-ps-chunk-mb': self.ps_chunk_mb,
                   'kernel-export-workers': self.export_workers,
                   'kernel-export-chunk-mb': self.export_chunk_mb}
+        if self.dma_mr:
+            values['kernel-dma-mr'] = True
         for option in ('no_pretransfer', 'no_prefetch', 'no_hot_first', 'dense'):
             if getattr(self, option):
                 values['kernel-dense' if option == 'dense' else option.replace('_', '-')] = True
@@ -136,7 +140,7 @@ def host_probe(binary, device, gid):
     return result
 
 
-def validate_preflight(hosts, export_workers=1):
+def validate_preflight(hosts, export_workers=1, dma_mr=False):
     errors = []
     reference = hosts.get('knode2', {}).get('binary_sha256')
     for host in ('knode2', 'knode3'):
@@ -154,6 +158,8 @@ def validate_preflight(hosts, export_workers=1):
         features = caps.get('features', 0)
         if caps.get('version') != ABI_VERSION or (features & (PARALLEL_PS | PS_SLICE)) != (PARALLEL_PS | PS_SLICE):
             errors.append(host + ': incompatible K ABI/PS capabilities')
+        if dma_mr and not features & DMA_MR:
+            errors.append(host + ': DMA MR transport unavailable')
         if host == 'knode2' and export_workers > 1 and not features & PARALLEL_EXPORT:
             errors.append(host + ': parallel final MR export unavailable')
         if host == 'knode3' and not features & ANONYMOUS_PTE:
@@ -164,6 +170,32 @@ def validate_preflight(hosts, export_workers=1):
         if not gid or not gid.replace(':', '').strip('0'):
             errors.append(host + ': GID is missing or zero')
     return errors
+
+
+def validate_dma_config(dump_log, pageclient_log, enabled):
+    result = {}
+    for role, text in [('source', dump_log), ('destination', pageclient_log)]:
+        connections = re.findall(r'SB_KERNEL connected role=' + role + r' [^\r\n]* dma_mr=(\d+)', text)
+        if connections != [str(int(enabled))]:
+            raise ValueError(role + ': executing DMA mode differs from requested mode')
+        maps = re.findall(r'SB_KERNEL dma_maps phase=(ps|final) role=' + role +
+            r' regions=(\d+) pages=(\d+) bytes=(\d+) elapsed_us=(\d+)', text)
+        if not enabled:
+            if maps: raise ValueError(role + ': DMA maps present in ordinary MR mode')
+            continue
+        if sorted(x[0] for x in maps) != ['final', 'ps']:
+            raise ValueError(role + ': missing or repeated DMA address exchange evidence')
+        result[role] = {phase:dict(regions=int(regions), pages=int(pages), bytes=int(size), elapsed_us=int(us))
+                       for phase, regions, pages, size, us in maps}
+        for phase, row in result[role].items():
+            if row['bytes'] != row['pages'] * 8 or (phase == 'final' and not row['regions']):
+                raise ValueError(role + ': invalid DMA address accounting')
+    if enabled:
+        for phase in ('ps', 'final'):
+            for key in ('regions', 'pages', 'bytes'):
+                if result['source'][phase][key] != result['destination'][phase][key]:
+                    raise ValueError('DMA address vectors differ between peers')
+    return {'enabled': enabled, 'phases': result}
 
 
 def validate_container(info, expected_id, running):

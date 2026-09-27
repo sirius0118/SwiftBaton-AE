@@ -10,6 +10,7 @@
 #include "sb-kernel-final-gate.h"
 #include "sb-kernel-hot.h"
 #include "sb-kernel-work.h"
+#include "sb-kernel-dma-wire.h"
 #include "sb-kernel.h"
 #include "sb-trace.h"
 #include "uffd.h"
@@ -104,7 +105,7 @@ static uint64_t kernel_now_ns(void) {
 
 int sb_kernel_options(void) {
   if (!opts.sb_kernel_transfer)
-    return 0;
+    return opts.sb_kernel_dma_mr ? -EINVAL : 0;
   if ((!opts.lazy_pages && opts.mode != CR_LAZY_PAGES) || !opts.sb_image_rdma ||
       !opts.sb_u_precopy || opts.sb_parent_stage || opts.sb_parallel_transfer ||
       opts.track_mem || opts.sb_defer_fault_credits) {
@@ -168,13 +169,28 @@ int sb_kernel_connect(int socket_fd, int source) {
     ret = -EOPNOTSUPP;
     goto fail;
   }
+  if (opts.sb_kernel_dma_mr && !(caps.features & SBK_FEATURE_DMA_MR)) {
+    pr_err("SwiftBaton-K DMA MR capability unavailable\n");
+    ret = -EOPNOTSUPP;
+    goto fail;
+  }
   if (ioctl(session_fd, SBK_IOC_RDMA_CREATE, &setup)) {
     ret = -errno;
     goto fail;
   }
+  if (opts.sb_kernel_dma_mr && ioctl(session_fd, SBK_IOC_DMA_ENABLE)) {
+    ret = -errno;
+    goto fail;
+  }
+  setup.local.reserved[0] = opts.sb_kernel_dma_mr ? 1 : 0;
   if (sync_transfer(socket_fd, &setup.local, sizeof(setup.local), true) ||
       sync_transfer(socket_fd, &remote, sizeof(remote), false)) {
     ret = -EIO;
+    goto fail;
+  }
+  if (!sbk_dma_wire_mode_matches(opts.sb_kernel_dma_mr, &remote)) {
+    pr_err("SwiftBaton-K DMA address mode differs between peers\n");
+    ret = -EPROTO;
     goto fail;
   }
   if (ioctl(session_fd, SBK_IOC_RDMA_CONNECT, &remote)) {
@@ -201,10 +217,10 @@ int sb_kernel_connect(int socket_fd, int source) {
   }
   peer_fd = socket_fd;
   pr_info("SB_KERNEL connected role=%s device=%s PF=%u FT=%u BG=%u "
-          "pretransfer=%s\n",
+          "pretransfer=%s dma_mr=%u\n",
           source ? "source" : "destination", setup.device, setup.slots[0],
           setup.slots[1], setup.slots[2],
-          opts.sb_no_pretransfer ? "disabled" : "enabled");
+          opts.sb_no_pretransfer ? "disabled" : "enabled", opts.sb_kernel_dma_mr);
   return 0;
 fail:
   sb_kernel_transfer_close();
@@ -389,7 +405,26 @@ static uint64_t token_pool_hint(void) {
   }
   return pages;
 }
+struct dma_phase_stats { uint64_t pages, ns; unsigned regions; };
+static int dma_record(int socket_fd, const struct sbk_rdma_region *region, bool sending,
+                      struct dma_phase_stats *stats) {
+  uint64_t begin = kernel_now_ns();
+  int ret = sbk_dma_wire_transfer(socket_fd, session_fd, region, sending,
+                                 opts.sb_kernel_dma_mr, sync_transfer);
+  if (!ret && opts.sb_kernel_dma_mr) {
+    stats->regions++; stats->pages += region->pages; stats->ns += kernel_now_ns() - begin;
+  }
+  return ret;
+}
+static void report_dma_phase(const char *phase, bool sending, const struct dma_phase_stats *stats) {
+  if (opts.sb_kernel_dma_mr)
+    pr_info("SB_KERNEL dma_maps phase=%s role=%s regions=%u pages=%llu bytes=%llu elapsed_us=%llu\n",
+            phase, sending ? "source" : "destination", stats->regions,
+            (unsigned long long)stats->pages, (unsigned long long)(stats->pages * sizeof(uint64_t)),
+            (unsigned long long)(stats->ns / 1000));
+}
 int sb_kernel_send_ps(int socket_fd) {
+  struct dma_phase_stats dma = {};
   unsigned count = 0, sent = 0, skipped = 0;
   uint64_t pages = 0, begin = kernel_now_ns(), first = 0;
   int ret = 0;
@@ -406,8 +441,8 @@ int sb_kernel_send_ps(int socket_fd) {
     }
   }
   /* Version 4 adds a bounded resource hint before the existing PS records.
-   * It carries no page data or validity assertion. Final protocol stays v2. */
-  struct sbk_wire_header h = {SBK_WIRE_MAGIC, 4, count, 1}, ack;
+   * Version 5 additionally carries immutable per-region device DMA vectors. */
+  struct sbk_wire_header h = {SBK_WIRE_MAGIC, sbk_dma_ps_version(opts.sb_kernel_dma_mr), count, 1}, ack;
   uint64_t tokens = token_pool_hint();
   if (sync_transfer(socket_fd, &h, sizeof(h), true) ||
       sync_transfer(socket_fd, &tokens, sizeof(tokens), true)) { ret = -EIO; goto out; }
@@ -428,8 +463,10 @@ int sb_kernel_send_ps(int socket_fd) {
       ret = -EIO;
       goto out;
     }
+    if (p->count && (ret = dma_record(socket_fd, &w.record.remote, true, &dma))) goto out;
     if (!first) first = kernel_now_ns();
   }
+  report_dma_phase("ps", true, &dma);
   ret = sb_kernel_ps_finish(false);
   sb_trace("kernel.ps_register_done");
   if (ret) return ret;
@@ -459,6 +496,7 @@ static int ps_receive_run(void *arg) {
   return ret;
 }
 int sb_kernel_receive_ps(int socket_fd) {
+  struct dma_phase_stats dma = {};
   struct sbk_wire_header h;
   struct sbk_work_pool *pool = NULL;
   struct sbk_work_stats stats = {};
@@ -467,10 +505,10 @@ int sb_kernel_receive_ps(int socket_fd) {
   unsigned skipped = 0;
   int ret = -EPROTO;
   if (!destination || sync_transfer(socket_fd, &h, sizeof(h), false) ||
-      h.magic != SBK_WIRE_MAGIC || (h.version != 2 && h.version != 3 && h.version != 4) || h.reserved != 1 ||
+      h.magic != SBK_WIRE_MAGIC || !sbk_dma_ps_version_valid(opts.sb_kernel_dma_mr, h.version) || h.reserved != 1 ||
       h.count > SBK_MAX_REGIONS / 2 || (opts.sb_no_pretransfer && h.count))
     return -EPROTO;
-  if (h.version == 4) {
+  if (h.version >= 4) {
     uint64_t tokens;
     struct sbk_capabilities caps;
     if (sync_transfer(socket_fd, &tokens, sizeof(tokens), false) ||
@@ -503,10 +541,14 @@ int sb_kernel_receive_ps(int socket_fd) {
     job->count = w.hot_count;
     if (sync_transfer(socket_fd, job->indices, w.hot_count * sizeof(uint64_t), false))
       ret = -EIO;
-    else ret = sbk_work_submit(pool, job);
+    else {
+      ret = dma_record(socket_fd, &w.record.remote, false, &dma);
+      if (!ret) ret = sbk_work_submit(pool, job);
+    }
     if (ret) { free(job); goto fail; }
     pages += w.hot_count;
   }
+  report_dma_phase("ps", false, &dma);
   ret = sbk_work_finish(pool, false, &stats);
   if (ret) return ret;
   pr_info("SB_KERNEL PS cached regions=%u planned=%u skipped=%u pages=%llu workers=%u peak=%u queued=%u total_us=%llu streaming=1\n",
@@ -522,9 +564,10 @@ fail:
 }
 
 int sb_kernel_send_final(int socket_fd) {
+  struct dma_phase_stats dma = {};
   int ret = sbk_final_seal(&final_gate);
   if (ret) return ret;
-  struct sbk_wire_header h = {SBK_WIRE_MAGIC, 2, nr_final, 0};
+  struct sbk_wire_header h = {SBK_WIRE_MAGIC, sbk_dma_final_version(opts.sb_kernel_dma_mr), nr_final, 0};
   ret = -EIO;
   if (!nr_final) goto out;
   /* A partial send may have reached the peer even if the local write fails.
@@ -543,17 +586,21 @@ int sb_kernel_send_final(int socket_fd) {
         sync_transfer(socket_fd, (void *)final_regions[i].dirty,
                       w.dirty_count * sizeof(uint64_t), true))
       goto out;
+    int map_ret = dma_record(socket_fd, &w.record.remote, true, &dma);
+    if (map_ret) { ret = map_ret; goto out; }
   }
+  report_dma_phase("final", true, &dma);
   ret = 0;
 out:
   pthread_mutex_unlock(&final_gate.lock);
   return ret;
 }
 int sb_kernel_client_receive(int socket_fd) {
+  struct dma_phase_stats dma = {};
   struct sbk_wire_header h;
   int ret = -EPROTO;
   if (!destination || sync_transfer(socket_fd, &h, sizeof(h), false) ||
-      h.magic != SBK_WIRE_MAGIC || h.version != 2 || h.reserved || !h.count ||
+      h.magic != SBK_WIRE_MAGIC || h.version != sbk_dma_final_version(opts.sb_kernel_dma_mr) || h.reserved || !h.count ||
       h.count > SBK_MAX_REGIONS)
     return -EPROTO;
   final_regions = calloc(h.count, sizeof(*final_regions));
@@ -590,7 +637,10 @@ int sb_kernel_client_receive(int socket_fd) {
                         w.dirty_count * sizeof(uint64_t), false))
         goto out;
     }
+    int map_ret = dma_record(socket_fd, &w.record.remote, false, &dma);
+    if (map_ret) { ret = map_ret; goto out; }
   }
+  report_dma_phase("final", false, &dma);
   ret = sbk_catalog_seal(destination, final_regions, nr_final);
   struct sbk_catalog_timing timing = {0};
   sbk_catalog_get_timing(destination, &timing);
@@ -612,7 +662,7 @@ int sb_kernel_source_finish(void) {
   int ret = 0;
   if (session_fd < 0 || peer_fd < 0 ||
       sync_transfer(peer_fd, &ack, sizeof(ack), false) ||
-      ack.magic != SBK_WIRE_MAGIC || ack.version != 2 ||
+      ack.magic != SBK_WIRE_MAGIC || ack.version != sbk_dma_final_version(opts.sb_kernel_dma_mr) ||
       ack.count != nr_final || ack.reserved)
     ret = -EIO;
   /* Revoke even on a lost peer. The dump cleanup keeps the source stopped
@@ -641,7 +691,7 @@ int sb_kernel_client_serve(int listen_fd, int socket_fd) {
   int client = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC), ret = -EIO;
   unsigned processes = 0, served = 0;
   bool finished = false, drained = false;
-  struct sbk_wire_header ack = {SBK_WIRE_MAGIC, 2, nr_final, 0};
+  struct sbk_wire_header ack = {SBK_WIRE_MAGIC, sbk_dma_final_version(opts.sb_kernel_dma_mr), nr_final, 0};
   struct sbk_stats st;
   close(listen_fd);
   if (client < 0)
