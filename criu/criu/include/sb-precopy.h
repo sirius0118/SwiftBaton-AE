@@ -29,6 +29,9 @@ void sb_precopy_set_adopted(sb_precopy_adopted_fn callback);
 
 int sb_precopy_build(struct sb_precopy_page *candidates, size_t count,
                      uint64_t limit_bytes, unsigned workers, void **buffer, uint64_t *length);
+/* PS-only PCLive round: re-arm soft-dirty before re-copying every candidate.
+ * The page identity, MR address, snapshot length and nonce stay unchanged. */
+int sb_precopy_refresh_all(unsigned workers);
 /* Call with original application threads stopped. eligible() also reserves
  * accepted pages in the source background-transfer bitmap. */
 int sb_precopy_finalize(const struct sb_precopy_pid *pids, size_t count,

@@ -5,6 +5,9 @@ import argparse,fcntl,hashlib,json,os,re,shlex,subprocess,sys,time
 R=Path(__file__).resolve().parents[1]
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('baseline',choices=['pclive','postcopy','hybrid','remote-fork']);p.add_argument('--profile',choices=['smoke','redis'],default='smoke')
+p.add_argument('--duration',type=int,help='YCSB run seconds, including migration')
+p.add_argument('--warmup',type=int,help='seconds before starting migration')
+p.add_argument('--threads',type=int,help='YCSB client threads')
 g=p.add_mutually_exclusive_group();g.add_argument('--check',action='store_true');g.add_argument('--execute',action='store_true')
 p.add_argument('--network-lock', choices=['iptables','nftables'])
 p.add_argument('--vma-cache', action='store_true')
@@ -26,6 +29,9 @@ if R==W or R in W.parents:raise SystemExit('SB_AE_WORK_ROOT must be outside the 
 profile=json.loads((R/'baseline/profiles.json').read_text())[a.baseline][:]
 if a.profile=='smoke':
  for key,value in [('--records','100000'),('--field-length','1024'),('--duration','45'),('--warmup','10'),('--threads','16')]:profile[profile.index(key)+1]=value
+for key,value in (('--duration',a.duration),('--warmup',a.warmup),('--threads',a.threads)):
+ if value is not None:profile[profile.index(key)+1]=str(value)
+if int(profile[profile.index('--duration')+1]) < int(profile[profile.index('--warmup')+1])+20:raise SystemExit('duration must exceed warmup by at least 20 seconds')
 if a.validation_workers is not None:
  if '--validation-workers' in profile:profile[profile.index('--validation-workers')+1]=str(a.validation_workers)
  else:profile += ['--validation-workers',str(a.validation_workers)]
@@ -60,7 +66,8 @@ if not (a.execute or a.check):
  print(json.dumps(dict(baseline=a.baseline,criu_mode=criu_mode,profile=a.profile,command=argv,results=str(W),mutates_hosts=False),indent=2));sys.exit(0)
 W.mkdir(parents=True,exist_ok=True)
 lock=(W/'run.lock').open('w');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-binary=R/'build'/('criu-K-baseline' if a.baseline=='remote-fork' else 'criu-U')/'criu/criu'
+binary=R/'build'/('criu-K-baseline' if a.baseline=='remote-fork' else
+                  'criu-U-pclive' if a.baseline=='pclive' else 'criu-U')/'criu/criu'
 sha=hashlib.sha256(binary.read_bytes()).hexdigest()
 def remote(host,program,args=()):
  command=['sudo','-n','python3','-c',program]+list(map(str,args))

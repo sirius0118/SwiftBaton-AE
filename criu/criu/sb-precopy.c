@@ -291,6 +291,46 @@ int sb_precopy_build(struct sb_precopy_page *candidates, size_t count,
     return 0;
 }
 
+int sb_precopy_refresh_all(unsigned workers)
+{
+    pthread_t threads[SB_MAX_WORKERS];
+    struct sb_precopy_page *pages;
+    size_t copied = 0;
+    if (!source || !workers || workers > SB_MAX_WORKERS) return -1;
+    /* Every candidate is re-copied, so no write in the gap between rounds
+     * can be lost when changing the soft-dirty epoch. Dirty-only recopy would
+     * need an atomic write-protect handoff. This baseline favors correctness. */
+    for (struct process *p = processes; p; p = p->next) {
+        char path[64];
+        int fd;
+        if (process_starttime(p->pid) != p->starttime) return -1;
+        snprintf(path, sizeof(path), "/proc/%d/clear_refs", p->pid);
+        fd = open(path, O_WRONLY | O_CLOEXEC);
+        if (fd < 0) return -1;
+        if (write(fd, "4\n", 2) != 2) { close(fd); return -1; }
+        close(fd);
+    }
+    pages = (void *)(source + 1);
+    for (size_t i = 0; i < source->pages; i++) {
+        pages[i].copied = 0;
+        pages[i].pfn = 0;
+    }
+    __atomic_store_n(&source_next, 0, __ATOMIC_RELAXED);
+    if (!source->pages) workers = 0;
+    for (unsigned i = 0; i < workers; i++) {
+        if (pthread_create(&threads[i], NULL, source_copy_worker, NULL)) {
+            for (unsigned j = 0; j < i; j++) pthread_join(threads[j], NULL);
+            return -1;
+        }
+    }
+    for (unsigned i = 0; i < workers; i++) pthread_join(threads[i], NULL);
+    for (size_t i = 0; i < source->pages; i++) copied += pages[i].copied;
+    pr_info("SB_PCLIVE refresh_round pages=%llu copied=%zu bytes=%llu workers=%u\n",
+            (unsigned long long)source->pages, copied,
+            (unsigned long long)source->bytes, workers);
+    return 0;
+}
+
 static int full_io(int fd, void *buffer, size_t size, bool writing)
 {
     char *p = buffer;

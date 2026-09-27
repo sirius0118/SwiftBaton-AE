@@ -3040,7 +3040,7 @@ int cr_dump_tasks(pid_t pid)
         sb_vma_cache_start(watched_pids, list_length);
 		if (!opts.sb_parent_stage) sb_vma_cache_refresh();
 	}
-	if (opts.sb_parent_stage) {
+	if (opts.sb_parent_stage && !opts.sb_pclive_refresh) {
 		sb_trace("precopy.ps_prune_begin");
 		if (sb_precopy_prune(get_service_fd(IMG_FD_OFF))) goto err;
 		sb_trace("precopy.ps_prune_done");
@@ -3055,7 +3055,9 @@ int cr_dump_tasks(pid_t pid)
 		 * application remains running until the receiver applies the delta. */
 		wait_state(sync_fd, PS_PAGES_REFRESH_REQUEST);
 		sb_trace("precopy.ps_refresh_begin");
-		if (sb_precopy_prune(get_service_fd(IMG_FD_OFF)) ||
+		if ((opts.sb_pclive_refresh &&
+		     sb_precopy_refresh_all(opts.sb_precopy_workers ? opts.sb_precopy_workers : 4)) ||
+		    sb_precopy_prune(get_service_fd(IMG_FD_OFF)) ||
 		    sb_images_publish(sync_pretransfer, PS_PAGES_REFRESH_DONE)) goto err;
 		update_state(sync_fd, PS_PAGES_REFRESH_DONE);
 		wait_state(sync_fd, PS_PAGES_REFRESH_APPLIED);

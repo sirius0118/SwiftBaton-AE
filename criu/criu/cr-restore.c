@@ -2685,13 +2685,14 @@ int cr_restore_tasks(void)
 		sb_trace("restore.stage_ps_begin");
 		sb_stage_set_numa_node(opts.sb_stage_numa_node);
 		sb_stage_set_max_mb(opts.sb_stage_max_mb);
-		if (sb_stage_receive(page_sync, opts.sb_precopy_workers ? opts.sb_precopy_workers : 4)) goto err;
+		if (sb_stage_receive(page_sync, opts.sb_precopy_workers ? opts.sb_precopy_workers : 4,
+		                     opts.sb_pclive_refresh)) goto err;
 		sb_trace("restore.stage_ps_done");
 	}
 	barrier_init();
 	pr_warn("开始等    %s:%d\n", opts.sync_addr, opts.sync_port);
 	wait_state(sync_fd, DUMP_NAMESPACE_DONE);
-	if (opts.sb_parent_stage) {
+	if (opts.sb_parent_stage && !opts.sb_pclive_refresh) {
 		sb_trace("restore.stage_ps_prune_begin");
 		if (sb_stage_prune(get_service_fd(IMG_FD_OFF))) goto err;
 		sb_trace("restore.stage_ps_prune_done");
@@ -2781,6 +2782,9 @@ int cr_restore_tasks(void)
 		sb_trace("restore.stage_ps_refresh_begin");
 		update_state(sync_fd, PS_PAGES_REFRESH_REQUEST);
 		wait_state(sync_fd, PS_PAGES_REFRESH_DONE);
+		if (opts.sb_pclive_refresh &&
+		    sb_stage_refresh(get_service_fd(IMG_FD_OFF),
+		                     opts.sb_precopy_workers ? opts.sb_precopy_workers : 4)) goto err;
 		if (sb_stage_prune(get_service_fd(IMG_FD_OFF))) goto err;
 		update_state(sync_fd, PS_PAGES_REFRESH_APPLIED);
 		sb_trace("restore.stage_ps_refresh_done");

@@ -967,6 +967,8 @@ pr_warn("执行到这\n");
 				if (opts.sb_stage_max_mb > 65536) goto exit;
 			}else if (!strncmp(buf, "parent-stage=", 13)) {
 				opts.sb_parent_stage = strstr(buf + 13, "yes") != NULL;
+			}else if (!strncmp(buf, "pclive-refresh=", 15)) {
+				opts.sb_pclive_refresh = strstr(buf + 15, "yes") != NULL;
 			}else if (!strncmp(buf, "network-lock=", 13)) {
                 char *method = buf + 13;
                 method[strcspn(method, "\r\n")] = '\0';
@@ -1154,6 +1156,8 @@ static int restore_using_req(int sk, CriuOpts *req)
 				if (opts.sb_stage_max_mb > 65536) goto exit;
 			}else if (!strncmp(buf, "parent-stage=", 13)) {
 				opts.sb_parent_stage = strstr(buf + 13, "yes") != NULL;
+			}else if (!strncmp(buf, "pclive-refresh=", 15)) {
+				opts.sb_pclive_refresh = strstr(buf + 15, "yes") != NULL;
 			}else if (!strncmp(buf, "network-lock=", 13)) {
                 char *method = buf + 13;
                 method[strcspn(method, "\r\n")] = '\0';

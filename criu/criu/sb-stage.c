@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include "log.h"
 #include "sb-precopy.h"
@@ -44,6 +45,24 @@ static uint64_t commit_pages;
 static bool finalized;
 static uint64_t copy_next, copied_pages;
 static int stage_numa_node = -1;
+static int stage_snapshot_fd = -1;
+static void *stage_snapshot;
+static uint64_t stage_snapshot_length, stage_identity_hash;
+
+static uint64_t stage_identity(const struct sb_precopy_view *view)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (uint64_t i = 0; i < view->count; i++) {
+        const struct sb_precopy_page *p = &view->pages[i];
+        uint64_t fields[] = {p->pid, p->address, p->region_start,
+                             p->region_end, p->region_flags};
+        for (unsigned field = 0; field < sizeof(fields) / sizeof(fields[0]); field++) {
+            hash ^= fields[field];
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    return hash;
+}
 
 void sb_stage_set_numa_node(int node) { stage_numa_node = node; }
 void sb_stage_set_max_mb(unsigned int mb) { stage_page_limit = mb ? (uint64_t)mb * 256 : UINT64_MAX; }
@@ -166,7 +185,7 @@ int sb_stage_send(int socket, int snapshot_fd, void *buffer, uint64_t length)
     return rc ? -1 : 0;
 }
 
-int sb_stage_receive(int socket, unsigned workers)
+int sb_stage_receive(int socket, unsigned workers, bool refresh_round)
 {
     struct stage_header header;
     struct stat st;
@@ -237,7 +256,13 @@ int sb_stage_receive(int socket, unsigned workers)
     if (stage_view.count && munmap((void *)stage_view.data, stage_view.count * PAGE_BYTES)) goto fail;
     stage_view.data = NULL;
     if (sb_stage_inherit(false)) goto fail;
-    close(fds[0]); close(fds[1]);
+    if (refresh_round) {
+        stage_snapshot_fd = fds[0];
+        stage_snapshot = snapshot;
+        stage_snapshot_length = header.length;
+        stage_identity_hash = stage_identity(&stage_view);
+    } else close(fds[0]);
+    close(fds[1]);
     pr_info("SB_STAGE_NUMA node=%d regions=%zu\n", stage_numa_node, region_count);
     pr_info("SB_STAGE parent_ready regions=%zu copied=%llu pid=%d workers=%u\n", region_count,
             (unsigned long long)copied_pages, getpid(), workers);
@@ -247,6 +272,62 @@ fail:
     if (fds[0] >= 0) close(fds[0]);
     if (fds[1] >= 0) close(fds[1]);
     return -1;
+}
+
+int sb_stage_refresh(int image_dir_fd, unsigned workers)
+{
+    struct timespec started, now, pause = {.tv_nsec = 5000000};
+    struct sb_precopy_view updated;
+    pthread_t threads[32];
+    void *payload = MAP_FAILED;
+    uint64_t before = copied_pages;
+    int marker;
+    if (stage_snapshot_fd < 0 || !stage_snapshot || !regions || finalized ||
+        !workers || workers > 32) return -1;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    for (;;) {
+        marker = openat(image_dir_fd, SB_PCLIVE_READY, O_RDONLY | O_CLOEXEC);
+        if (marker >= 0) { close(marker); break; }
+        if (errno != ENOENT) return -1;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec - started.tv_sec > 120) {
+            pr_err("Timed out waiting for PCLive RDMA refresh\n");
+            return -1;
+        }
+        nanosleep(&pause, NULL);
+    }
+    if (sb_precopy_view(stage_snapshot, stage_snapshot_length, &updated) ||
+        updated.count != stage_view.count || updated.nonce != stage_view.nonce ||
+        stage_identity(&updated) != stage_identity_hash) {
+        pr_err("PCLive refresh changed snapshot identity\n");
+        return -1;
+    }
+    stage_view = updated;
+    if (updated.count) {
+        uint64_t offset = stage_snapshot_length - updated.count * PAGE_BYTES;
+        payload = mmap(NULL, updated.count * PAGE_BYTES, PROT_READ, MAP_SHARED,
+                       stage_snapshot_fd, offset);
+        if (payload == MAP_FAILED) return -1;
+        stage_view.data = payload;
+        __atomic_store_n(&copy_next, 0, __ATOMIC_RELAXED);
+        for (unsigned i = 0; i < workers; i++) {
+            if (pthread_create(&threads[i], NULL, copy_stage_pages, NULL)) {
+                for (unsigned j = 0; j < i; j++) pthread_join(threads[j], NULL);
+                munmap(payload, updated.count * PAGE_BYTES);
+                stage_view.data = NULL;
+                return -1;
+            }
+        }
+        for (unsigned i = 0; i < workers; i++) pthread_join(threads[i], NULL);
+        if (munmap(payload, updated.count * PAGE_BYTES)) return -1;
+        stage_view.data = NULL;
+    }
+    close(stage_snapshot_fd);
+    stage_snapshot_fd = -1;
+    pr_info("SB_PCLIVE resident_refresh pages=%llu bytes=%llu workers=%u\n",
+            (unsigned long long)(copied_pages - before),
+            (unsigned long long)((copied_pages - before) * PAGE_BYTES), workers);
+    return 0;
 }
 
 int sb_stage_inherit(bool enable)

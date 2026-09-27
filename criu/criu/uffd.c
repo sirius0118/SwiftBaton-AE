@@ -2392,8 +2392,21 @@ int cr_lazy_pages(bool daemon)
 	// close(sync_fd_PC);
 	if (sb_images_receive(sync_pretransfer, DUMP_NAMESPACE_DONE))
 		return -1;
-	if (opts.sb_parent_stage && sb_images_receive(sync_pretransfer, PS_PAGES_REFRESH_DONE))
-		return -1;
+	if (opts.sb_parent_stage) {
+		if (sb_images_receive(sync_pretransfer, PS_PAGES_REFRESH_DONE)) return -1;
+		if (opts.sb_pclive_refresh) {
+			int marker;
+			sb_trace("pclive.rdma_refresh_begin");
+			if (rdma_read_pretransfer(&PT_res, pre_mr, 1)) return -1;
+			__sync_synchronize();
+			marker = openat(get_service_fd(IMG_FD_OFF), SB_PCLIVE_READY,
+			                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+			if (marker < 0) return -1;
+			if (write(marker, "ready\n", 6) != 6) { close(marker); return -1; }
+			if (close(marker)) return -1;
+			sb_trace("pclive.rdma_refresh_done");
+		}
+	}
 	if (sb_images_receive(sync_pretransfer, END_PROCESS_DUMP))
 		return -1;
 	wait_state(sync_pretransfer, END_PROCESS_DUMP);

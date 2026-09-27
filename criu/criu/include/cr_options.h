@@ -142,6 +142,7 @@ struct cr_options {
 	bool sb_fd_placeholder;
 	bool sb_vma_cache;
 	bool sb_parent_stage;
+	bool sb_pclive_refresh; /* Re-read a second PS snapshot into resident stage. */
 	bool sb_buffered_cutover;
 	unsigned int sb_stage_max_mb; /* zero retains unlimited parent staging */
 	bool sb_parallel_transfer;

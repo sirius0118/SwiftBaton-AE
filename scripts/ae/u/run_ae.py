@@ -33,6 +33,7 @@ parser.add_argument('--fast-cutover', action='store_true', help='Arm a direct co
 parser.add_argument('--u-precopy', action='store_true', help='Use real PS snapshots with final soft-dirty/PFN validation')
 parser.add_argument('--stage-max-mb', type=int, default=0, help='Limit inherited anonymous PS stage only; zero is unlimited, remaining valid PS pages install during AS')
 parser.add_argument('--parent-stage', action='store_true', help='Prepare anonymous pages in restore parent during PS, inherit and remap')
+parser.add_argument('--pclive-refresh', action='store_true', help='Take a second PS snapshot into the same resident parent-stage memory')
 parser.add_argument('--parallel-transfer', action='store_true', help='Use independent demand, adjacent prefetch and background RDMA lanes')
 parser.add_argument('--install-workers', type=int, default=4)
 parser.add_argument('--copy-workers', type=int, default=4)
@@ -127,6 +128,8 @@ if not 1 <= opts.copy_workers <= 32 or not 1 <= opts.install_workers <= 32 or no
     parser.error('copy-workers and install-workers must be 1..32 and batch-pages must be 1..256')
 if opts.parent_stage and not opts.u_precopy:
     parser.error('--parent-stage requires --u-precopy')
+if opts.pclive_refresh and not (opts.parent_stage and opts.u_precopy and opts.image_rdma):
+    parser.error('--pclive-refresh requires --parent-stage --u-precopy --image-rdma')
 if opts.buffered_cutover and not (opts.fast_cutover and opts.image_rdma):
     parser.error('--buffered-cutover requires --fast-cutover --image-rdma')
 if (opts.u_precopy or opts.fast_cutover) and not opts.image_rdma:
@@ -149,6 +152,8 @@ if opts.fd_placeholder:
     precopy_config += 'fd-placeholder=yes\n'
 if opts.parent_stage:
     precopy_config += 'parent-stage=yes\n'
+if opts.pclive_refresh:
+    precopy_config += 'pclive-refresh=yes\n'
 if opts.parallel_transfer:
     precopy_config += f'prefetch-window={opts.prefetch_window}\n'
     precopy_config += f'parallel-transfer=yes\ninstall-workers={opts.install_workers}\nbatch-pages={opts.batch_pages}\nbg-segment-pages={opts.bg_segment_pages}\ncopy-workers={opts.copy_workers}\nfault-read-batch={opts.fault_read_batch}\nfault-install-workers={opts.fault_install_workers}\nfault-workers={opts.fault_workers}\nprefetch-workers={opts.prefetch_workers}\n'
@@ -557,6 +562,7 @@ try:
           (['--u-precopy', '--precopy-workers', str(opts.precopy_workers),
             '--precopy-limit-mb', str(opts.precopy_limit_mb)] if opts.u_precopy else []) +
           (['--parent-stage'] if opts.parent_stage else []) +
+          (['--pclive-refresh'] if opts.pclive_refresh else []) +
           (['--parallel-transfer', '--install-workers', str(opts.install_workers),
             '--batch-pages', str(opts.batch_pages), '--bg-segment-pages', str(opts.bg_segment_pages), '--copy-workers', str(opts.copy_workers), '--fault-read-batch', str(opts.fault_read_batch), '--fault-install-workers', str(opts.fault_install_workers), '--fault-workers', str(opts.fault_workers), '--prefetch-workers', str(opts.prefetch_workers)] if opts.parallel_transfer else []) +
           ['--' + option.replace('_', '-') for option in ['no_prefetch', 'no_hot_first', 'no_pretransfer','sync_fault_transport','fault_trace','reader_preferred_lock','spin_lifecycle','fixed_ready_scan','serial_prefetch_install','serial_background_install','no_bg_fault_assist','bg_round_robin','install_trace','compact_bg_wire','serial_ps_prepare','defer_fault_credits'] if getattr(opts, option)] +

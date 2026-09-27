@@ -713,6 +713,7 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		{ "fd-placeholder", no_argument, 0, 1219 },
 		{ "vma-cache", no_argument, 0, 1221 },
 		{ "parent-stage", no_argument, 0, 1214 },
+		{ "pclive-refresh", no_argument, 0, 1248 },
 		{ "parallel-transfer", no_argument, 0, 1215 },
 		{ "no-prefetch", no_argument, 0, 1224 },
 		{ "no-hot-first", no_argument, 0, 1225 },
@@ -1152,6 +1153,9 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 			break;
 		case 1214:
 			opts.sb_parent_stage = true;
+			break;
+		case 1248:
+			opts.sb_pclive_refresh = true;
 			break;
 		case 1221:
 			opts.sb_vma_cache = true;

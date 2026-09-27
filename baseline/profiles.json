@@ -1,6 +1,6 @@
 {
   "pclive": [
-    "--image-rdma", "--u-precopy", "--parent-stage", "--fast-cutover",
+    "--image-rdma", "--u-precopy", "--parent-stage", "--pclive-refresh", "--fast-cutover",
     "--records", "500000", "--field-length", "10240", "--threads", "32",
     "--duration", "90", "--warmup", "15", "--canary-mib", "8",
     "--runtime-snapshot", "--numa-node", "0", "--poststeady-seconds", "30",
