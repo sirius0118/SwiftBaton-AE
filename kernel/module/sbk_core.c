@@ -55,6 +55,8 @@ struct sbk_context {
 	struct kref refs;
 	struct work_struct destroy;
 	struct work_struct drain;
+	struct work_struct creator_drop;
+	unsigned long creator_tokens;
 	union { struct work_struct coverage; struct sbk_work coverage_job; };
 	struct sbk_work_owner owner;
 	struct sbk_dispatch *ft_pool, *bg_pool;
@@ -87,11 +89,20 @@ struct sbk_context {
 	atomic64_t batches, completed, ps_pages, invalidated;
 };
 static struct workqueue_struct *reap_wq;
+#ifdef CONFIG_SWIFTBATON_PTE
+static struct workqueue_struct *creator_wq;
+#endif
 static const struct vm_operations_struct sbk_vm_ops;
 static const struct file_operations sbk_fops;
 static bool arm_timing;
 module_param(arm_timing, bool, 0444);
 MODULE_PARM_DESC(arm_timing, "Log anonymous ARM phase durations; disabled by default");
+static bool defer_creator_drop;
+module_param(defer_creator_drop, bool, 0444);
+MODULE_PARM_DESC(defer_creator_drop, "Release successful ARM creator refs on a NUMA-local worker");
+static unsigned int creator_drop_test_delay_ms;
+module_param(creator_drop_test_delay_ms, uint, 0444);
+MODULE_PARM_DESC(creator_drop_test_delay_ms, "LOOPBACK_TEST only: delay creator release, maximum 1000 ms");
 static bool retirement_audit;
 module_param(retirement_audit, bool, 0444);
 MODULE_PARM_DESC(retirement_audit, "Diagnostic only: report first unfetched token retirement per region");
@@ -206,6 +217,27 @@ static void sbk_maybe_drain(struct sbk_context *c)
 		kref_get(&c->refs);
 		queue_work(reap_wq, &c->drain);
 	}
+}
+static void sbk_creator_drop_work(struct work_struct *work)
+{
+	struct sbk_context *c = container_of(work, struct sbk_context, creator_drop);
+	unsigned long i, count = c->creator_tokens;
+	u64 begin = arm_timing ? ktime_get_ns() : 0;
+	if (creator_drop_test_delay_ms && c->cfg.backend == SBK_BACKEND_LOOPBACK_TEST)
+		msleep(creator_drop_test_delay_ms);
+	/* This work owns the creator references and an independent context ref.
+	 * PTEs may fault, fork or disappear, and the device fd may close meanwhile.
+	 * Only the last token release contributes to retirement and the drain ACK. */
+	for (i = 0; i < count; i++) {
+		sbk_pte_token_put(c->token_ids[i]);
+		if (!(i & 4095))
+			cond_resched();
+	}
+	c->creator_tokens = 0;
+	sbk_maybe_drain(c);
+	if (arm_timing)
+		pr_info("SBK_CREATOR_DROP pages=%lu work_ns=%llu\n", count, ktime_get_ns() - begin);
+	kref_put(&c->refs, sbk_release_ref);
 }
 static int sbk_watch_drain(struct sbk_context *c, void __user *user)
 {
@@ -610,16 +642,25 @@ static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 	if (!ret) {
 		c->sealed = true;
 		atomic_set_release(&c->armed, 1);
-		/* PTEs (including fork copies) now own the token references. Keeping
-		 * creator references until fd close would hide outstanding markers. */
-		for (i = 0; i < c->tokens_created; i++)
-			sbk_pte_token_put(c->token_ids[i]);
-		c->tokens_created = 0;
+		/* PTEs (including fork copies) now own references. Transfer creator
+		 * ownership before publishing work, so fd release cannot double-put.
+		 * This is a one-shot work item: mapped prevents a second successful ARM.
+		 * Failures below still release synchronously without publishing work. */
+		if (defer_creator_drop) {
+			kref_get(&c->refs);
+			c->creator_tokens = c->tokens_created;
+			c->tokens_created = 0;
+			queue_work_node(numa_node_id(), creator_wq, &c->creator_drop);
+		} else {
+			for (i = 0; i < c->tokens_created; i++)
+				sbk_pte_token_put(c->token_ids[i]);
+			c->tokens_created = 0;
+		}
 		sbk_maybe_drain(c);
 		if (arm_timing)
-			pr_info("SBK_ARM pages=%llu alloc_ns=%llu bind_ns=%llu bridge_ns=%llu drop_ns=%llu total_ns=%llu\n",
+			pr_info("SBK_ARM pages=%llu alloc_ns=%llu bind_ns=%llu bridge_ns=%llu drop_ns=%llu total_ns=%llu deferred=%u\n",
 				c->cfg.pages, allocated - begin, bound - allocated,
-				bridged - bound, ktime_get_ns() - bridged, ktime_get_ns() - begin);
+				bridged - bound, ktime_get_ns() - bridged, ktime_get_ns() - begin, defer_creator_drop);
 		return 0;
 	}
 	c->anonymous = c->mapped = false;
@@ -1725,6 +1766,7 @@ static int sbk_open(struct inode *inode, struct file *file)
 	INIT_WORK(&c->destroy, sbk_destroy);
 #ifdef CONFIG_SWIFTBATON_PTE
 	INIT_WORK(&c->drain, sbk_drain_work);
+	INIT_WORK(&c->creator_drop, sbk_creator_drop_work);
 	c->token_pool = sbk_token_pool_create(&sbk_anon_provider, reap_wq);
 	if (!c->token_pool) {
 		module_put(THIS_MODULE);
@@ -1760,17 +1802,39 @@ static struct miscdevice sbk_device = {
 static int __init sbk_init(void)
 {
 	int ret;
+	if (creator_drop_test_delay_ms > 1000)
+		return -EINVAL;
 	reap_wq = alloc_workqueue("sbk_reap", WQ_UNBOUND, 1);
 	if (!reap_wq)
 		return -ENOMEM;
-	ret = misc_register(&sbk_device);
-	if (ret)
+#ifdef CONFIG_SWIFTBATON_PTE
+	creator_wq = alloc_workqueue("sbk_creator", WQ_UNBOUND, 1);
+	if (!creator_wq) {
 		destroy_workqueue(reap_wq);
+		return -ENOMEM;
+	}
+#else
+	if (defer_creator_drop) {
+		destroy_workqueue(reap_wq);
+		return -EOPNOTSUPP;
+	}
+#endif
+	ret = misc_register(&sbk_device);
+	if (ret) {
+#ifdef CONFIG_SWIFTBATON_PTE
+		destroy_workqueue(creator_wq);
+#endif
+		destroy_workqueue(reap_wq);
+	}
 	return ret;
 }
 static void __exit sbk_exit(void)
 {
 	misc_deregister(&sbk_device);
+#ifdef CONFIG_SWIFTBATON_PTE
+	/* Creator completion can queue drain/destruction on reap_wq. */
+	destroy_workqueue(creator_wq);
+#endif
 	destroy_workqueue(reap_wq);
 }
 module_init(sbk_init);

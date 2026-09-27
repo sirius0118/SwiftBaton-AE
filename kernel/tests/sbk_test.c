@@ -769,6 +769,7 @@ static int peer_test(int source_side)
 #include "export-batch-test.inc"
 #include "session-dispatch-test.inc"
 #include "dma-mr-test.inc"
+#include "creator-drop-test.inc"
 
 int main(int argc, char **argv)
 {
@@ -777,6 +778,9 @@ int main(int argc, char **argv)
     use_anon = getenv("SBK_TEST_ANON") != NULL;
     use_token_pool = getenv("SBK_TEST_TOKEN_POOL") != NULL;
     printf("SBK_MAPPING_MODE=%s\n", use_anon ? "anonymous_PTE" : "file_fixture");
+    if (getenv("SBK_TEST_CREATOR_LIFETIME")) {
+        test_creator_drop_lifetime(); return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--dma-peer-source")) return dma_peer_test(1);
     if (argc == 2 && !strcmp(argv[1], "--dma-peer-destination")) return dma_peer_test(0);
     if (getenv("SBK_TEST_DMA_ONLY")) {

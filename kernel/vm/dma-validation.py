@@ -5,6 +5,7 @@ import argparse, hashlib, json, os, shutil, subprocess, time
 p=argparse.ArgumentParser()
 p.add_argument('--kernel',required=True); p.add_argument('--output',required=True)
 p.add_argument('--retirement-audit',action='store_true')
+p.add_argument('--defer-creator-drop',action='store_true')
 a=p.parse_args(); R=Path(__file__).resolve().parents[1]; K=Path(a.kernel).resolve()
 O=Path(a.output).resolve(); O.mkdir(parents=True,exist_ok=True)
 M=O/'module'; M.mkdir(exist_ok=True); (O/'include').mkdir(exist_ok=True)
@@ -64,6 +65,18 @@ echo SBK_DMA_VM_DONE
 poweroff -f
 '''
 if a.retirement_audit: init=init.replace('rdma_debug=1 ||', 'rdma_debug=1 retirement_audit=1 arm_timing=1 ||')
+if a.defer_creator_drop:
+    init=init.replace('insmod /swiftbaton_k.ko rdma_debug=1', 'insmod /swiftbaton_k.ko defer_creator_drop=1 arm_timing=1 rdma_debug=1')
+    init=init.replace('echo SBK_TAINT=', '''insmod /swiftbaton_k.ko defer_creator_drop=1 creator_drop_test_delay_ms=1000 || { echo CREATOR_MODULE_FAIL; poweroff -f; }
+SBK_TEST_CREATOR_LIFETIME=1 SBK_TEST_ANON=1 SBK_TEST_TOKEN_POOL=1 /sbk_test
+echo SBK_CREATOR_LIFETIME_EXIT=$?
+unloaded=0
+for i in $(seq 1 200); do
+    if rmmod swiftbaton_k 2>/dev/null; then unloaded=1; break; fi
+    sleep 0.1
+done
+echo SBK_CREATOR_UNLOADED=$unloaded
+echo SBK_TAINT=''')
 (root/'init').write_text(init); (root/'init').chmod(0o755)
 env=dict(os.environ,KDIR=str(K),SBK_VM_ROOT=str(root)); env.pop('SBK_OFED_ROOT',None)
 subprocess.run(['python3',str(R/'vm/prepare.py')],env=env,check=True)
@@ -82,11 +95,14 @@ markers=['SBK_DMA_FILE_EXIT=0','SBK_DMA_ANON_EXIT=0','SBK_REGRESSION_EXIT=0','SB
 markers += ['SBK_DMA_PEER_'+mode+'_'+role+'_EXIT=0' for mode in ['dma','ordinary'] for role in ['DEST','SOURCE']]
 markers += ['SBK_DMA_PROBE_DEST_EXIT=0','SBK_DMA_PROBE_SOURCE_EXIT=0']
 if a.retirement_audit: markers += ['SBK_RETIRE_UNFETCHED','SBK_ARM pages=']
+if a.defer_creator_drop: markers += ['deferred=1','SBK_CREATOR_DROP pages=',
+    'SBK_CREATOR_LIFETIME_EXIT=0','SBK_CREATOR_LIFETIME_PASS','SBK_CREATOR_UNLOADED=1']
 missing=[x for x in markers if x not in runtime]
 bad=[x for x in ['BUG:','WARNING:','Oops:','Kernel panic','general protection fault'] if x in runtime]
 def sha(f): return hashlib.sha256(f.read_bytes()).hexdigest()
 out=dict(passed=result.returncode==0 and not missing and not bad,host_loaded=False,rxe=True,
     retirement_audit=a.retirement_audit,
+    defer_creator_drop=a.defer_creator_drop,
     kernel_sha256=sha(K/'arch/x86/boot/bzImage'),module_sha256=sha(M/'swiftbaton_k.ko'),
     test_sha256=sha(root/'sbk_test'),log=str(log),returncode=result.returncode,missing=missing,kernel_errors=bad)
 (O/'result.json').write_text(json.dumps(out,indent=2)+'\n'); print(json.dumps(out,indent=2))
