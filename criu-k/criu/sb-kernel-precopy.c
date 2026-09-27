@@ -441,8 +441,11 @@ int sb_kernel_ps_validate_snapshot(int pid, const struct sbk_rdma_region *r,
   }
   *dirty = invalid;
   invalid = NULL;
-  pr_info("SB_KERNEL PS validated pid=%d address=%llx candidates=%zu invalid=%zu\n",
-          pid, (unsigned long long)r->address, candidates, *nr);
+  /* A normal final catalog has hundreds of valid records. Avoid synchronous
+   * per-record logging while the source is frozen; retain invalidation data. */
+  if (*nr)
+    pr_info("SB_KERNEL PS invalidated pid=%d address=%llx candidates=%zu invalid=%zu\n",
+            pid, (unsigned long long)r->address, candidates, *nr);
 out:
   free(owned_entries);
   free(invalid);

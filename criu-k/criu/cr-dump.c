@@ -1698,11 +1698,11 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 			break;
 		}
 	}
-	pr_warn("执行到这index:%d\n", index);
+	(void)0; /* Remove legacy hot-path probe. */
 	i = 0;
 	list_for_each_entry(vma_i, &vmas.h, list)
 		i++;
-	pr_warn("执行到这i:%d\n", i);
+	(void)0; /* Remove legacy hot-path probe. */
 	PidVma[index]->vmas = (struct vmas_t *)malloc(i * sizeof(struct vmas_t));
 	PidVma[index]->can_lazy = (int *)malloc(i * sizeof(int));
 	memset(PidVma[index]->can_lazy, 0, i * sizeof(int));
@@ -1722,18 +1722,18 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 #endif
 
 #ifdef MUL_UFFD
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	// IMPORVEMENT zxz: 这里可以用变长的，而不是用定长的
 	lazy_mem = PidLazyVmas + 8 + index * PAGE_SIZE;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	*(uint64_t *)lazy_mem = item->pid->ns[0].virt;
 	i = 0;
 	j = 0;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	list_for_each_entry(vma_i, &vmas.h, list) {
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		if (vma_entry_can_be_lazy(vma_i->e)) {
-			pr_warn("执行到这\n");
+			(void)0; /* Remove legacy hot-path probe. */
 			PidVma[index]->can_lazy[j] = 1;
 			*(uint64_t *)(lazy_mem + 16 + i * 16) = vma_i->e->start;
 			*(uint64_t *)(lazy_mem + 16 + i * 16 + 8) = vma_i->e->end;
@@ -1741,13 +1741,13 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 		}
 		j++;
 	}
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	*(uint64_t *)(lazy_mem + 8) = i;
 #endif
 
 	}
 
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	// 子线程执行到这个shared_fdtable的时候会报错，segment fault。估计是ids的问题，果然是ids的问题
 	if (!shared_fdtable(item)) {
 		dfds = xmalloc(sizeof(*dfds));
@@ -1762,7 +1762,7 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 
 		parasite_ensure_args_size(drain_fds_size(dfds));
 	}
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	ret = parse_posix_timers(pid, &proc_args);
 	if (ret < 0) {
 		pr_err("Can't read posix timers file (pid: %d)\n", pid);
@@ -2334,7 +2334,7 @@ static int cr_lazy_mem_dump(void)
 	// 		}
 	// 	}
 	// #endif
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	if (ret)
 		pr_err("Lazy pages transfer FAILED.\n");
 	else
@@ -2435,7 +2435,7 @@ static int cr_dump_finish(int ret)
 	// pr_warn("执行到这\n");
 	// resources_destroy(&TS_res);
 	// pr_warn("执行到这\n");
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	// free(PF_res.buf);
 	// close(PF_res.sock);
 	// pr_warn("执行到这\n");
@@ -2454,7 +2454,7 @@ static int cr_dump_finish(int ret)
 		}
 		return -1;
 	}
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 
 	cr_plugin_fini(CR_PLUGIN_STAGE__DUMP, ret);
 	if (opts.sb_kernel_transfer && enter_multi_process) {
@@ -2927,7 +2927,7 @@ sbk_page_transport_ready:
 		PidVma[i] = (struct pid_vmas *)malloc(sizeof(struct pid_vmas));
 		memset((void *)PidVma[i], 0, sizeof(struct pid_vmas));
 	}
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
     if (opts.sb_kernel_transfer) {
         PidLazyVmas = calloc(1, 8 + MAX_PROCESS * PAGE_SIZE);
         if (!PidLazyVmas || sb_kernel_send_ps(sync_fd_PC)) goto err;
@@ -2967,7 +2967,7 @@ sbk_page_transport_ready:
 	    sync_transfer(sync_pretransfer, pre_mr, sizeof(struct data_buffer) * item_num, true))
 		goto err;
 	update_state(sync_pretransfer, END_PAGE_PRTRANSFER);
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 
 	pr_info("========================================\n");
 sbk_ps_memory_ready:
@@ -3238,7 +3238,7 @@ sbk_ps_memory_ready:
 	if (seccomp_collect_dump_filters() < 0)
 		goto err;
 #endif
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 #ifdef PARALLEL_DUMP
 	// 统计进程总数量
 	item_num = 0;
@@ -3249,17 +3249,17 @@ sbk_ps_memory_ready:
 		item_num++;
 	}
 	sb_trace("dump.pstree_collected");
-	pr_warn("执行到这 item_num:%d\n", item_num);
+	(void)0; /* Remove legacy hot-path probe. */
 	// buble_sort(pidset, item_num);
 	buble2_sort(pidset, vpidset, item_num);
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	// memset (pid2index, 0, sizeof(pid2index));
 	// pr_warn("执行到这\n");
 	// for(int i = 0; i < item_num; i++){
 	// 	pid2index[pidset[i]] = i;
 	// 	pr_warn("执行到这??\n");
 	// }
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 #ifdef RDMA_CODESIGN
 	parasite_ctl_sets = (struct parasite_ctl **)malloc(sizeof(struct parasite_ctl *) * item_num);
 	mul_shregion_t_init((void *)SharedRegions, item_num, pidset);
@@ -3270,7 +3270,7 @@ sbk_ps_memory_ready:
 		PF_address_set_init((struct PF_address_set *)&PFaddrset[i], pidset[i]);
 		pid_area[i].pid = pidset[i];
 	}
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 #endif
 
 	// 首先在这里对所有的tracee线程进行detach
@@ -3279,7 +3279,7 @@ sbk_ps_memory_ready:
 			if (ptrace(PTRACE_DETACH, item->threads[j].real, NULL, NULL))
 				pr_err("Unable to detach from %d", item->threads[j].real);
 	}
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	i = 0;
 	// 进入多线程执行阶段
 	enter_multi_process = 1;
@@ -3297,7 +3297,7 @@ sbk_ps_memory_ready:
 		}
 		i++;
 	}
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	/* 等待所有进程结束,每个进程dump完成都会给barriters->num_process互斥的+1，
 	因此不需要使用pthread_join的方式来进行线程状态获取 */
 	// for( i = 0; i < item_num; i++ ){
@@ -3327,7 +3327,7 @@ sbk_ps_memory_ready:
         pr_info("SB_TRANSFER pid_map source=%llu destination=%llu\n",
                 (unsigned long long)pidset[p], (unsigned long long)vpidset[p]);
     }
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	// num of pid, [pid, num of lazy vma,  lazy vmas[num of lazy vma]]  1 page, ...
 	// ret = 8;
 	if (!opts.sb_kernel_transfer) *(uint64_t *)PidLazyVmas = item_num;
@@ -3357,7 +3357,7 @@ sbk_ps_memory_ready:
 	// 	*(uint64_t *)(mem + (uint64_t)ret - 16) = (uint64_t)(item->pid->ns[0].virt);
 	// 	ret += 16 * lazy_vma;
 	// }
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	// All the process has been ptrace attached, now we can start to dump the dirty flags
 	if (!opts.sb_u_precopy) {
 		get_vma_dirtylist_arg = (struct get_vma_dirtylist_arg *)malloc(sizeof(struct get_vma_dirtylist_arg));

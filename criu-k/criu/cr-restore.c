@@ -2675,7 +2675,7 @@ int cr_restore_tasks(void)
 	// ret = run_page_client();
 	pr_warn("unix path:%s\n", unix_addr);
 	page_sync = syncServerInit_unix("sync.sock");
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	if(page_sync <= 0)
 		pr_err("Can not create Page-Client\n");
 	else
@@ -2820,14 +2820,14 @@ int cr_restore_tasks(void)
 	sb_trace("restore.lazy_socket_done");
 
 #ifdef MUL_UFFD
-pr_warn("执行到这\n");
+(void)0; /* Remove legacy hot-path probe. */
 
 	for_each_pstree_item(pi){
 		pidset[item_num++] = pi->pid->ns[0].virt;
 	}
 	// init the global Pid uffd set
 	if (InitPidUffdSet()) goto err;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 #endif
 
 	sb_trace("restore.root_task_begin");
@@ -3766,13 +3766,13 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 		k_rtsigset_t *blkset = NULL;
 
 #endif
-pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
+(void)0; /* Remove legacy hot-path probe. */
 		thread_args[i].pid = current->threads[i].ns[0].virt;
 		thread_args[i].siginfo_n = siginfo_priv_nr[i];
 		thread_args[i].siginfo = task_args->siginfo;
 		thread_args[i].siginfo += siginfo_n;
 		siginfo_n += thread_args[i].siginfo_n;
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		/* skip self */
 		if (thread_args[i].pid == pid) {
 			task_args->t = thread_args + i;
@@ -3794,7 +3794,7 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 #endif
 			}
 		}
-		pr_warn("执行到这 i:%d, pid:%d\n", i, pid);
+		(void)0; /* Remove legacy hot-path probe. */
 		if ((tcore->tc || tcore->ids) && thread_args[i].pid != pid) {
 			pr_err("Thread has optional fields present %d\n", thread_args[i].pid);
 			ret = -1;
@@ -3830,11 +3830,11 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 			pr_err("Pdeath signal is too big\n");
 			goto err;
 		}
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		ret = prep_sched_info(&thread_args[i].sp, tcore->thread_core);
 		if (ret)
 			goto err;
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		seccomp_rst_reloc(&thread_args[i]);
 		thread_args[i].seccomp_force_tsync = rsti(current)->has_old_seccomp_filter;
 
@@ -3847,7 +3847,7 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 		if (construct_sigframe(sigframe, sigframe, blkset, tcore))
 #endif
 			goto err;
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		if (tcore->thread_core->comm)
 			strncpy(thread_args[i].comm, tcore->thread_core->comm, TASK_COMM_LEN - 1);
 		else
@@ -3856,10 +3856,10 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 
 		if (thread_args[i].pid != pid)
 			core_entry__free_unpacked(tcore, NULL);
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		pr_info("Thread %4d stack %8p rt_sigframe %8p\n", i, mz[i].stack, mz[i].rt_sigframe);
 	}
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	/*
 	 * Restorer needs own copy of vdso parameters. Runtime
 	 * vdso must be kept non intersecting with anything else,
@@ -3872,13 +3872,13 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 	task_args->vdso_rt_size = vdso_rt_size;
 	task_args->can_map_vdso = kdat.can_map_vdso;
 	task_args->has_clone3_set_tid = kdat.has_clone3_set_tid;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	new_sp = restorer_stack(task_args->t->mz);
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	/* No longer need it */
 	core_entry__free_unpacked(core, NULL);
 	xfree(current->core);
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	/*
 	 * Now prepare run-time data for threads restore.
 	 */
@@ -3893,7 +3893,7 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 	 * Apparmor we can change each thread after they have been created.
 	 */
 	task_args->lsm_type = kdat.lsm;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	/*
 	 * Make root and cwd restore _that_ late not to break any
 	 * attempts to open files by paths above (e.g. /proc).
@@ -3901,7 +3901,7 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 
 	if (restore_fs(current))
 		goto err;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	sfds_protected = false;
 	close_image_dir();
 	close_proc();
@@ -3913,7 +3913,7 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 	sb_fdpool_close();
 	close_service_fd(RPC_SK_OFF);
 	close_service_fd(CGROUPD_SK);
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	// wait_state(sync_fd)
 	__gcov_flush();
 
