@@ -1,6 +1,6 @@
 # SwiftBaton-K：借鉴 MITOSIS 的全局 DMA MR
 
-结论：可以省掉每个迁移区域单独创建普通 MR 的过程。仍然需要 MR/rkey、正确的 DMA 地址和页面生命周期管理。已完成可选内核传输原型并通过隔离内核及 Node2→Node3 实物网卡验证；CRIU 容器迁移协议尚未接入。详见 [原型验证报告](GLOBAL-DMA-MR-PROTOTYPE.md)。
+结论：可以省掉每个迁移区域单独创建普通 MR 的过程。仍然需要 MR/rkey、正确的 DMA 地址和页面生命周期管理。已完成可选内核传输原型并通过隔离内核及 Node2→Node3 实物网卡验证；CRIU 容器迁移协议也已接入并通过原规模诊断实验，但尚无停机收益证明。详见 [原型验证报告](GLOBAL-DMA-MR-PROTOTYPE.md) 与 [容器实验](DOWNTIME-DMA-CONTAINER.md)。
 
 ## 已核对的依据
 

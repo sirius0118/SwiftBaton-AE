@@ -1,0 +1,935 @@
+{
+  "status": "Goal remains incomplete; includes unsuccessful ordinary MR control and diagnostic run explicitly.",
+  "implementation_commit": "a2246c14",
+  "diagnostic_commit": "7f2a86e2",
+  "runs": [
+    {
+      "log": "dma-container-0-smoke-dma.log",
+      "run": "sb_ae_20260927_210309",
+      "driver": "driver-K-20260927_210308",
+      "mode": "K",
+      "profile": "smoke",
+      "success": true,
+      "analysis": {
+        "verify_images.py": 0,
+        "analyze_run.py": 0,
+        "analyze_recovery.py": 0,
+        "analyze_success_gaps.py": 0
+      },
+      "diagnostic_only": false,
+      "binary_sha256": "d35370796ba42802e3577c9c91f8b663e204935629ac94d5f74b409343577ec7",
+      "cleanup_verified": true,
+      "parameters": {
+        "kernel_transfer": true,
+        "kernel_device": "mlx5_1",
+        "kernel_gid": 3,
+        "kernel_timeout_ms": 2000,
+        "kernel_dense": false,
+        "kernel_dma_mr": true,
+        "kernel_export_workers": 16,
+        "kernel_export_chunk_mb": 64,
+        "kernel_ps_chunk_mb": 64,
+        "preflight_only": false,
+        "records": 100000,
+        "field_length": 1024,
+        "duration": 45,
+        "warmup": 10,
+        "threads": 16,
+        "defer_fault_credits": false,
+        "serial_ps_prepare": false,
+        "numa_node": 0,
+        "runtime_snapshot": true,
+        "poststeady_seconds": 0,
+        "port": 6390,
+        "network_lock": "nftables",
+        "image_rdma": true,
+        "buffered_cutover": true,
+        "fast_cutover": true,
+        "u_precopy": true,
+        "stage_max_mb": 0,
+        "parent_stage": false,
+        "parallel_transfer": false,
+        "install_workers": 4,
+        "copy_workers": 4,
+        "fault_read_batch": 1,
+        "fault_install_workers": 0,
+        "fault_workers": 2,
+        "prefetch_workers": 2,
+        "no_prefetch": false,
+        "no_hot_first": false,
+        "no_pretransfer": false,
+        "serial_precopy_ack": false,
+        "sync_fault_transport": false,
+        "rdma_mtu": null,
+        "fault_trace": false,
+        "spin_lifecycle": false,
+        "reader_preferred_lock": false,
+        "serial_prefetch_install": false,
+        "serial_background_install": false,
+        "no_bg_fault_assist": false,
+        "install_trace": false,
+        "bg_round_robin": false,
+        "fixed_ready_scan": false,
+        "prefetch_window": 16,
+        "page_trace": false,
+        "kernel_trace": false,
+        "page_probe": false,
+        "batch_pages": 32,
+        "compact_bg_wire": false,
+        "bg_segment_pages": 0,
+        "precopy_workers": 4,
+        "validation_workers": 16,
+        "kernel_catalog_workers": 1,
+        "vma_cache": true,
+        "precopy_limit_mb": 2048,
+        "dynamic_memory": false,
+        "memory_children": 0,
+        "cow_descendants": false,
+        "fd_adversarial": false,
+        "fd_placeholder": false,
+        "fd_groups": 0,
+        "child_mib": 64,
+        "child_workers": 4,
+        "canary_mib": 8
+      },
+      "client_gap_ms": 58.125054,
+      "kernel_dma_settings": {
+        "enabled": true,
+        "phases": {
+          "source": {
+            "ps": {
+              "regions": 30,
+              "pages": 43033,
+              "bytes": 344264,
+              "elapsed_us": 337
+            },
+            "final": {
+              "regions": 271,
+              "pages": 42977,
+              "bytes": 343816,
+              "elapsed_us": 886
+            }
+          },
+          "destination": {
+            "ps": {
+              "regions": 30,
+              "pages": 43033,
+              "bytes": 344264,
+              "elapsed_us": 573
+            },
+            "final": {
+              "regions": 271,
+              "pages": 42977,
+              "bytes": 343816,
+              "elapsed_us": 723
+            }
+          }
+        }
+      },
+      "ttr_valid": true,
+      "ttr90_target_100ms": {
+        "start_after_service_seconds": 1.1000001430511475,
+        "confirmed_after_service_seconds": 2.1000001430511475
+      },
+      "reconnect_calls": 0,
+      "source_final_prepare": [
+        {
+          "pid": 315531,
+          "regions": 271,
+          "result": 0,
+          "lock_wait_us": 0,
+          "scan_us": 1548,
+          "validation_us": 1025,
+          "export_us": 13718,
+          "hot_us": 343,
+          "total_us": 16979
+        }
+      ],
+      "dma_source": [
+        {
+          "phase": "ps",
+          "role": "source",
+          "regions": 30,
+          "pages": 43033,
+          "bytes": 344264,
+          "elapsed_us": 337
+        },
+        {
+          "phase": "final",
+          "role": "source",
+          "regions": 271,
+          "pages": 42977,
+          "bytes": 343816,
+          "elapsed_us": 886
+        }
+      ],
+      "dma_target": [
+        {
+          "phase": "ps",
+          "role": "destination",
+          "regions": 30,
+          "pages": 43033,
+          "bytes": 344264,
+          "elapsed_us": 573
+        },
+        {
+          "phase": "final",
+          "role": "destination",
+          "regions": 271,
+          "pages": 42977,
+          "bytes": 343816,
+          "elapsed_us": 723
+        }
+      ],
+      "source_scan": [
+        {
+          "pid": 315531,
+          "pagemap_us": 1162,
+          "planning_us": 386,
+          "result": 0
+        }
+      ],
+      "hot_ps": [
+        {
+          "pid": 315531,
+          "pages": 42977,
+          "runs": 6,
+          "strategy": "merge"
+        }
+      ],
+      "catalog_phase": [
+        {
+          "regions": 271,
+          "workers": 1,
+          "validation_us": 172,
+          "prepare_us": 2947,
+          "seal_us": 4499,
+          "result": 0
+        }
+      ],
+      "catalog_allocation": [
+        {
+          "started": 1,
+          "peak": 1,
+          "launch_us": 0,
+          "sum_us": 2916,
+          "max_us": 585
+        }
+      ],
+      "deficit_audit": [],
+      "kernel_stats": {
+        "regions": 271,
+        "pages": 42977,
+        "PF": 710,
+        "FT": 2253,
+        "BG": 19140,
+        "errors": 0,
+        "fault_ns": 9479733,
+        "fault_max_ns": 61706,
+        "PS": 31544,
+        "invalid": 10670,
+        "faults": 1768,
+        "hits": 1023,
+        "waits": 40,
+        "ahead": 41212,
+        "skipped": 11,
+        "batches": 1561
+      },
+      "unaccounted_pages": 0,
+      "kernel_all_user_fault_callback_mean_us": 5.361839932126697,
+      "catalog_control_ms": 7.487922,
+      "arm_ms": 5.322
+    },
+    {
+      "log": "dma-container-1-redis-ordinary.log",
+      "run": "sb_ae_20260927_210431",
+      "driver": "driver-K-20260927_210430",
+      "mode": "K",
+      "profile": "redis",
+      "success": false,
+      "analysis": {},
+      "diagnostic_only": false,
+      "binary_sha256": "d35370796ba42802e3577c9c91f8b663e204935629ac94d5f74b409343577ec7",
+      "cleanup_verified": true,
+      "parameters": {
+        "kernel_transfer": true,
+        "kernel_device": "mlx5_1",
+        "kernel_gid": 3,
+        "kernel_timeout_ms": 2000,
+        "kernel_dense": false,
+        "kernel_dma_mr": false,
+        "kernel_export_workers": 16,
+        "kernel_export_chunk_mb": 64,
+        "kernel_ps_chunk_mb": 64,
+        "preflight_only": false,
+        "records": 500000,
+        "field_length": 10240,
+        "duration": 90,
+        "warmup": 15,
+        "threads": 32,
+        "defer_fault_credits": false,
+        "serial_ps_prepare": false,
+        "numa_node": 0,
+        "runtime_snapshot": true,
+        "poststeady_seconds": 0,
+        "port": 6390,
+        "network_lock": "nftables",
+        "image_rdma": true,
+        "buffered_cutover": true,
+        "fast_cutover": true,
+        "u_precopy": true,
+        "stage_max_mb": 0,
+        "parent_stage": false,
+        "parallel_transfer": false,
+        "install_workers": 4,
+        "copy_workers": 4,
+        "fault_read_batch": 1,
+        "fault_install_workers": 0,
+        "fault_workers": 2,
+        "prefetch_workers": 2,
+        "no_prefetch": false,
+        "no_hot_first": false,
+        "no_pretransfer": false,
+        "serial_precopy_ack": false,
+        "sync_fault_transport": false,
+        "rdma_mtu": null,
+        "fault_trace": false,
+        "spin_lifecycle": false,
+        "reader_preferred_lock": false,
+        "serial_prefetch_install": false,
+        "serial_background_install": false,
+        "no_bg_fault_assist": false,
+        "install_trace": false,
+        "bg_round_robin": false,
+        "fixed_ready_scan": false,
+        "prefetch_window": 16,
+        "page_trace": false,
+        "kernel_trace": false,
+        "page_probe": false,
+        "batch_pages": 32,
+        "compact_bg_wire": false,
+        "bg_segment_pages": 0,
+        "precopy_workers": 4,
+        "validation_workers": 16,
+        "kernel_catalog_workers": 1,
+        "vma_cache": true,
+        "precopy_limit_mb": 2048,
+        "dynamic_memory": false,
+        "memory_children": 0,
+        "cow_descendants": false,
+        "fd_adversarial": false,
+        "fd_placeholder": false,
+        "fd_groups": 0,
+        "child_mib": 64,
+        "child_workers": 4,
+        "canary_mib": 8
+      },
+      "client_gap_ms": null,
+      "kernel_dma_settings": null,
+      "ttr_valid": false,
+      "ttr90_target_100ms": null,
+      "analysis_error": "Driver stopped before client performance and record validation completed",
+      "source_final_prepare": [
+        {
+          "pid": 316859,
+          "regions": 409,
+          "result": 0,
+          "lock_wait_us": 0,
+          "scan_us": 14088,
+          "validation_us": 4019,
+          "export_us": 73893,
+          "hot_us": 10392,
+          "total_us": 102729
+        }
+      ],
+      "dma_source": [],
+      "dma_target": [],
+      "source_scan": [
+        {
+          "pid": 316859,
+          "pagemap_us": 6187,
+          "planning_us": 7901,
+          "result": 0
+        }
+      ],
+      "hot_ps": [
+        {
+          "pid": 316859,
+          "pages": 1562771,
+          "runs": 10,
+          "strategy": "merge"
+        }
+      ],
+      "catalog_phase": [
+        {
+          "regions": 409,
+          "workers": 1,
+          "validation_us": 3142,
+          "prepare_us": 54127,
+          "seal_us": 34947,
+          "result": 0
+        }
+      ],
+      "catalog_allocation": [
+        {
+          "started": 1,
+          "peak": 1,
+          "launch_us": 0,
+          "sum_us": 54068,
+          "max_us": 618
+        }
+      ],
+      "deficit_audit": [
+        "(11.735217) SB_KERNEL deficit pid=1 address=7fdd2e665000 pages=5 completed=0 retired=5 drained=1 PF=0 FT=0 BG=0 PS=0 invalid=0 state0=0 state1=5 state2=0 state3=0 state4=0 state5=0 state6=0 unknown=0",
+        "(11.735327) SB_KERNEL deficit_audit result=0 completed=1562768 pages=1562773"
+      ],
+      "kernel_stats": {
+        "regions": 409,
+        "pages": 1562773,
+        "PF": 20258,
+        "FT": 82566,
+        "BG": 964833,
+        "errors": 0,
+        "fault_ns": 357316473,
+        "fault_max_ns": 774361,
+        "PS": 515542,
+        "invalid": 20431,
+        "faults": 54439,
+        "hits": 18699,
+        "waits": 13906,
+        "ahead": 1509929,
+        "skipped": 2166,
+        "batches": 38666
+      },
+      "unaccounted_pages": 5,
+      "kernel_all_user_fault_callback_mean_us": 6.563611987729385,
+      "catalog_control_ms": 99.17717,
+      "arm_ms": 217.179
+    },
+    {
+      "log": "dma-container-redis-dma-retirement.log",
+      "run": "sb_ae_20260927_211058",
+      "driver": "driver-K-20260927_211057",
+      "mode": "K",
+      "profile": "redis",
+      "success": true,
+      "analysis": {
+        "verify_images.py": 0,
+        "analyze_run.py": 0,
+        "analyze_recovery.py": 0,
+        "analyze_success_gaps.py": 0
+      },
+      "diagnostic_only": true,
+      "binary_sha256": "d35370796ba42802e3577c9c91f8b663e204935629ac94d5f74b409343577ec7",
+      "cleanup_verified": true,
+      "parameters": {
+        "kernel_transfer": true,
+        "kernel_device": "mlx5_1",
+        "kernel_gid": 3,
+        "kernel_timeout_ms": 2000,
+        "kernel_dense": false,
+        "kernel_dma_mr": true,
+        "kernel_export_workers": 16,
+        "kernel_export_chunk_mb": 64,
+        "kernel_ps_chunk_mb": 64,
+        "preflight_only": false,
+        "records": 500000,
+        "field_length": 10240,
+        "duration": 90,
+        "warmup": 15,
+        "threads": 32,
+        "defer_fault_credits": false,
+        "serial_ps_prepare": false,
+        "numa_node": 0,
+        "runtime_snapshot": true,
+        "poststeady_seconds": 0,
+        "port": 6390,
+        "network_lock": "nftables",
+        "image_rdma": true,
+        "buffered_cutover": true,
+        "fast_cutover": true,
+        "u_precopy": true,
+        "stage_max_mb": 0,
+        "parent_stage": false,
+        "parallel_transfer": false,
+        "install_workers": 4,
+        "copy_workers": 4,
+        "fault_read_batch": 1,
+        "fault_install_workers": 0,
+        "fault_workers": 2,
+        "prefetch_workers": 2,
+        "no_prefetch": false,
+        "no_hot_first": false,
+        "no_pretransfer": false,
+        "serial_precopy_ack": false,
+        "sync_fault_transport": false,
+        "rdma_mtu": null,
+        "fault_trace": false,
+        "spin_lifecycle": false,
+        "reader_preferred_lock": false,
+        "serial_prefetch_install": false,
+        "serial_background_install": false,
+        "no_bg_fault_assist": false,
+        "install_trace": false,
+        "bg_round_robin": false,
+        "fixed_ready_scan": false,
+        "prefetch_window": 16,
+        "page_trace": false,
+        "kernel_trace": false,
+        "page_probe": false,
+        "batch_pages": 32,
+        "compact_bg_wire": false,
+        "bg_segment_pages": 0,
+        "precopy_workers": 4,
+        "validation_workers": 16,
+        "kernel_catalog_workers": 1,
+        "vma_cache": true,
+        "precopy_limit_mb": 2048,
+        "dynamic_memory": false,
+        "memory_children": 0,
+        "cow_descendants": false,
+        "fd_adversarial": false,
+        "fd_placeholder": false,
+        "fd_groups": 0,
+        "child_mib": 64,
+        "child_workers": 4,
+        "canary_mib": 8
+      },
+      "client_gap_ms": 528.019689,
+      "kernel_dma_settings": {
+        "enabled": true,
+        "phases": {
+          "source": {
+            "ps": {
+              "regions": 41,
+              "pages": 524288,
+              "bytes": 4194304,
+              "elapsed_us": 166528
+            },
+            "final": {
+              "regions": 414,
+              "pages": 1562715,
+              "bytes": 12501720,
+              "elapsed_us": 9832
+            }
+          },
+          "destination": {
+            "ps": {
+              "regions": 41,
+              "pages": 524288,
+              "bytes": 4194304,
+              "elapsed_us": 4613
+            },
+            "final": {
+              "regions": 414,
+              "pages": 1562715,
+              "bytes": 12501720,
+              "elapsed_us": 16026
+            }
+          }
+        }
+      },
+      "ttr_valid": true,
+      "ttr90_target_100ms": {
+        "start_after_service_seconds": 1.6700000762939453,
+        "confirmed_after_service_seconds": 2.6700000762939453
+      },
+      "reconnect_calls": 32,
+      "source_final_prepare": [
+        {
+          "pid": 320665,
+          "regions": 414,
+          "result": 0,
+          "lock_wait_us": 0,
+          "scan_us": 18275,
+          "validation_us": 5566,
+          "export_us": 112393,
+          "hot_us": 11183,
+          "total_us": 147781
+        }
+      ],
+      "dma_source": [
+        {
+          "phase": "ps",
+          "role": "source",
+          "regions": 41,
+          "pages": 524288,
+          "bytes": 4194304,
+          "elapsed_us": 166528
+        },
+        {
+          "phase": "final",
+          "role": "source",
+          "regions": 414,
+          "pages": 1562715,
+          "bytes": 12501720,
+          "elapsed_us": 9832
+        }
+      ],
+      "dma_target": [
+        {
+          "phase": "ps",
+          "role": "destination",
+          "regions": 41,
+          "pages": 524288,
+          "bytes": 4194304,
+          "elapsed_us": 4613
+        },
+        {
+          "phase": "final",
+          "role": "destination",
+          "regions": 414,
+          "pages": 1562715,
+          "bytes": 12501720,
+          "elapsed_us": 16026
+        }
+      ],
+      "source_scan": [
+        {
+          "pid": 320665,
+          "pagemap_us": 9585,
+          "planning_us": 8689,
+          "result": 0
+        }
+      ],
+      "hot_ps": [
+        {
+          "pid": 320665,
+          "pages": 1562823,
+          "runs": 11,
+          "strategy": "merge"
+        }
+      ],
+      "catalog_phase": [
+        {
+          "regions": 414,
+          "workers": 1,
+          "validation_us": 3318,
+          "prepare_us": 51816,
+          "seal_us": 47187,
+          "result": 0
+        }
+      ],
+      "catalog_allocation": [
+        {
+          "started": 1,
+          "peak": 1,
+          "launch_us": 0,
+          "sum_us": 51763,
+          "max_us": 618
+        }
+      ],
+      "deficit_audit": [],
+      "kernel_stats": {
+        "regions": 414,
+        "pages": 1562715,
+        "PF": 22324,
+        "FT": 94139,
+        "BG": 1089354,
+        "errors": 0,
+        "fault_ns": 388967718,
+        "fault_max_ns": 720540,
+        "PS": 515078,
+        "invalid": 158180,
+        "faults": 57142,
+        "hits": 14471,
+        "waits": 19493,
+        "ahead": 1506454,
+        "skipped": 3451,
+        "batches": 47109
+      },
+      "unaccounted_pages": 0,
+      "kernel_all_user_fault_callback_mean_us": 6.807037170557558,
+      "catalog_control_ms": 107.130585,
+      "arm_ms": 219.379
+    }
+  ],
+  "cold_fault_probe_same_transport": {
+    "validation": {
+      "passed": true,
+      "host_loaded": false,
+      "rxe": true,
+      "kernel_sha256": "e014c62b8c18c8982faf624f9aa73d0f5c08daed04ca64f07f07b13997944e54",
+      "module_sha256": "ab71beafba2d04d3cd6f117331445aa4805069954cc359dd57994b4af1dec9e8",
+      "test_sha256": "268fc22b38d462a2128a8c5d466bf61a920578977f421a7f0a471d33e530dcd4",
+      "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-mr-peer-vm/validation-20260927_204644.log",
+      "returncode": 0,
+      "missing": [],
+      "kernel_errors": []
+    },
+    "test_sha256": "268fc22b38d462a2128a8c5d466bf61a920578977f421a7f0a471d33e530dcd4",
+    "steps": [
+      {
+        "label": "four-paths",
+        "ordinary": false,
+        "probe_only": false,
+        "returncodes": [
+          0,
+          0
+        ],
+        "logs": {
+          "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-four-paths-source.log",
+          "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-four-paths-destination.log"
+        }
+      },
+      {
+        "label": "0-ordinary",
+        "ordinary": true,
+        "probe_only": true,
+        "returncodes": [
+          0,
+          0
+        ],
+        "logs": {
+          "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-0-ordinary-source.log",
+          "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-0-ordinary-destination.log"
+        },
+        "fault": {
+          "mapping": "anonymous_PTE",
+          "n": "1024",
+          "mean_ns": "9016",
+          "p50_ns": "8869",
+          "p95_ns": "9872",
+          "p99_ns": "12607",
+          "max_ns": "16795",
+          "clock_pair_mean_ns": "21",
+          "handler_mean_ns": "8080",
+          "handler_max_ns": "14842"
+        }
+      },
+      {
+        "label": "0-dma",
+        "ordinary": false,
+        "probe_only": true,
+        "returncodes": [
+          0,
+          0
+        ],
+        "logs": {
+          "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-0-dma-source.log",
+          "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-0-dma-destination.log"
+        },
+        "fault": {
+          "mapping": "anonymous_PTE",
+          "n": "1024",
+          "mean_ns": "9073",
+          "p50_ns": "8907",
+          "p95_ns": "9972",
+          "p99_ns": "12117",
+          "max_ns": "18314",
+          "clock_pair_mean_ns": "21",
+          "handler_mean_ns": "8129",
+          "handler_max_ns": "17350"
+        }
+      },
+      {
+        "label": "1-ordinary",
+        "ordinary": true,
+        "probe_only": true,
+        "returncodes": [
+          0,
+          0
+        ],
+        "logs": {
+          "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-1-ordinary-source.log",
+          "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-1-ordinary-destination.log"
+        },
+        "fault": {
+          "mapping": "anonymous_PTE",
+          "n": "1024",
+          "mean_ns": "9102",
+          "p50_ns": "8959",
+          "p95_ns": "9980",
+          "p99_ns": "12470",
+          "max_ns": "16697",
+          "clock_pair_mean_ns": "20",
+          "handler_mean_ns": "8162",
+          "handler_max_ns": "14983"
+        }
+      },
+      {
+        "label": "1-dma",
+        "ordinary": false,
+        "probe_only": true,
+        "returncodes": [
+          0,
+          0
+        ],
+        "logs": {
+          "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-1-dma-source.log",
+          "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-1-dma-destination.log"
+        },
+        "fault": {
+          "mapping": "anonymous_PTE",
+          "n": "1024",
+          "mean_ns": "9080",
+          "p50_ns": "8930",
+          "p95_ns": "9947",
+          "p99_ns": "12326",
+          "max_ns": "17248",
+          "clock_pair_mean_ns": "21",
+          "handler_mean_ns": "8138",
+          "handler_max_ns": "14439"
+        }
+      },
+      {
+        "label": "2-ordinary",
+        "ordinary": true,
+        "probe_only": true,
+        "returncodes": [
+          0,
+          0
+        ],
+        "logs": {
+          "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-2-ordinary-source.log",
+          "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-2-ordinary-destination.log"
+        },
+        "fault": {
+          "mapping": "anonymous_PTE",
+          "n": "1024",
+          "mean_ns": "9105",
+          "p50_ns": "8960",
+          "p95_ns": "9973",
+          "p99_ns": "12706",
+          "max_ns": "17339",
+          "clock_pair_mean_ns": "21",
+          "handler_mean_ns": "8152",
+          "handler_max_ns": "12789"
+        }
+      },
+      {
+        "label": "2-dma",
+        "ordinary": false,
+        "probe_only": true,
+        "returncodes": [
+          0,
+          0
+        ],
+        "logs": {
+          "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-2-dma-source.log",
+          "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-2-dma-destination.log"
+        },
+        "fault": {
+          "mapping": "anonymous_PTE",
+          "n": "1024",
+          "mean_ns": "9115",
+          "p50_ns": "8960",
+          "p95_ns": "9967",
+          "p99_ns": "12359",
+          "max_ns": "16785",
+          "clock_pair_mean_ns": "21",
+          "handler_mean_ns": "8168",
+          "handler_max_ns": "15856"
+        }
+      }
+    ],
+    "nodes": {
+      "knode2": {
+        "before": {
+          "module": "/home/k8s/exper/zxz/live_migration/SwiftBaton-K/build/module-ofed-optimized/swiftbaton_k.ko",
+          "sha256": "a45f6f60bd56d55f3b0ce481ede1ba3ef61c0974df223e2ce800628618711e8a",
+          "kernel": "5.15.167",
+          "boot_id": "bd33be43-289f-4cb2-bd60-7dcc41440a78",
+          "params": {
+            "session_dispatch": "Y",
+            "early_prefetch": "Y",
+            "rdma_ack_timeout": "12",
+            "rdma_debug": "N",
+            "rdma_retry_count": "3"
+          }
+        },
+        "candidate": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-mr-source/module/swiftbaton_k.ko",
+        "candidate_sha256": "66199293d192aee96573c072c06233b977f8853f9150756b127d0a7ace7fdfb2",
+        "switch_attempted": true,
+        "loaded": {
+          "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-mr-source/module/swiftbaton_k.ko",
+          "params": {
+            "session_dispatch": "Y",
+            "arm_timing": "N",
+            "early_prefetch": "Y",
+            "rdma_ack_timeout": "12",
+            "rdma_debug": "N",
+            "rdma_retry_count": "3"
+          }
+        },
+        "restored": {
+          "loaded": "/home/k8s/exper/zxz/live_migration/SwiftBaton-K/build/module-ofed-optimized/swiftbaton_k.ko",
+          "params": {
+            "session_dispatch": "Y",
+            "early_prefetch": "Y",
+            "rdma_ack_timeout": "12",
+            "rdma_debug": "N",
+            "rdma_retry_count": "3"
+          }
+        },
+        "after": {
+          "module": "/home/k8s/exper/zxz/live_migration/SwiftBaton-K/build/module-ofed-optimized/swiftbaton_k.ko",
+          "sha256": "a45f6f60bd56d55f3b0ce481ede1ba3ef61c0974df223e2ce800628618711e8a",
+          "kernel": "5.15.167",
+          "boot_id": "bd33be43-289f-4cb2-bd60-7dcc41440a78",
+          "params": {
+            "session_dispatch": "Y",
+            "early_prefetch": "Y",
+            "rdma_ack_timeout": "12",
+            "rdma_debug": "N",
+            "rdma_retry_count": "3"
+          }
+        }
+      },
+      "knode3": {
+        "before": {
+          "module": "/var/tmp/swiftbaton-k-check/swiftbaton_k.ko",
+          "sha256": "4fcd86e6413ef7a239d4f121e3617f137d5182a617046ffa7686ecb2b7a85231",
+          "kernel": "5.15.167-swiftbaton-k1",
+          "boot_id": "3220ec35-2ba6-4c80-93ee-ed1eba296d97",
+          "params": {
+            "session_dispatch": "Y",
+            "early_prefetch": "Y",
+            "rdma_ack_timeout": "12",
+            "rdma_debug": "N",
+            "rdma_retry_count": "3"
+          }
+        },
+        "candidate": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/dma-mr-target.ko",
+        "candidate_sha256": "139572b12d4e51420c62760e0947112aba30509cbf2b6fb5d780a857a5007f7c",
+        "switch_attempted": true,
+        "loaded": {
+          "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/dma-mr-target.ko",
+          "params": {
+            "token_pool_test_fail_after": "-1",
+            "session_dispatch": "Y",
+            "arm_timing": "N",
+            "early_prefetch": "Y",
+            "rdma_ack_timeout": "12",
+            "rdma_debug": "N",
+            "rdma_retry_count": "3"
+          }
+        },
+        "restored": {
+          "loaded": "/var/tmp/swiftbaton-k-check/swiftbaton_k.ko",
+          "params": {
+            "session_dispatch": "Y",
+            "early_prefetch": "Y",
+            "rdma_ack_timeout": "12",
+            "rdma_debug": "N",
+            "rdma_retry_count": "3"
+          }
+        },
+        "after": {
+          "module": "/var/tmp/swiftbaton-k-check/swiftbaton_k.ko",
+          "sha256": "4fcd86e6413ef7a239d4f121e3617f137d5182a617046ffa7686ecb2b7a85231",
+          "kernel": "5.15.167-swiftbaton-k1",
+          "boot_id": "3220ec35-2ba6-4c80-93ee-ed1eba296d97",
+          "params": {
+            "session_dispatch": "Y",
+            "early_prefetch": "Y",
+            "rdma_ack_timeout": "12",
+            "rdma_debug": "N",
+            "rdma_retry_count": "3"
+          }
+        }
+      }
+    },
+    "passed": true
+  }
+}
