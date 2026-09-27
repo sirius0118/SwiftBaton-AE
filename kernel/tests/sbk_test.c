@@ -24,6 +24,7 @@
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL %s:%d %s errno=%d\n", __func__, __LINE__, #x, errno); exit(1); } } while (0)
 struct fixture { int fd; size_t n; unsigned char *src, *dst; };
 static int use_stage, use_anon, defer_mapping, use_token_pool;
+static int use_prepared_arm;
 static int block_speculative_qp = -1;
 static unsigned char *map_destination(int fd, size_t n)
 {
@@ -41,6 +42,7 @@ static unsigned char *map_destination(int fd, size_t n)
         }
     }
     struct sbk_anon_arm a = {.address = (uintptr_t)p};
+    if (use_prepared_arm) CHECK(!ioctl(fd, SBK_IOC_PREPARE_ANON, &a));
     CHECK(ioctl(fd, SBK_IOC_ARM_ANON, &a) == 0);
     return p;
 }
@@ -770,6 +772,7 @@ static int peer_test(int source_side)
 #include "session-dispatch-test.inc"
 #include "dma-mr-test.inc"
 #include "creator-drop-test.inc"
+#include "prepared-arm-test.inc"
 
 int main(int argc, char **argv)
 {
@@ -777,6 +780,12 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);
     use_anon = getenv("SBK_TEST_ANON") != NULL;
     use_token_pool = getenv("SBK_TEST_TOKEN_POOL") != NULL;
+    use_prepared_arm = getenv("SBK_TEST_PREPARED_ARM") != NULL;
+    if (use_prepared_arm) {
+        CHECK(use_anon);
+        puts("SBK_PREPARED_ARM_ENABLED");
+        if (argc == 1) test_prepared_arm_lifetime();
+    }
     printf("SBK_MAPPING_MODE=%s\n", use_anon ? "anonymous_PTE" : "file_fixture");
     if (getenv("SBK_TEST_CREATOR_LIFETIME")) {
         test_creator_drop_lifetime(); return 0;

@@ -83,6 +83,11 @@ struct sbk_context {
 	struct mm_struct *mm;
 	unsigned long base;
 	bool anonymous;
+	bool plan_mode;
+#ifdef SBK_PTE_PLAN_API
+	struct sbk_pte_plan *arm_plan;
+	unsigned long plan_address;
+#endif
 	unsigned long *token_ids, tokens_created;
 	atomic64_t faults, hits, waits, errors, fetched[SBK_LANES];
 	atomic64_t installed, skipped, fault_ns, fault_max, histogram[32];
@@ -603,6 +608,9 @@ static void sbk_token_retain(void *cookie)
 	struct sbk_entry *e = cookie;
 	kref_get(&e->ctx->refs);
 }
+#ifdef SBK_PTE_PLAN_API
+#include "sbk_prepared_arm.h"
+#endif
 static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 {
 	struct sbk_anon_arm a;
@@ -614,6 +622,10 @@ static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 		return -EINVAL;
 	if (copy_from_user(&a, user, sizeof(a)))
 		return -EFAULT;
+#ifdef SBK_PTE_PLAN_API
+	if (c->arm_plan)
+		return sbk_arm_prepared(c, &a);
+#endif
 	if (arm_timing) begin = ktime_get_ns();
 	atomic64_set(&c->retired_tokens, 0);
 	c->token_ids = kvcalloc(c->cfg.pages, sizeof(*c->token_ids), GFP_KERNEL);
@@ -1548,6 +1560,9 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 #ifdef CONFIG_SWIFTBATON_PTE
 		caps.features |= SBK_FEATURE_ANONYMOUS_PTE | SBK_FEATURE_TOKEN_POOL;
 #endif
+#ifdef SBK_PTE_PLAN_API
+		caps.features |= SBK_FEATURE_PREPARED_ARM;
+#endif
 		ret = copy_to_user(user, &caps, sizeof(caps)) ? -EFAULT : 0;
 		break;
 	case SBK_IOC_WATCH_DRAIN:
@@ -1607,6 +1622,13 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		sbk_token_pool_stats(c->token_pool, &pool_stats);
 		ret = copy_to_user(user, &pool_stats, sizeof(pool_stats)) ? -EFAULT : 0;
 	}
+#else
+		ret = -EOPNOTSUPP;
+#endif
+		break;
+	case SBK_IOC_PREPARE_ANON:
+#ifdef SBK_PTE_PLAN_API
+		ret = sbk_prepare_anonymous(c, user);
 #else
 		ret = -EOPNOTSUPP;
 #endif
@@ -1729,7 +1751,7 @@ static int sbk_mmap(struct file *file, struct vm_area_struct *vma)
 	/* mmap holds mmap_write_lock; configure can fault/pin source pages. */
 	if (!mutex_trylock(&c->control))
 		return -EAGAIN;
-	if (!c->configured || c->mapped || c->drain_event || atomic_read(&c->stopping) ||
+	if (!c->configured || c->mapped || c->plan_mode || c->drain_event || atomic_read(&c->stopping) ||
 	    (c->pretransferred && !c->sealed) ||
 	    vma->vm_pgoff || (vma->vm_end - vma->vm_start) != c->cfg.pages * PAGE_SIZE ||
 	    (vma->vm_flags & (VM_SHARED | VM_EXEC))) {
@@ -1784,6 +1806,14 @@ static int sbk_release(struct inode *inode, struct file *file)
 	struct sbk_context *c = file->private_data;
 #ifdef CONFIG_SWIFTBATON_PTE
 	unsigned long i;
+#endif
+#ifdef SBK_PTE_PLAN_API
+	/* An unarmed plan owns tokens whose providers own this context. Break
+	 * that cycle while the file reference still protects c and its entries. */
+	sbk_pte_plan_free(c->arm_plan);
+	c->arm_plan = NULL;
+#endif
+#ifdef CONFIG_SWIFTBATON_PTE
 	/* Markers still mapped after close keep the context and transport alive. */
 	for (i = 0; i < c->tokens_created; i++)
 		sbk_pte_token_put(c->token_ids[i]);

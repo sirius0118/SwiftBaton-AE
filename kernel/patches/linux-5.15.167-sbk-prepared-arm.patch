@@ -1,0 +1,462 @@
+diff --git a/mm/swiftbaton_pte.c b/mm/swiftbaton_pte.c
+--- a/mm/swiftbaton_pte.c
++++ b/mm/swiftbaton_pte.c
+@@ -26,6 +26,8 @@
+ struct sbk_pte_anchor {
+ 	struct kref refs;
+ 	struct anon_vma *anon_vma;
++	pgoff_t offset_base;
++	bool ready;
+ 	struct work_struct destroy;
+ };
+ struct sbk_pte_token {
+@@ -44,7 +46,8 @@
+ static void sbk_anchor_destroy(struct work_struct *work)
+ {
+ 	struct sbk_pte_anchor *a = container_of(work, struct sbk_pte_anchor, destroy);
+-	put_anon_vma(a->anon_vma);
++	if (a->anon_vma)
++		put_anon_vma(a->anon_vma);
+ 	kfree(a);
+ }
+ static void sbk_anchor_release(struct kref *ref)
+@@ -167,9 +170,8 @@
+ {
+ 	struct sbk_arm *arm = data;
+ 	struct sbk_pte_token *t = arm->tokens[(addr - arm->start) >> PAGE_SHIFT];
+-	if (!pte_none(*pte) || t->anchor)
++	if (!pte_none(*pte) || cmpxchg(&t->anchor, NULL, arm->anchor))
+ 		return -EEXIST;
+-	t->anchor = arm->anchor;
+ 	t->offset = linear_page_index(arm->vma, addr);
+ 	/* Transfer this lookup reference to the PTE. Account the shared anchor
+ 	 * in one batch before rollback or releasing mmap_write_lock. */
+@@ -268,6 +270,8 @@
+ 	/* Page-table allocation can fail halfway; roll back only our installed prefix. */
+ 	if (ret && arm.installed)
+ 		zap_page_range(vma, start, arm.installed << PAGE_SHIFT);
++	if (!ret)
++		smp_store_release(&arm.anchor->ready, true);
+ unlock:
+ 	mmap_write_unlock(mm);
+ 	if (arm.anchor)
+@@ -280,6 +284,8 @@
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(sbk_pte_arm);
++
++#include "swiftbaton_pte_plan.inc"
+ 
+ vm_fault_t sbk_pte_fault(struct vm_fault *vmf, unsigned int lane)
+ {
+@@ -415,17 +421,25 @@
+ 	struct sbk_location { struct mm_struct *mm; unsigned long address; } *loc;
+ 	struct anon_vma_chain *avc;
+ 	struct anon_vma *anon;
++	struct sbk_pte_anchor *anchor;
++	pgoff_t offset;
+ 	unsigned long capacity = 0, count = 0, i;
+ 	int ret = 0;
+ 	if (!t)
+ 		return 0; /* Already installed or discarded everywhere. */
+-	if (!t->anchor || lane > SBK_PTE_BACKGROUND) {
++	anchor = READ_ONCE(t->anchor);
++	if (!anchor || lane > SBK_PTE_BACKGROUND) {
+ 		ret = -EINVAL;
+ 		goto put;
+ 	}
+-	anon = t->anchor->anon_vma;
++	if (!smp_load_acquire(&anchor->ready)) {
++		ret = -EAGAIN;
++		goto put;
++	}
++	anon = anchor->anon_vma;
++	offset = t->offset + anchor->offset_base;
+ 	anon_vma_lock_read(anon);
+-	anon_vma_interval_tree_foreach(avc, &anon->rb_root, t->offset, t->offset)
++	anon_vma_interval_tree_foreach(avc, &anon->rb_root, offset, offset)
+ 		capacity++;
+ 	anon_vma_unlock_read(anon);
+ 	if (!capacity)
+@@ -436,14 +450,14 @@
+ 		goto put;
+ 	}
+ 	anon_vma_lock_read(anon);
+-	anon_vma_interval_tree_foreach(avc, &anon->rb_root, t->offset, t->offset) {
++	anon_vma_interval_tree_foreach(avc, &anon->rb_root, offset, offset) {
+ 		struct vm_area_struct *vma = avc->vma;
+ 		if (count == capacity) {
+ 			ret = -EAGAIN;
+ 			break;
+ 		}
+ 		loc[count].mm = vma->vm_mm;
+-		loc[count].address = vma->vm_start + ((t->offset - vma->vm_pgoff) << PAGE_SHIFT);
++		loc[count].address = vma->vm_start + ((offset - vma->vm_pgoff) << PAGE_SHIFT);
+ 		mmgrab(vma->vm_mm);
+ 		count++;
+ 	}
+diff --git a/include/linux/swiftbaton_pte.h b/include/linux/swiftbaton_pte.h
+--- a/include/linux/swiftbaton_pte.h
++++ b/include/linux/swiftbaton_pte.h
+@@ -26,6 +26,28 @@
+ };
+ 
+ #ifdef CONFIG_SWIFTBATON_PTE
++/* A prepared plan owns references and page tables without owning an mm.
++ * IDs become reserved even on a partial prepare failure: discard their
++ * creator references; do not retry those IDs through another plan/ARM.
++ * On success the caller may put ALL creator references immediately.
++ * arm is one-shot (including failures), requires mm == current->mm and
++ * an eligible VMA at the exact saved address. free requires exclusive
++ * ownership and releases only resources not transferred to live PTEs.
++ */
++#define SBK_PTE_PLAN_API 1
++struct sbk_pte_plan;
++struct sbk_pte_plan_stats {
++    unsigned long pages, tables, published, moved_tables, copied_pages;
++};
++struct sbk_pte_plan *sbk_pte_plan_create(unsigned long start,
++    unsigned long count, const unsigned long *ids);
++int sbk_pte_plan_arm(struct sbk_pte_plan *plan, struct mm_struct *mm);
++void sbk_pte_plan_stats(struct sbk_pte_plan *plan, struct sbk_pte_plan_stats *out);
++void sbk_pte_plan_free(struct sbk_pte_plan *plan);
++#ifdef CONFIG_SWIFTBATON_PTE_PLAN_TEST
++int sbk_pte_plan_test_fail_after(struct sbk_pte_plan *plan, unsigned long pages);
++void sbk_pte_plan_test_flush_memcg(void);
++#endif
+ int sbk_pte_token_create(const struct sbk_pte_provider *ops, void *cookie,
+ 			unsigned long *id);
+ bool sbk_pte_token_get(unsigned long id);
+diff --git a/mm/swiftbaton_pte_plan.inc b/mm/swiftbaton_pte_plan.inc
+new file mode 100644
+--- /dev/null
++++ b/mm/swiftbaton_pte_plan.inc
+@@ -0,0 +1,315 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Included by swiftbaton_pte.c: detached PS preparation, one-shot final ARM.
++ * Prepared tokens have immutable anchors but no published anon_vma until ARM.
++ * No page content is copied here. This implementation targets x86-64 5.15.
++ */
++#include <asm/pgalloc.h>
++
++struct sbk_pte_plan {
++	struct mutex lock;
++	struct sbk_pte_anchor *anchor;
++	struct sbk_pte_token **tokens;
++	pgtable_t *tables;
++	unsigned long start, end, count, nr_tables, refs, published;
++	unsigned long moved_tables, copied_pages;
++	bool attempted;
++#ifdef CONFIG_SWIFTBATON_PTE_PLAN_TEST
++	long fail_after;
++#endif
++};
++
++void sbk_pte_plan_free(struct sbk_pte_plan *p)
++{
++	unsigned long i;
++	if (IS_ERR_OR_NULL(p))
++		return;
++	/* Published entries transferred ownership to PTEs. Their pointer values
++	 * can already be stale after fault/unmap: never dereference that prefix. */
++	for (i = p->published; i < p->refs; i++)
++		kref_put(&p->tokens[i]->refs, sbk_token_release);
++	if (p->tables)
++		for (i = 0; i < p->nr_tables; i++)
++			if (p->tables[i])
++				pte_free(&init_mm, p->tables[i]);
++	if (p->anchor)
++		kref_put(&p->anchor->refs, sbk_anchor_release);
++	kvfree(p->tables);
++	kvfree(p->tokens);
++	kfree(p);
++}
++EXPORT_SYMBOL_GPL(sbk_pte_plan_free);
++
++struct sbk_pte_plan *sbk_pte_plan_create(unsigned long start,
++		unsigned long count, const unsigned long *ids)
++{
++	struct sbk_pte_plan *p;
++	unsigned long len, end, i, reserved = 0;
++	int ret = -ENOMEM;
++	if ((start & ~PAGE_MASK) || !count || count > (1UL << 20) || !ids ||
++	    check_mul_overflow(count, PAGE_SIZE, &len) ||
++	    check_add_overflow(start, len, &end) || end > TASK_SIZE_MAX)
++		return ERR_PTR(-EINVAL);
++	p = kzalloc(sizeof(*p), GFP_KERNEL);
++	if (!p)
++		return ERR_PTR(-ENOMEM);
++	mutex_init(&p->lock);
++#ifdef CONFIG_SWIFTBATON_PTE_PLAN_TEST
++	p->fail_after = -1;
++#endif
++	p->start = start;
++	p->end = end;
++	p->count = count;
++	p->nr_tables = ((end - 1) >> PMD_SHIFT) - (start >> PMD_SHIFT) + 1;
++	p->tokens = kvcalloc(count, sizeof(*p->tokens), GFP_KERNEL);
++	p->tables = kvcalloc(p->nr_tables, sizeof(*p->tables), GFP_KERNEL);
++	p->anchor = kzalloc(sizeof(*p->anchor), GFP_KERNEL);
++	if (p->anchor) {
++		kref_init(&p->anchor->refs);
++		INIT_WORK(&p->anchor->destroy, sbk_anchor_destroy);
++	}
++	if (!p->tokens || !p->tables || !p->anchor)
++		goto fail;
++	for (i = 0; i < count;) {
++		unsigned long last = min(i + 64, count);
++		xa_lock(&sbk_tokens);
++		for (; i < last; i++) {
++			struct sbk_pte_token *t = xa_load(&sbk_tokens, ids[i]);
++			if (!t || !kref_get_unless_zero(&t->refs)) {
++				ret = -ENOENT;
++				break;
++			}
++			p->tokens[p->refs++] = t;
++			/* Reserve once; never clear the anchor on cancellation. Readers
++			 * holding a token reference may have observed this pointer. */
++			if (cmpxchg(&t->anchor, NULL, p->anchor)) {
++				ret = -EEXIST;
++				break;
++			}
++			t->offset = i;
++			reserved++;
++		}
++		xa_unlock(&sbk_tokens);
++		if (i != last)
++			break;
++		cond_resched();
++	}
++	/* The lookup refs and initial plan anchor ref protect all objects until
++	 * this batched anchor accounting, even if creator refs disappear. */
++	if (reserved)
++		refcount_add(reserved, &p->anchor->refs.refcount);
++	if (reserved != count)
++		goto fail;
++	for (i = 0; i < p->nr_tables; i++) {
++		/* Charge the eventual adopter's memcg at ARM, not the PS worker's.
++		 * The normal page-table constructor still runs on these pages. */
++		p->tables[i] = __pte_alloc_one(&init_mm, GFP_PGTABLE_USER & ~__GFP_ACCOUNT);
++		if (!p->tables[i]) {
++			ret = -ENOMEM;
++			goto fail;
++		}
++	}
++	for (i = 0; i < count; i++) {
++		unsigned long addr = start + (i << PAGE_SHIFT);
++		unsigned long slot = (addr >> PMD_SHIFT) - (start >> PMD_SHIFT);
++		pte_t *pte = page_address(p->tables[slot]);
++		set_pte(pte + pte_index(addr),
++			swp_entry_to_pte(swp_entry(SWP_SWIFTBATON, p->tokens[i]->id)));
++		if (!(i & 4095))
++			cond_resched();
++	}
++	return p;
++fail:
++	sbk_pte_plan_free(p);
++	return ERR_PTR(ret);
++}
++EXPORT_SYMBOL_GPL(sbk_pte_plan_create);
++
++static int sbk_plan_preflight(struct sbk_pte_plan *p, struct mm_struct *mm)
++{
++	unsigned long addr;
++	for (addr = p->start; addr < p->end;) {
++		unsigned long next = pmd_addr_end(addr, p->end), pos;
++		pmd_t *pmd = sbk_find_pmd(mm, addr);
++		spinlock_t *ptl;
++		pte_t *base, *pte;
++		int ret = 0;
++		if (IS_ERR(pmd))
++			return PTR_ERR(pmd);
++		if (pmd) {
++			base = pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
++			for (pos = addr; pos < next; pos += PAGE_SIZE, pte++)
++				if (!pte_none(*pte)) {
++					ret = -EEXIST;
++					break;
++				}
++			pte_unmap_unlock(base, ptl);
++			if (ret)
++				return ret;
++		}
++		addr = next;
++		cond_resched();
++	}
++	return 0;
++}
++
++static pmd_t *sbk_plan_alloc_pmd(struct mm_struct *mm, unsigned long addr)
++{
++	pgd_t *pgd = pgd_offset(mm, addr);
++	p4d_t *p4d = p4d_alloc(mm, pgd, addr);
++	pud_t *pud;
++	if (!p4d)
++		return NULL;
++	pud = pud_alloc(mm, p4d, addr);
++	if (!pud)
++		return NULL;
++	return pmd_alloc(mm, pud, addr);
++}
++
++int sbk_pte_plan_arm(struct sbk_pte_plan *p, struct mm_struct *mm)
++{
++	struct vm_area_struct *vma;
++	unsigned long addr;
++	int ret;
++	if (IS_ERR_OR_NULL(p) || mm != current->mm || !mm)
++		return -EINVAL;
++	mutex_lock(&p->lock);
++	if (p->attempted) {
++		ret = -EALREADY;
++		goto out;
++	}
++	p->attempted = true;
++	mmap_write_lock(mm);
++	vma = find_vma(mm, p->start);
++	if (!vma || vma->vm_start > p->start || vma->vm_end < p->end ||
++	    !vma_is_anonymous(vma) ||
++	    (vma->vm_flags & (VM_SHARED | VM_HUGETLB | VM_PFNMAP | VM_MIXEDMAP |
++			 VM_UFFD_MISSING | VM_UFFD_WP))) {
++		ret = -EINVAL;
++		goto unlock;
++	}
++	ret = sbk_plan_preflight(p, mm);
++	if (ret)
++		goto unlock;
++	ret = anon_vma_prepare(vma);
++	if (ret)
++		goto unlock;
++	p->anchor->anon_vma = vma->anon_vma;
++	get_anon_vma(vma->anon_vma);
++	p->anchor->offset_base = linear_page_index(vma, p->start);
++	for (addr = p->start; addr < p->end;) {
++		unsigned long next = pmd_addr_end(addr, p->end), pos;
++		unsigned long slot = (addr >> PMD_SHIFT) - (p->start >> PMD_SHIFT);
++		pgtable_t table = p->tables[slot];
++		pmd_t *pmd = sbk_plan_alloc_pmd(mm, addr);
++		spinlock_t *ptl;
++		pte_t *base, *pte, *src;
++#ifdef CONFIG_SWIFTBATON_PTE_PLAN_TEST
++		if (p->fail_after >= 0 && p->published >= p->fail_after) {
++			ret = -ENOMEM;
++			goto rollback;
++		}
++#endif
++		if (!pmd) {
++			ret = -ENOMEM;
++			goto rollback;
++		}
++		if (pmd_none(*pmd)) {
++			/* The ctor accounted an uncharged page in the root lruvec.
++			 * Move that statistic along with the delayed memcg charge, so
++			 * the eventual normal dtor subtracts from the same cgroup. */
++			dec_lruvec_page_state(table, NR_PAGETABLE);
++			ret = memcg_kmem_charge_page(table, GFP_KERNEL, 0);
++			inc_lruvec_page_state(table, NR_PAGETABLE);
++			if (ret)
++				goto rollback;
++			/* Match __pte_alloc's publication ordering. mmap_write_lock
++			 * excludes faults and table allocation by other mm users. */
++			smp_wmb();
++			ptl = pmd_lock(mm, pmd);
++			if (unlikely(!pmd_none(*pmd))) {
++				spin_unlock(ptl);
++				ret = -EAGAIN;
++				goto rollback;
++			}
++			mm_inc_nr_ptes(mm);
++			pmd_populate(mm, pmd, table);
++			p->tables[slot] = NULL;
++			p->published += (next - addr) >> PAGE_SHIFT;
++			p->moved_tables++;
++			spin_unlock(ptl);
++		} else {
++			/* Preserve existing tables and every PTE outside our range.
++			 * Replacing an existing table would need GUP-fast/TLB lifetime
++			 * handling and offers little benefit for boundary fragments. */
++			if (pmd_trans_huge(*pmd) || pmd_devmap(*pmd) || pmd_bad(*pmd)) {
++				ret = -EINVAL;
++				goto rollback;
++			}
++			src = (pte_t *)page_address(table) + pte_index(addr);
++			base = pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
++			for (pos = addr; pos < next; pos += PAGE_SIZE, pte++, src++) {
++				if (unlikely(!pte_none(*pte))) {
++					pte_unmap_unlock(base, ptl);
++					ret = -EEXIST;
++					goto rollback;
++				}
++				set_pte_at(mm, pos, pte, *src);
++				p->published++;
++				p->copied_pages++;
++			}
++			pte_unmap_unlock(base, ptl);
++		}
++		addr = next;
++		cond_resched();
++	}
++	smp_store_release(&p->anchor->ready, true);
++	ret = 0;
++	goto unlock;
++rollback:
++	/* Rollback consumes the transferred refs; free must still skip them. */
++	if (p->published)
++		zap_page_range(vma, p->start, p->published << PAGE_SHIFT);
++unlock:
++	mmap_write_unlock(mm);
++out:
++	mutex_unlock(&p->lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(sbk_pte_plan_arm);
++
++void sbk_pte_plan_stats(struct sbk_pte_plan *p, struct sbk_pte_plan_stats *out)
++{
++	mutex_lock(&p->lock);
++	out->pages = p->count;
++	out->tables = p->nr_tables;
++	out->published = p->published;
++	out->moved_tables = p->moved_tables;
++	out->copied_pages = p->copied_pages;
++	mutex_unlock(&p->lock);
++}
++EXPORT_SYMBOL_GPL(sbk_pte_plan_stats);
++
++#ifdef CONFIG_SWIFTBATON_PTE_PLAN_TEST
++/* Tests must not infer memcg correctness from delayed/deferrable statistics. */
++void sbk_pte_plan_test_flush_memcg(void)
++{
++#ifdef CONFIG_MEMCG
++	cgroup_rstat_flush(root_mem_cgroup->css.cgroup);
++#endif
++}
++EXPORT_SYMBOL_GPL(sbk_pte_plan_test_flush_memcg);
++
++/* Isolated guest only: exercise the real partial-publication rollback. */
++int sbk_pte_plan_test_fail_after(struct sbk_pte_plan *p, unsigned long pages)
++{
++	int ret = 0;
++	mutex_lock(&p->lock);
++	if (p->attempted || pages > p->count)
++		ret = -EINVAL;
++	else
++		p->fail_after = pages;
++	mutex_unlock(&p->lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(sbk_pte_plan_test_fail_after);
++#endif
+diff --git a/mm/Kconfig b/mm/Kconfig
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -911,1 +911,9 @@
+ 	  memory. Experimental: validate in an isolated machine before use.
++
++config SWIFTBATON_PTE_PLAN_TEST
++	bool "SwiftBaton detached PTE plan failure injection (isolated tests only)"
++	depends on SWIFTBATON_PTE && KASAN
++	default n
++	help
++	  Export a per-plan partial-publication failure hook for the isolated
++	  kernel fixture. Keep disabled for host and performance kernels.

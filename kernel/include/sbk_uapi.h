@@ -58,6 +58,7 @@ struct sbk_region_seal {
 #define SBK_FEATURE_SESSION_DISPATCH (1U << 4)
 #define SBK_FEATURE_TOKEN_POOL (1U << 5)
 #define SBK_FEATURE_DMA_MR (1U << 6)
+#define SBK_FEATURE_PREPARED_ARM (1U << 7)
 #define SBK_TOKEN_POOL_MAX_PAGES (1U << 22)
 struct sbk_token_pool_stats {
     __u64 available, prepared, claimed, fallback;
@@ -169,4 +170,11 @@ struct sbk_dma_map {
 #define SBK_IOC_DMA_ENABLE _IO('B', 24)
 #define SBK_IOC_DMA_EXPORT_MAP _IOW('B', 25, struct sbk_dma_map)
 #define SBK_IOC_DMA_IMPORT_MAP _IOW('B', 26, struct sbk_dma_map)
+/* Optional PS preparation at the final target VA; no target mm is needed.
+ * Configured region size is fixed. Reserve the session token pool first.
+ * Later ARM_ANON requires this exact VA and the existing final SEAL rules.
+ * Layout/presence mismatches require a fresh region; this ioctl does not
+ * prove that PS page bytes or source PFNs are still valid. Once preparation
+ * binds tokens, a failure requires closing the fd. Probe feature bit first. */
+#define SBK_IOC_PREPARE_ANON _IOW('B', 27, struct sbk_anon_arm)
 #endif

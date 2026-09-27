@@ -6,6 +6,7 @@ p=argparse.ArgumentParser()
 p.add_argument('--kernel',required=True); p.add_argument('--output',required=True)
 p.add_argument('--retirement-audit',action='store_true')
 p.add_argument('--defer-creator-drop',action='store_true')
+p.add_argument('--prepared-arm',action='store_true')
 a=p.parse_args(); R=Path(__file__).resolve().parents[1]; K=Path(a.kernel).resolve()
 O=Path(a.output).resolve(); O.mkdir(parents=True,exist_ok=True)
 M=O/'module'; M.mkdir(exist_ok=True); (O/'include').mkdir(exist_ok=True)
@@ -77,6 +78,8 @@ for i in $(seq 1 200); do
 done
 echo SBK_CREATOR_UNLOADED=$unloaded
 echo SBK_TAINT=''')
+if a.prepared_arm:
+    init=init.replace('SBK_TEST_ANON=1', 'SBK_TEST_PREPARED_ARM=1 SBK_TEST_ANON=1')
 (root/'init').write_text(init); (root/'init').chmod(0o755)
 env=dict(os.environ,KDIR=str(K),SBK_VM_ROOT=str(root)); env.pop('SBK_OFED_ROOT',None)
 subprocess.run(['python3',str(R/'vm/prepare.py')],env=env,check=True)
@@ -98,11 +101,16 @@ if a.retirement_audit: markers += ['SBK_RETIRE_UNFETCHED','SBK_ARM pages=']
 if a.defer_creator_drop: markers += ['deferred=1','SBK_CREATOR_DROP pages=',
     'SBK_CREATOR_LIFETIME_EXIT=0','SBK_CREATOR_LIFETIME_PASS','SBK_CREATOR_UNLOADED=1']
 missing=[x for x in markers if x not in runtime]
+if a.prepared_arm:
+    missing += [x for x in ['SBK_PREPARED_ARM_ENABLED','SBK_PREPARED_LIFETIME_PASS',
+        'PASS PREPARED_ARM_PS_dirty_seal_close_before_fault',
+        'PASS PREPARED_ARM_occupied_failure_requires_fresh_context'] if x not in runtime]
 bad=[x for x in ['BUG:','WARNING:','Oops:','Kernel panic','general protection fault'] if x in runtime]
 def sha(f): return hashlib.sha256(f.read_bytes()).hexdigest()
 out=dict(passed=result.returncode==0 and not missing and not bad,host_loaded=False,rxe=True,
     retirement_audit=a.retirement_audit,
     defer_creator_drop=a.defer_creator_drop,
+    prepared_arm=a.prepared_arm,
     kernel_sha256=sha(K/'arch/x86/boot/bzImage'),module_sha256=sha(M/'swiftbaton_k.ko'),
     test_sha256=sha(root/'sbk_test'),log=str(log),returncode=result.returncode,missing=missing,kernel_errors=bad)
 (O/'result.json').write_text(json.dumps(out,indent=2)+'\n'); print(json.dumps(out,indent=2))
