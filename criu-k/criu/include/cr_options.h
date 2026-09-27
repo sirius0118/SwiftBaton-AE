@@ -180,6 +180,7 @@ struct cr_options {
 	bool sb_defer_fault_credits; /* Accept demand before TX credit; coalesce consumed-ring acknowledgements. */
 	unsigned sb_precopy_workers;
 	unsigned sb_validation_workers;
+	unsigned sb_kernel_catalog_workers;
 	unsigned sb_precopy_limit_mb;
 	int sync_port;
 #endif

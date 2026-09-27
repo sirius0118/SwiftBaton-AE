@@ -16,6 +16,7 @@
 static pthread_mutex_t gate=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed=PTHREAD_COND_INITIALIZER;
 static unsigned ids[8192],entered,active,peak,finished,imports;
+static unsigned audits;
 static int proceed,fail_config,fail_watch,fail_create_after=-1,created;
 int __real_open(const char *,int,...);
 int __real_pthread_create(pthread_t *,const pthread_attr_t *,void *(*)(void *),void *);
@@ -30,6 +31,9 @@ int __wrap_pthread_create(pthread_t *t,const pthread_attr_t *a,void *(*f)(void *
 int __wrap_ioctl(int fd,unsigned long cmd,...) {
  assert(fd>=0 && fd<8192);va_list ap;va_start(ap,cmd);void *arg=va_arg(ap,void *);va_end(ap);
  if(cmd==SBK_IOC_CAPABILITIES){*(struct sbk_capabilities *)arg=(struct sbk_capabilities){.version=SBK_ABI_VERSION,.features=SBK_FEATURE_PARALLEL_PS|SBK_FEATURE_PS_SLICE};return 0;}
+ if(cmd==SBK_IOC_STATS){*(struct sbk_stats *)arg=(struct sbk_stats){.pages=8,.completed=7,.fetched={0,0,7}};return 0;}
+ if(cmd==SBK_IOC_DRAIN_STATUS){*(struct sbk_drain_status *)arg=(struct sbk_drain_status){.pages=8,.retired_tokens=8,.armed=1,.drained=1};return 0;}
+ if(cmd==SBK_IOC_PAGE){struct sbk_page_info *p=arg;p->state=p->index?6:0;return 0;}
  pthread_mutex_lock(&gate);unsigned id=ids[fd];
  if(cmd==SBK_IOC_BIND_REGION)ids[fd]=((struct sbk_region_bind *)arg)->remote.id;
  else if(cmd==SBK_IOC_CONFIG) {
@@ -45,6 +49,10 @@ int __wrap_ioctl(int fd,unsigned long cmd,...) {
 static unsigned fd_count(void){DIR*d=opendir("/proc/self/fd");assert(d);unsigned n=0;struct dirent*e;while((e=readdir(d)))if(e->d_name[0]!='.')n++;closedir(d);return n;}
 struct job{struct sbk_catalog*c;struct sbk_catalog_final f[8];int ret;};
 static void *seal(void *p){struct job*j=p;j->ret=sbk_catalog_seal(j->c,j->f,8);return NULL;}
+static void audit(const struct sbk_catalog_audit *a) {
+ assert(a->stats.completed==7 && a->states[0]==1 && a->states[6]==7 && a->drain.drained);
+ audits++;
+}
 static void test(int mode) {
  unsigned before=fd_count();int fd=open("/dev/null",O_RDONLY|O_CLOEXEC);assert(fd>=0);
  struct sbk_config cfg={.version=SBK_ABI_VERSION,.backend=SBK_BACKEND_RDMA};
@@ -68,6 +76,7 @@ static void test(int mode) {
  assert(j.ret==(mode==1?-EIO:mode==4?-ENOSPC:0));
  assert(sbk_catalog_prepare_workers(j.c,4)==-EINVAL);
  if(mode==5)assert(imports==8);
+ if(!j.ret){audits=0;assert(!sbk_catalog_audit_deficits(j.c,audit));assert(audits==8); }
  if(j.ret)assert(sbk_catalog_seal(j.c,j.f,8)==-EINVAL);
  sbk_catalog_destroy(j.c);assert(fd_count()==before);
 }

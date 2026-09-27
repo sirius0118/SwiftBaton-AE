@@ -7,12 +7,15 @@ from k_mode import KernelSettings, validate_catalog_config
 class Settings(unittest.TestCase):
     def test_options_reach_config_and_cli(self):
         for count in (1, 16, 32):
-            k = KernelSettings(validation_workers=count)
+            k = KernelSettings(validation_workers=count, catalog_workers=4)
             self.assertIn('validation-workers='+str(count)+'\n', k.config())
             args=k.argv()
             self.assertEqual(args[args.index('--validation-workers')+1], str(count))
+            self.assertEqual(args[args.index('--kernel-catalog-workers')+1], '4')
+            self.assertIn('kernel-catalog-workers=4\n', k.config())
         for count in (0, 33):
             with self.assertRaises(ValueError): KernelSettings(validation_workers=count).values()
+            with self.assertRaises(ValueError): KernelSettings(catalog_workers=count).values()
     def test_requested_is_not_executed(self):
         line='SB_KERNEL final_catalog regions=414 workers=1 validation_us=21 prepare_us=2300 seal_us=61 result=0'
         with self.assertRaises(ValueError): validate_catalog_config(line, 16)

@@ -12,6 +12,7 @@ p.add_argument('--buffered-cutover', action='store_true')
 p.add_argument('--stage-max-mb', type=int)
 p.add_argument('--precopy-limit-mb', type=int)
 p.add_argument('--kernel-export-workers', type=int, choices=range(1,33))
+p.add_argument('--kernel-catalog-workers', type=int, choices=range(1,33))
 p.add_argument('--kernel-export-chunk-mb', type=int)
 p.add_argument('--validation-workers', type=int, choices=range(1,33))
 a=p.parse_args()
@@ -23,7 +24,7 @@ if a.profile=='smoke':
 if a.validation_workers is not None:
  if '--validation-workers' in profile:profile[profile.index('--validation-workers')+1]=str(a.validation_workers)
  else:profile += ['--validation-workers',str(a.validation_workers)]
-for key,value in (('--kernel-export-workers',a.kernel_export_workers),('--kernel-export-chunk-mb',a.kernel_export_chunk_mb)):
+for key,value in (('--kernel-catalog-workers',a.kernel_catalog_workers),('--kernel-export-workers',a.kernel_export_workers),('--kernel-export-chunk-mb',a.kernel_export_chunk_mb)):
  if value is not None:
   if a.mode!='K':raise SystemExit(key+' requires K mode')
   if key=='--kernel-export-chunk-mb' and not 0<=value<=4096:raise SystemExit('kernel-export-chunk-mb must be 0..4096')

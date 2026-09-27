@@ -75,6 +75,7 @@ parser.add_argument('--compact-bg-wire', action='store_true', help='Send only us
 parser.add_argument('--bg-segment-pages', type=int, default=0, help='Experimental background RDMA write limit in pages, 8..256; zero sends each whole batch')
 parser.add_argument('--precopy-workers', type=int, default=4)
 parser.add_argument('--validation-workers', type=int, default=1)
+parser.add_argument('--kernel-catalog-workers', type=int, default=1)
 parser.add_argument('--vma-cache', action='store_true', help='Cache PS smaps with eBPF mutation monitoring and final maps check')
 parser.add_argument('--precopy-limit-mb', type=int, default=2048)
 parser.add_argument('--dynamic-memory', action='store_true', help='Exercise discard, unmap/reuse, remap and fork during target AS')
@@ -112,7 +113,8 @@ if opts.kernel_transfer:
         precopy_workers=opts.precopy_workers, no_pretransfer=opts.no_pretransfer,
         no_prefetch=opts.no_prefetch, no_hot_first=opts.no_hot_first, dense=opts.kernel_dense,
         ps_chunk_mb=opts.kernel_ps_chunk_mb, export_workers=opts.kernel_export_workers,
-        export_chunk_mb=opts.kernel_export_chunk_mb, validation_workers=opts.validation_workers)
+        export_chunk_mb=opts.kernel_export_chunk_mb, validation_workers=opts.validation_workers,
+        catalog_workers=opts.kernel_catalog_workers)
     try:
         kernel_settings.values()
     except ValueError as error:
@@ -700,7 +702,7 @@ try:
         STATE['kernel_export_settings'] = validate_export_config((OUT/'dump.log').read_text(errors='replace'),
             opts.kernel_export_workers, opts.kernel_export_chunk_mb)
         STATE['kernel_catalog_settings'] = validate_catalog_config((OUT/'pageclient.log').read_text(errors='replace'),
-            opts.validation_workers)
+            opts.kernel_catalog_workers)
         STATE['kernel_ps_settings'] = validate_ps_config((OUT/'dump.log').read_text(errors='replace'),
             opts.kernel_ps_chunk_mb, opts.no_pretransfer)
         completions = {label: json.loads(py(host, f'from pathlib import Path;print((Path({str(OUT)!r})/{label + ".completion.json"!r}).read_text())'))

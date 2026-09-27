@@ -181,7 +181,7 @@ int sb_kernel_connect(int socket_fd, int source) {
       goto fail;
     }
     ret = sbk_catalog_prepare_workers(destination,
-          opts.sb_validation_workers ? opts.sb_validation_workers : 1);
+          opts.sb_kernel_catalog_workers ? opts.sb_kernel_catalog_workers : 1);
     if (ret) goto fail;
   }
   struct timeval deadline = {.tv_sec = 300};
@@ -588,8 +588,13 @@ int sb_kernel_client_receive(int socket_fd) {
   ret = sbk_catalog_seal(destination, final_regions, nr_final);
   struct sbk_catalog_timing timing = {0};
   sbk_catalog_get_timing(destination, &timing);
+  pr_info("SB_KERNEL catalog_allocation started=%u peak=%u launch_us=%llu sum_us=%llu max_us=%llu\n",
+          timing.workers_started, timing.allocation_peak,
+          (unsigned long long)(timing.launch_ns / 1000),
+          (unsigned long long)(timing.allocation_sum_ns / 1000),
+          (unsigned long long)(timing.allocation_max_ns / 1000));
   pr_info("SB_KERNEL final_catalog regions=%u workers=%u validation_us=%llu prepare_us=%llu seal_us=%llu result=%d\n",
-          nr_final, opts.sb_validation_workers ? opts.sb_validation_workers : 1,
+          nr_final, opts.sb_kernel_catalog_workers ? opts.sb_kernel_catalog_workers : 1,
           (unsigned long long)(timing.validate_ns / 1000),
           (unsigned long long)(timing.prepare_ns / 1000),
           (unsigned long long)(timing.seal_ns / 1000), ret);
@@ -612,6 +617,20 @@ int sb_kernel_source_finish(void) {
   return ret;
 }
 int sb_kernel_source_exposed(void) { return source_final_exposed; }
+static void report_catalog_deficit(const struct sbk_catalog_audit *a) {
+  pr_info("SB_KERNEL deficit pid=%u address=%llx pages=%llu completed=%llu retired=%llu drained=%u "
+          "PF=%llu FT=%llu BG=%llu PS=%llu invalid=%llu state0=%llu state1=%llu state2=%llu state3=%llu state4=%llu state5=%llu state6=%llu unknown=%llu\n",
+          a->record.restore_pid, (unsigned long long)a->record.address,
+          (unsigned long long)a->stats.pages, (unsigned long long)a->stats.completed,
+          (unsigned long long)a->drain.retired_tokens, a->drain.drained,
+          (unsigned long long)a->stats.fetched[0], (unsigned long long)a->stats.fetched[1],
+          (unsigned long long)a->stats.fetched[2], (unsigned long long)a->stats.pretransferred,
+          (unsigned long long)a->stats.invalidated,
+          (unsigned long long)a->states[0], (unsigned long long)a->states[1],
+          (unsigned long long)a->states[2], (unsigned long long)a->states[3],
+          (unsigned long long)a->states[4], (unsigned long long)a->states[5],
+          (unsigned long long)a->states[6], (unsigned long long)a->states[7]);
+}
 int sb_kernel_client_serve(int listen_fd, int socket_fd) {
   int client = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC), ret = -EIO;
   unsigned processes = 0, served = 0;
@@ -687,6 +706,12 @@ int sb_kernel_client_serve(int listen_fd, int socket_fd) {
           (unsigned long long)st.hits, (unsigned long long)st.waits,
           (unsigned long long)st.installed_ahead,
           (unsigned long long)st.skipped_install, (unsigned long long)st.batches);
+  if (st.completed != st.pages || st.pretransferred - st.invalidated +
+      st.fetched[0] + st.fetched[1] + st.fetched[2] != st.pages) {
+    int audit = sbk_catalog_audit_deficits(destination, report_catalog_deficit);
+    pr_info("SB_KERNEL deficit_audit result=%d completed=%llu pages=%llu\n", audit,
+            (unsigned long long)st.completed, (unsigned long long)st.pages);
+  }
   struct sbk_token_pool_stats tokens;
   if (!ioctl(session_fd, SBK_IOC_TOKEN_POOL_STATS, &tokens)) {
     pr_info("SB_KERNEL token_pool_complete prepared=%llu claimed=%llu available=%llu fallback=%llu sealed=%u\n",

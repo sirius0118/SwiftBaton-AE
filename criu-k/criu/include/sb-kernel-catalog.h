@@ -7,6 +7,8 @@
 struct sbk_catalog;
 struct sbk_catalog_timing {
   uint64_t validate_ns, prepare_ns, seal_ns;
+  uint64_t launch_ns, allocation_sum_ns, allocation_max_ns;
+  unsigned workers_started, allocation_peak;
 };
 void sbk_catalog_get_timing(const struct sbk_catalog *catalog,
                             struct sbk_catalog_timing *timing);
@@ -46,4 +48,13 @@ int sbk_catalog_receive(int socket_fd, uint32_t pid,
  * retirement. Caller may poll its connection separately to serve more tasks. */
 int sbk_catalog_poll(struct sbk_catalog *catalog, int timeout_ms);
 int sbk_catalog_totals(struct sbk_catalog *catalog, struct sbk_stats *stats);
+/* Read-only post-drain diagnostics. Never treats unexplained deficits as valid. */
+struct sbk_catalog_audit {
+  struct sbk_catalog_record record;
+  struct sbk_stats stats;
+  struct sbk_drain_status drain;
+  uint64_t states[8]; /* current kernel 0..6; 7 records unknown states */
+};
+int sbk_catalog_audit_deficits(struct sbk_catalog *catalog,
+                              void (*report)(const struct sbk_catalog_audit *));
 #endif

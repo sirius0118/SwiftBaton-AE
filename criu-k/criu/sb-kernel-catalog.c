@@ -233,6 +233,8 @@ struct final_prepare_job {
   const struct sbk_catalog_final *final;
   struct catalog_entry **entries;
   size_t count, next;
+  unsigned active, peak;
+  uint64_t allocation_sum_ns, allocation_max_ns;
   int error;
   pthread_mutex_t lock;
 };
@@ -245,12 +247,18 @@ static void *final_prepare_worker(void *arg) {
     pthread_mutex_unlock(&job->lock);
     if (done) break;
     if (job->entries[i]) continue;
+    pthread_mutex_lock(&job->lock);
+    if (++job->active > job->peak) job->peak = job->active;
+    pthread_mutex_unlock(&job->lock);
+    uint64_t begin = catalog_now_ns();
     int ret = allocate_entry(job->catalog, &job->final[i].record, &job->entries[i]);
-    if (ret) {
-      pthread_mutex_lock(&job->lock);
-      if (!job->error) job->error = ret;
-      pthread_mutex_unlock(&job->lock);
-    }
+    uint64_t ns = catalog_now_ns() - begin;
+    pthread_mutex_lock(&job->lock);
+    job->active--;
+    job->allocation_sum_ns += ns;
+    if (ns > job->allocation_max_ns) job->allocation_max_ns = ns;
+    if (ret && !job->error) job->error = ret;
+    pthread_mutex_unlock(&job->lock);
   }
   return NULL;
 }
@@ -273,15 +281,21 @@ static int prepare_final_entries(struct sbk_catalog *c,
   pthread_t threads[31];
   unsigned nr = 0, workers = c->prepare_workers;
   if (workers > missing) workers = missing;
+  uint64_t launch_begin = catalog_now_ns();
   for (unsigned i = 1; i < workers; i++) {
     /* If thread creation is unavailable, the caller still drains every
      * unclaimed item. Already admitted helpers must always be joined. */
     if (pthread_create(&threads[nr], NULL, final_prepare_worker, &job)) break;
     nr++;
   }
+  c->timing.launch_ns = catalog_now_ns() - launch_begin;
+  c->timing.workers_started = nr + 1;
   final_prepare_worker(&job);
   for (unsigned i = 0; i < nr; i++) pthread_join(threads[i], NULL);
   ret = job.error;
+  c->timing.allocation_peak = job.peak;
+  c->timing.allocation_sum_ns = job.allocation_sum_ns;
+  c->timing.allocation_max_ns = job.allocation_max_ns;
   pthread_mutex_destroy(&job.lock);
   if (!ret) {
     for (size_t i = 0; i < n; i++)
@@ -734,6 +748,30 @@ int sbk_catalog_totals(struct sbk_catalog *c, struct sbk_stats *out) {
     out->completed += s.completed;
     out->pretransferred += s.pretransferred;
     out->invalidated += s.invalidated;
+  }
+  return 0;
+}
+
+int sbk_catalog_audit_deficits(struct sbk_catalog *c,
+                              void (*report)(const struct sbk_catalog_audit *)) {
+  if (!c || c->phase != 1 || !report) return -EINVAL;
+  for (size_t i = 0; i < c->count; i++) {
+    struct catalog_entry *e = c->entries[i];
+    struct sbk_catalog_audit a = {.record=e->record};
+    if (ioctl(e->fd, SBK_IOC_STATS, &a.stats)) return -errno;
+    uint64_t total = a.stats.pretransferred - a.stats.invalidated;
+    for (unsigned lane = 0; lane < SBK_LANES; lane++) total += a.stats.fetched[lane];
+    if (a.stats.completed == a.stats.pages && total == a.stats.pages) continue;
+    if (ioctl(e->fd, SBK_IOC_DRAIN_STATUS, &a.drain)) return -errno;
+    /* All marker owners and admitted workers must have joined before reading
+     * a stable state census; refuse to draw conclusions from a live context. */
+    if (!a.drain.drained || a.drain.retired_tokens != a.drain.pages) return -EBUSY;
+    for (uint64_t page = 0; page < a.stats.pages; page++) {
+      struct sbk_page_info info = {.index=page};
+      if (ioctl(e->fd, SBK_IOC_PAGE, &info)) return -errno;
+      a.states[info.state < 7 ? info.state : 7]++;
+    }
+    report(&a);
   }
   return 0;
 }

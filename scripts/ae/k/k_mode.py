@@ -34,6 +34,7 @@ class KernelSettings:
     export_workers: int = 1
     export_chunk_mb: int = 0
     validation_workers: int = 1
+    catalog_workers: int = 1
 
     def values(self):
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,31}', self.device):
@@ -48,7 +49,7 @@ class KernelSettings:
             raise ValueError('PS chunk span must be 0..4096 MiB; zero retains legacy spans')
         if not 1 <= self.export_workers <= 32 or not 0 <= self.export_chunk_mb <= 4096:
             raise ValueError('Final MR workers must be 1..32 and span 0..4096 MiB')
-        if not 1 <= self.validation_workers <= 32:
+        if not 1 <= self.validation_workers <= 32 or not 1 <= self.catalog_workers <= 32:
             raise ValueError('Validation/catalog worker count must be 1..32')
         values = {'image-rdma': True, 'u-precopy': True, 'kernel-transfer': True,
                   'kernel-device': self.device, 'kernel-gid': self.gid,
@@ -56,6 +57,7 @@ class KernelSettings:
                   'prefetch-workers': self.prefetch_workers, 'install-workers': self.install_workers,
                   'precopy-workers': self.precopy_workers,
                   'validation-workers': self.validation_workers,
+                  'kernel-catalog-workers': self.catalog_workers,
                   'kernel-ps-chunk-mb': self.ps_chunk_mb,
                   'kernel-export-workers': self.export_workers,
                   'kernel-export-chunk-mb': self.export_chunk_mb}
