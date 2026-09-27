@@ -23,10 +23,14 @@ TARGET_NEW_SHA = '89546673304a80df4a87ddddba9f0c0c9573b0a493f82bd9c750530a8fa179
 CRIU_OLD = '/home/k8s/exper/zxz/live_migration/SwiftBaton-K/criu-integration/criu/criu'
 parser = argparse.ArgumentParser()
 parser.add_argument('profile', choices=['smoke', 'redis'])
+parser.add_argument('--precopy-limit-mb', type=int, choices=range(1, 65537))
 args = parser.parse_args()
-state_file = W / ('prearm-trial-' + args.profile + '-' + time.strftime('%Y%m%d_%H%M%S') + '.json')
+budget_label = '-ps%d' % args.precopy_limit_mb if args.precopy_limit_mb else ''
+state_file = W / ('prearm-trial-' + args.profile + budget_label + '-' +
+                  time.strftime('%Y%m%d_%H%M%S') + '.json')
 log = state_file.with_suffix('.log')
-state = {'profile': args.profile, 'source_module': str(NEW), 'old_module': str(OLD),
+state = {'profile': args.profile, 'precopy_limit_mb': args.precopy_limit_mb,
+         'source_module': str(NEW), 'old_module': str(OLD),
          'log': str(log), 'switch_attempted': False, 'success': False}
 
 
@@ -163,6 +167,8 @@ try:
               '--validation-workers', '16', '--kernel-catalog-workers', '16',
               '--kernel-export-workers', '16', '--kernel-export-chunk-mb', '64',
               '--kernel-ps-arm', '--kernel-ps-mr']
+    if args.precopy_limit_mb:
+        common += ['--precopy-limit-mb', str(args.precopy_limit_mb)]
     with log.open('w') as output:
         check = subprocess.run(common + ['--check'], env=env, stdout=output,
                                stderr=subprocess.STDOUT)

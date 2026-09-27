@@ -67,6 +67,14 @@ static struct sbk_catalog_layout *source_layout;
 static unsigned source_layout_count;
 static struct sbk_source_prearm *source_prearm;
 static unsigned source_prearm_count;
+struct sbk_source_hot {
+  int pid;
+  uint64_t address, pages;
+  uint64_t *order;
+  size_t count;
+};
+static struct sbk_source_hot *source_hot;
+static unsigned source_hot_count;
 #define SBK_PM_PRESENT (1ULL << 63)
 #define SBK_PM_PFN_MASK ((1ULL << 55) - 1)
 static int source_pagemap_read(int pid, uint64_t address, uint64_t pages, uint64_t *entries) {
@@ -85,6 +93,30 @@ static int source_pagemap_read(int pid, uint64_t address, uint64_t pages, uint64
   close(fd);
   return 0;
 }
+enum source_prearm_failure {
+  PREARM_CAPTURE_OK, PREARM_CAPTURE_ALLOC, PREARM_CAPTURE_PAGEMAP,
+  PREARM_CAPTURE_PFN, PREARM_CAPTURE_NOTIFIER
+};
+static enum source_prearm_failure source_prearm_capture(struct sbk_source_prearm *p) {
+  uint64_t *entries = malloc(p->region.pages * sizeof(*entries));
+  if (!entries) return PREARM_CAPTURE_ALLOC;
+  int ret = source_pagemap_read(p->pid, p->region.address, p->region.pages, entries);
+  if (ret) { free(entries); return PREARM_CAPTURE_PAGEMAP; }
+  for (uint64_t j = 0; j < p->region.pages; j++) {
+    if (!(entries[j] & SBK_PM_PRESENT) || !(entries[j] & SBK_PM_PFN_MASK)) {
+      free(entries);
+      return PREARM_CAPTURE_PFN;
+    }
+    entries[j] &= SBK_PM_PFN_MASK;
+  }
+  struct sbk_prearm_status status = {.region = p->region};
+  if (ioctl(session_fd, SBK_IOC_PREARM_STATUS, &status) || !status.valid) {
+    free(entries);
+    return PREARM_CAPTURE_NOTIFIER;
+  }
+  p->pfns = entries;
+  return PREARM_CAPTURE_OK;
+}
 static bool source_pfns_equal(const uint64_t *baseline, const uint64_t *observed,
                               uint64_t pages) {
   if (!baseline || !observed) return false;
@@ -99,6 +131,25 @@ static struct sbk_source_prearm *source_prearm_find(int pid,
     struct sbk_source_prearm *p = &source_prearm[i];
     if (p->pid == pid && p->region.address == r->address &&
         p->region.pages == r->pages && p->pfns) return p;
+  }
+  return NULL;
+}
+static struct sbk_source_hot *source_hot_find(int pid,
+                                              const struct sbk_rdma_region *r) {
+  for (unsigned i = 0; i < source_hot_count; i++) {
+    struct sbk_source_hot *h = &source_hot[i];
+    if (h->pid == pid && h->address == r->address && h->pages == r->pages &&
+        h->order) return h;
+  }
+  return NULL;
+}
+static struct sbk_source_hot *source_hot_cover(int pid,
+                                               const struct sbk_rdma_region *r) {
+  uint64_t end = r->address + r->pages * 4096;
+  for (unsigned i = 0; i < source_hot_count; i++) {
+    struct sbk_source_hot *h = &source_hot[i];
+    if (h->pid == pid && h->order && h->address <= r->address &&
+        end <= h->address + h->pages * 4096) return h;
   }
   return NULL;
 }
@@ -300,6 +351,8 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
   struct sbk_rdma_region *fallback = NULL;
   unsigned *fallback_index = NULL;
   unsigned fallback_count = 0, prearm_reused = 0, prearm_invalid = 0;
+  unsigned prearm_no_snapshot = 0, prearm_pfn_changed = 0, prearm_notifier_changed = 0;
+  unsigned hot_cached = 0, hot_derived = 0, hot_fallback = 0;
   struct sbk_hot_range *hot_index = NULL;
   struct sbk_pm_snapshot *pagemap = NULL;
   uint64_t begin = kernel_now_ns(), locked = 0, scan_ns = 0, pagemap_ns = 0, plan_ns = 0, validate_ns = 0, export_ns = 0, hot_ns = 0, stage;
@@ -405,12 +458,18 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
           sbk_pm_snapshot_find(pagemap, regions[i].address, regions[i].pages) : NULL;
       struct sbk_prearm_status status = p ? (struct sbk_prearm_status){.region = p->region} :
                                                (struct sbk_prearm_status){};
-      if (p && observed && source_pfns_equal(p->pfns, observed, regions[i].pages) &&
-          !ioctl(session_fd, SBK_IOC_PREARM_STATUS, &status) && status.valid) {
+      bool pfn_ok = p && observed && source_pfns_equal(p->pfns, observed, regions[i].pages);
+      bool notifier_ok = pfn_ok && !ioctl(session_fd, SBK_IOC_PREARM_STATUS, &status) && status.valid;
+      if (notifier_ok) {
         regions[i] = p->region;
         prearm_reused++;
       } else {
-        if (p) prearm_invalid++;
+        if (p) {
+          prearm_invalid++;
+          if (!observed) prearm_no_snapshot++;
+          else if (!pfn_ok) prearm_pfn_changed++;
+          else prearm_notifier_changed++;
+        }
         fallback_index[fallback_count] = i;
         fallback[fallback_count++] = regions[i];
       }
@@ -437,18 +496,37 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     f->record.remote = regions[i];
     if (opts.sb_no_hot_first)
       continue;
+    struct sbk_source_hot *prepared = source_hot_find(pid, &regions[i]);
+    if (prepared) {
+      f->hot = prepared->order;
+      f->hot_count = prepared->count;
+      prepared->order = NULL; /* Final record owns this allocation now. */
+      hot_cached++;
+      continue;
+    }
     uint64_t *hot = malloc(regions[i].pages * sizeof(*hot));
     if (!hot) {
       ret = -ENOMEM;
       goto out;
     }
     f->hot = hot;
-    hot_index[i] = (struct sbk_hot_range){
+    struct sbk_source_hot *cover = source_hot_cover(pid, &regions[i]);
+    if (cover) {
+      uint64_t offset = (regions[i].address - cover->address) / 4096;
+      for (size_t j = 0; j < cover->count; j++) {
+        uint64_t source_index = cover->order[j];
+        if (source_index >= offset && source_index - offset < regions[i].pages)
+          hot[f->hot_count++] = source_index - offset;
+      }
+      hot_derived++;
+      continue;
+    }
+    hot_index[hot_fallback++] = (struct sbk_hot_range){
         .address = regions[i].address, .pages = regions[i].pages,
         .order = hot, .used = &f->hot_count};
   }
-  if (!opts.sb_no_hot_first) {
-    ret = sbk_hot_index_prepare(hot_index, count);
+  if (hot_fallback) {
+    ret = sbk_hot_index_prepare(hot_index, hot_fallback);
     if (ret)
       goto out;
     /* Preserve sampled order; filter it against the actual final ranges.
@@ -456,7 +534,7 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     for (unsigned p = 0; p < hot_snapshot_count; p++) {
       const struct sbk_hot_snapshot *h = &hot_snapshots[p];
       if (h->pid != pid) continue;
-      ret = sbk_hot_index_append_runs(hot_index, count, h->addresses, h->count,
+      ret = sbk_hot_index_append_runs(hot_index, hot_fallback, h->addresses, h->count,
                                       h->runs, h->run_count);
       if (ret) goto out;
     }
@@ -468,6 +546,10 @@ out:
           export_span, export_peak, count, ret);
   pr_info("SB_KERNEL final_prearm pid=%d enabled=%u reused=%u fallback=%u invalid=%u result=%d\n",
           pid, opts.sb_kernel_ps_mr, prearm_reused, fallback_count, prearm_invalid, ret);
+  pr_info("SB_KERNEL final_prearm_reason pid=%d no_snapshot=%u pfn_changed=%u notifier_changed=%u\n",
+          pid, prearm_no_snapshot, prearm_pfn_changed, prearm_notifier_changed);
+  pr_info("SB_KERNEL final_hot_cache pid=%d cached=%u derived=%u fallback=%u result=%d\n",
+          pid, hot_cached, hot_derived, hot_fallback, ret);
   pr_info("SB_KERNEL final_scan pid=%d pagemap_us=%llu planning_us=%llu result=%d\n",
           pid, (unsigned long long)(pagemap_ns / 1000),
           (unsigned long long)(plan_ns / 1000), ret);
@@ -556,6 +638,8 @@ static void source_prearm_ps(void) {
   source_prearm = calloc(source_layout_count, sizeof(*source_prearm));
   if (!source_prearm) return;
   unsigned eligible = 0, registered = 0, valid = 0, skipped_ps = 0;
+  unsigned failures[PREARM_CAPTURE_NOTIFIER + 1] = {};
+  unsigned retried = 0, retry_valid = 0;
   uint64_t start = kernel_now_ns();
   for (unsigned cursor = 0; cursor < source_layout_count;) {
     struct sbk_prearm_batch request = {};
@@ -588,28 +672,86 @@ static void source_prearm_ps(void) {
     for (unsigned i = 0; i < n; i++) {
       struct sbk_source_prearm *p = &source_prearm[slots[i]];
       p->region = request.batch.regions[i];
-      uint64_t *entries = malloc(p->region.pages * sizeof(*entries));
-      if (!entries) continue;
-      int ret = source_pagemap_read(pid, p->region.address, p->region.pages, entries);
-      if (!ret) {
-        for (uint64_t j = 0; j < p->region.pages; j++) {
-          if (!(entries[j] & SBK_PM_PRESENT) || !(entries[j] & SBK_PM_PFN_MASK)) {
-            ret = -EAGAIN;
-            break;
-          }
-          entries[j] &= SBK_PM_PFN_MASK;
+      enum source_prearm_failure reason = source_prearm_capture(p);
+      failures[reason]++;
+      if (reason == PREARM_CAPTURE_NOTIFIER) {
+        /* A writable GUP can COW its own first registration and invalidate
+         * the notifier. Keep that old MR owned until revoke, and register a
+         * fresh one under a new notifier now that COW has settled. Only the
+         * fresh descriptor and freshly observed PFNs may be reused later. */
+        struct sbk_prearm_batch retry = {.pid = pid,
+                                         .batch = {.count = 1, .workers = 1}};
+        retry.batch.regions[0] = (struct sbk_rdma_region){
+            .address = p->region.address, .pages = p->region.pages};
+        retried++;
+        if (!ioctl(session_fd, SBK_IOC_PREARM_BATCH, &retry)) {
+          p->region = retry.batch.regions[0];
+          reason = source_prearm_capture(p);
+          if (reason == PREARM_CAPTURE_OK) retry_valid++;
         }
       }
-      struct sbk_prearm_status status = {.region = p->region};
-      if (!ret && (ioctl(session_fd, SBK_IOC_PREARM_STATUS, &status) || !status.valid))
-        ret = -EAGAIN;
-      if (ret) free(entries);
-      else { p->pfns = entries; valid++; }
+      if (p->pfns) valid++;
     }
   }
   pr_info("SB_KERNEL source_prearm_ps layout=%u eligible=%u registered=%u valid=%u skipped_ps=%u elapsed_us=%llu\n",
           source_layout_count, eligible, registered, valid, skipped_ps,
           (unsigned long long)((kernel_now_ns() - start) / 1000));
+  pr_info("SB_KERNEL source_prearm_retry alloc=%u pagemap=%u pfn=%u notifier=%u retried=%u recovered=%u\n",
+          failures[PREARM_CAPTURE_ALLOC], failures[PREARM_CAPTURE_PAGEMAP],
+          failures[PREARM_CAPTURE_PFN], failures[PREARM_CAPTURE_NOTIFIER],
+          retried, retry_valid);
+}
+/* Heat order is only a scheduling hint. Build it from the PS layout while
+ * Redis still serves requests. Exact final ranges adopt these arrays; a
+ * changed shape derives its subset or uses the original frozen fallback. */
+static void source_hot_prepare(void) {
+  if (!opts.sb_kernel_ps_mr || opts.sb_no_hot_first || !source_layout_count ||
+      source_hot) return;
+  uint64_t begin = kernel_now_ns();
+  int ret = 0;
+  source_hot = calloc(source_layout_count, sizeof(*source_hot));
+  if (!source_hot) return;
+  source_hot_count = source_layout_count;
+  for (unsigned first = 0; first < source_layout_count;) {
+    unsigned end = first + 1;
+    int pid = source_layout[first].source_pid;
+    while (end < source_layout_count && source_layout[end].source_pid == (uint32_t)pid)
+      end++;
+    struct sbk_hot_range *index = calloc(end - first, sizeof(*index));
+    if (!index) { ret = -ENOMEM; break; }
+    for (unsigned i = first; i < end; i++) {
+      const struct sbk_catalog_layout *l = &source_layout[i];
+      struct sbk_source_hot *h = &source_hot[i];
+      h->pid = pid;
+      h->address = l->address;
+      h->pages = l->pages;
+      h->order = malloc(l->pages * sizeof(*h->order));
+      if (!h->order) { ret = -ENOMEM; break; }
+      index[i - first] = (struct sbk_hot_range){
+          .address = h->address, .pages = h->pages,
+          .order = h->order, .used = &h->count};
+    }
+    if (!ret) ret = sbk_hot_index_prepare(index, end - first);
+    if (!ret) for (unsigned p = 0; p < hot_snapshot_count; p++) {
+      const struct sbk_hot_snapshot *h = &hot_snapshots[p];
+      if (h->pid != pid) continue;
+      ret = sbk_hot_index_append_runs(index, end - first, h->addresses,
+                                      h->count, h->runs, h->run_count);
+      if (ret) break;
+    }
+    free(index);
+    if (ret) break;
+    first = end;
+  }
+  if (ret) {
+    for (unsigned i = 0; i < source_hot_count; i++) free(source_hot[i].order);
+    free(source_hot);
+    source_hot = NULL;
+    source_hot_count = 0;
+  }
+  pr_info("SB_KERNEL source_hot_prepare layout=%u cached=%u elapsed_us=%llu result=%d\n",
+          source_layout_count, source_hot_count,
+          (unsigned long long)((kernel_now_ns() - begin) / 1000), ret);
 }
 static int receive_ps_layout(int socket_fd) {
   if (!opts.sb_kernel_ps_arm) return 0;
@@ -680,6 +822,7 @@ int sb_kernel_send_ps(int socket_fd) {
   if (sync_transfer(socket_fd, &ack, sizeof(ack), false) || memcmp(&h, &ack, sizeof(h)))
     return -EIO;
   source_prearm_ps();
+  source_hot_prepare();
   pr_info("SB_KERNEL PS transferred regions=%u planned=%u skipped=%u pages=%llu source_resumed=1 first_send_us=%llu total_us=%llu streaming=1\n",
           sent, count, skipped, (unsigned long long)pages,
           (unsigned long long)(first ? (first - begin) / 1000 : 0),
@@ -1076,6 +1219,10 @@ void sb_kernel_transfer_close(void) {
   free(source_prearm);
   source_prearm = NULL;
   source_prearm_count = 0;
+  for (unsigned i = 0; i < source_hot_count; i++) free(source_hot[i].order);
+  free(source_hot);
+  source_hot = NULL;
+  source_hot_count = 0;
   free(source_layout);
   source_layout = NULL;
   source_layout_count = 0;
