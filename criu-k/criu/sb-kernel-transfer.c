@@ -208,6 +208,7 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
   unsigned export_peak = 0, export_span = 1U << 20;
   struct sbk_rdma_region *sparse = NULL;
   struct sbk_hot_range *hot_index = NULL;
+  struct sbk_pm_snapshot *pagemap = NULL;
   uint64_t begin = kernel_now_ns(), locked = 0, scan_ns = 0, validate_ns = 0, export_ns = 0, hot_ns = 0, stage;
   if (!count)
     return 0;
@@ -248,7 +249,9 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     if (!opts.sb_kernel_dense) {
     struct sbk_sparse_stats stats;
     stage = kernel_now_ns();
-    ret = sbk_sparse_plan(pid, regions, count, capacity, &sparse, &count, &stats);
+    ret = sbk_pm_snapshot_create(pid, regions, count,
+               opts.sb_validation_workers ? opts.sb_validation_workers : 1, &pagemap);
+    if (!ret) ret = sbk_sparse_plan_snapshot(pid, regions, count, capacity, &sparse, &count, &stats, pagemap);
     scan_ns = kernel_now_ns() - stage;
     if (ret) goto out;
     regions = sparse;
@@ -287,7 +290,9 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
   for (unsigned int i = 0; i < count; i++) {
     struct sbk_catalog_final *f = &final_regions[base + i];
     uint64_t *dirty;
-    ret = sb_kernel_ps_validate(pid, &regions[i], &dirty, &f->dirty_count);
+    const uint64_t *observed = pagemap ? sbk_pm_snapshot_find(pagemap, regions[i].address, regions[i].pages) : NULL;
+    if (pagemap && !observed) { ret = -ERANGE; goto out; }
+    ret = sb_kernel_ps_validate_snapshot(pid, &regions[i], observed, &dirty, &f->dirty_count);
     if (ret)
       goto out;
     f->dirty = dirty;
@@ -346,6 +351,7 @@ out:
           (unsigned long long)((kernel_now_ns() - begin) / 1000));
   free(hot_index);
   free(sparse);
+  sbk_pm_snapshot_free(pagemap);
   if (reservation_locked) pthread_mutex_unlock(&final_gate.lock);
   sbk_final_release(&final_gate, ret);
   return ret;

@@ -7,6 +7,7 @@ import json
 import math
 import re
 from pathlib import Path
+from migration_window import select_zero_run
 
 import matplotlib
 matplotlib.use('Agg')
@@ -61,16 +62,12 @@ with (root / 'throughput-100ms.csv').open('w') as f:
 
 checkpoint = event_times['checkpoint_start']
 cutover = event_times.get('network_cutover', math.nan)
-zero_runs, active = [], []
-for row in raw:
-    if row[1] >= checkpoint and row[3] == 0:
-        active.append(row[1])
-    elif active:
-        zero_runs.append(active)
-        active = []
-if active:
-    zero_runs.append(active)
-longest = max(zero_runs, key=lambda x: x[-1] - x[0]) if zero_runs else []
+gate=None
+if (root/'cutover-client.json').exists():
+    cut=json.loads((root/'cutover-client.json').read_text())
+    if 'activate_begin_ns' in cut and 'release_done_ns' in cut:
+        gate=(cut['activate_begin_ns']/1e9-start,cut['release_done_ns']/1e9-start)
+longest, zero_runs=select_zero_run(raw,checkpoint,cutover,gate)
 zero_start = longest[0] if longest else math.nan
 zero_end = longest[-1] if longest else math.nan
 before = aggregate[(aggregate[:, 0] >= checkpoint - 6) & (aggregate[:, 0] < checkpoint - 1), 1]
@@ -85,6 +82,8 @@ metrics = dict(sample_count=len(raw), observed_duration_seconds=raw[-1][1],
                baseline_mean_ops_per_second=float(before.mean()),
                last_10_seconds_mean_ops_per_second=float(after.mean()),
                zero_sample_window_seconds=[zero_start, zero_end],
+               all_zero_runs=zero_runs,
+               zero_selection='Closed zero run overlapping the client gate (50 ms margin); otherwise cutover event +/-2 s. Terminal idle and unrelated later stalls are excluded from this annotation but retained in all_zero_runs.',
                zero_sample_span_ms=(zero_end-zero_start)*1000,
                ycsb_return_counts=return_counts, events_elapsed_seconds=event_times,
                note='Zero span describes client sampling, not CRIU freeze time. Missing samples are not filled.')

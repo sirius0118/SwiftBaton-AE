@@ -52,6 +52,7 @@ static struct span *spans;
 static size_t span_count, begin_span[MAX_PROCESS], end_span[MAX_PROCESS];
 static uint64_t source_pages, seed_pages;
 static struct sb_sched *scheduler;
+static bool catalog_prepared;
 static void *scheduler_reserve;
 static size_t scheduler_reserve_bytes;
 static bool feed_done, source_done, source_demand_drained, client_done;
@@ -398,6 +399,8 @@ static void build_catalog(void)
     if (!source_pages) return;
     bytes = sb_sched_size(source_pages, 4096);
     if (!bytes) die("scheduler size");
+    /* Both paths return a new anonymous zero mapping. The PS reserve is never
+     * written or exposed to workers before this single ownership transfer. */
     if (scheduler_reserve && bytes <= scheduler_reserve_bytes) {
         memory = scheduler_reserve;
         scheduler_reserve = NULL;
@@ -406,7 +409,7 @@ static void build_catalog(void)
         scheduler_reserve = NULL;
         memory = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     }
-    if (memory == MAP_FAILED || !(scheduler = sb_sched_init(memory, bytes, source_pages, 4096))) die("scheduler allocation");
+    if (memory == MAP_FAILED || !(scheduler = sb_sched_init_zeroed(memory, bytes, source_pages, 4096))) die("scheduler allocation");
     for (size_t r = 0; r < span_count; r++) {
         struct span *s = &spans[r];
         volatile unsigned long *bitmap = PidVma[s->process]->vmas[s->vma].bitmap;
@@ -417,6 +420,15 @@ static void build_catalog(void)
     }
     pr_info("SB_TRANSFER catalog pages=%llu precopy_pending=%llu ranges=%zu\n",
             (unsigned long long)source_pages, (unsigned long long)seed_pages, span_count);
+}
+
+void sb_parallel_prepare_catalog(void)
+{
+    if (catalog_prepared) return;
+    sb_trace("transfer.source_catalog_begin");
+    build_catalog();
+    sb_trace("transfer.source_catalog_done");
+    catalog_prepared = true;
 }
 
 static void *feed_background(void *unused)
@@ -955,9 +967,7 @@ int sb_parallel_server(int socket)
     pr_info("SB_TRANSFER policy pretransfer=%u prefetch=%u hot_first=%u\n",
         !opts.sb_no_pretransfer, !opts.sb_no_prefetch, !opts.sb_no_hot_first);
     pr_info("SB_READY_SCAN fixed=%u\n",opts.sb_fixed_ready_scan);
-    sb_trace("transfer.source_catalog_begin");
-    build_catalog();
-    sb_trace("transfer.source_catalog_done");
+    sb_parallel_prepare_catalog();
     /* This one buffer aggregates six PF stages plus coalesced requests from
      * every process. Keep a bounded larger capacity than per-worker traces. */
     fault_trace_init_capacity(&source_trace,4*FAULT_TRACE_CAPACITY);

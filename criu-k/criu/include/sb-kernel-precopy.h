@@ -20,5 +20,7 @@ int sb_kernel_ps_next(struct sbk_ps_region **record);
 int sb_kernel_ps_finish(bool cancel);
 int sb_kernel_ps_validate(int pid, const struct sbk_rdma_region *region,
                           uint64_t **dirty, size_t *nr);
+int sb_kernel_ps_validate_snapshot(int pid, const struct sbk_rdma_region *region,
+                          const uint64_t *pagemap_entries, uint64_t **dirty, size_t *nr);
 void sb_kernel_ps_destroy(void);
 #endif

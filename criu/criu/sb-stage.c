@@ -39,6 +39,7 @@ static size_t region_count;
 static unsigned char *committed, *valid;
 static unsigned char *retained, *selected;
 static uint64_t stage_page_limit = UINT64_MAX;
+static uint64_t selection_end;
 static uint64_t commit_pages;
 static bool finalized;
 static uint64_t copy_next, copied_pages;
@@ -219,6 +220,7 @@ int sb_stage_receive(int socket, unsigned workers)
         if (stage_view.pages[j].copied) {
             selected[j / 8] |= 1U << (j % 8);
             selection_count++;
+            selection_end = j + 1;
         }
     pr_info("SB_STAGE budget limit_pages=%llu selected=%llu total=%llu\n",
             (unsigned long long)stage_page_limit, (unsigned long long)selection_count,
@@ -302,7 +304,11 @@ static void discard_invalid(const unsigned char *keep, const char *phase)
     for (size_t i = 0; i < region_count; i++) {
         struct stage_region *r = &regions[i];
         if (!r->mapping) continue;
-        for (uint64_t j = r->first; j < r->first + r->count;) {
+        /* Selection is built in increasing index order in PS. No page beyond
+         * this immutable bound was ever copied into an inherited stage VMA. */
+        uint64_t limit = r->first + r->count;
+        if (limit > selection_end) limit = selection_end;
+        for (uint64_t j = r->first; j < limit;) {
             uint64_t start, end;
             if (!(selected[j / 8] & (1U << (j % 8))) ||
                 (keep[j / 8] & (1U << (j % 8))) ||
@@ -311,7 +317,7 @@ static void discard_invalid(const unsigned char *keep, const char *phase)
             do {
                 discarded += !retained || !!(retained[j / 8] & (1U << (j % 8)));
                 j++;
-            } while (j < r->first + r->count && !(keep[j / 8] & (1U << (j % 8))));
+            } while (j < limit && !(keep[j / 8] & (1U << (j % 8))));
             end = stage_view.pages[j - 1].address + PAGE_BYTES;
             calls++;
             if (madvise((char *)r->mapping + start - r->start, end - start, MADV_DONTNEED)) {

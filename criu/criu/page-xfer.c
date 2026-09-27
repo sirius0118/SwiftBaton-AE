@@ -1836,6 +1836,13 @@ no_server:
 		}
 	}
 	pr_warn("执行到这\n");
+#ifdef RDMA_CODESIGN
+	/* The listening socket is already live and final images are published.
+	 * Prepare immutable source ownership while the destination restores FDs
+	 * and connects, before the demand lane can need its first page. */
+	if (lazy_dump && !daemon_mode && opts.sb_u_precopy && opts.sb_parallel_transfer)
+		sb_parallel_prepare_catalog();
+#endif
 	ret = run_tcp_server(daemon_mode, &ask, cfd, sk);
 	if (ret != 0)
 		return ret > 0 ? 0 : -1;

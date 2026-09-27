@@ -1,4 +1,3 @@
-#include "common/sb-stage-commit.h"
 /* Real PS snapshots, conservative soft-dirty invalidation and a local fault
  * cache. Sampling ranks candidates; only this final validator authorizes reuse.
  * No custom kernel/PTE manipulation is used for the correctness decision. */
@@ -20,6 +19,7 @@
 #include <unistd.h>
 #include "log.h"
 #include "sb-precopy.h"
+#include "common/sb-stage-commit.h"
 
 #define SB_PAGE 4096ULL
 #define SB_MAGIC 0x5342505245434f50ULL
