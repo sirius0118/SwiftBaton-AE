@@ -1,0 +1,156 @@
+{
+  "host_deployed": false,
+  "physical_trials": [],
+  "commit": "c90eb824d2d10afdf85967365a360bf707354f04",
+  "final_matrix": [
+    {
+      "tag": "pte-plan-final-vm",
+      "returncode": 0,
+      "result": {
+        "passed": true,
+        "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/pte-plan-final-vm/validation-20260927_225248.log",
+        "missing": [],
+        "bad": [],
+        "returncode": 0,
+        "sha256": {
+          "/home/k8s/SwiftBaton-AE-downtime-20260927-work/linux-5.15.167-arm-plan-kasan/arch/x86/boot/bzImage": "95b6ad1fcddc9db449b77fb16be359c8da38968a051dbc702a7125669b5b5ff0",
+          "/home/k8s/SwiftBaton-AE-downtime-20260927-work/pte-plan-final-vm/module/plan-test-module.ko": "1d4cc685e28450e72cbb7b6dce01da399e99c8bb9dd7b5419cd38092331e8e15",
+          "/home/k8s/SwiftBaton-AE-downtime-20260927-work/pte-plan-final-vm/root/plan-test": "28020a3ae119494ead2a6d00e53f27901f7a291407d15a44f6d83445aa6c6807"
+        }
+      }
+    },
+    {
+      "tag": "pte-plan-final-repeat-vm",
+      "returncode": 0,
+      "result": {
+        "passed": true,
+        "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/pte-plan-final-repeat-vm/validation-20260927_225304.log",
+        "missing": [],
+        "bad": [],
+        "returncode": 0,
+        "sha256": {
+          "/home/k8s/SwiftBaton-AE-downtime-20260927-work/linux-5.15.167-arm-plan-kasan/arch/x86/boot/bzImage": "95b6ad1fcddc9db449b77fb16be359c8da38968a051dbc702a7125669b5b5ff0",
+          "/home/k8s/SwiftBaton-AE-downtime-20260927-work/pte-plan-final-repeat-vm/module/plan-test-module.ko": "b79e70fa111a2acf70879ec26715e76d9ec751e5622fcc01d09c9c5c59ed8b28",
+          "/home/k8s/SwiftBaton-AE-downtime-20260927-work/pte-plan-final-repeat-vm/root/plan-test": "28020a3ae119494ead2a6d00e53f27901f7a291407d15a44f6d83445aa6c6807"
+        }
+      }
+    },
+    {
+      "tag": "prepared-arm-module-final-vm",
+      "returncode": 0,
+      "result": {
+        "passed": true,
+        "host_loaded": false,
+        "rxe": true,
+        "retirement_audit": false,
+        "defer_creator_drop": false,
+        "prepared_arm": true,
+        "kernel_sha256": "95b6ad1fcddc9db449b77fb16be359c8da38968a051dbc702a7125669b5b5ff0",
+        "module_sha256": "826585df93b215f3a9a3e7230a82470805b43464989b69cc330a21298d0e3546",
+        "test_sha256": "3ba3c2f328386f6bef16b896b8635a2c159a6730b4eaafc6b2781c4ce8211295",
+        "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/prepared-arm-module-final-vm/validation-20260927_225323.log",
+        "returncode": 0,
+        "missing": [],
+        "kernel_errors": []
+      }
+    },
+    {
+      "tag": "prepared-arm-legacy-retry-vm",
+      "returncode": 0,
+      "result": {
+        "passed": true,
+        "host_loaded": false,
+        "rxe": true,
+        "retirement_audit": false,
+        "defer_creator_drop": false,
+        "prepared_arm": false,
+        "kernel_sha256": "e014c62b8c18c8982faf624f9aa73d0f5c08daed04ca64f07f07b13997944e54",
+        "module_sha256": "0b8e18f6aa34347c0cb849288bbcf38e6ec2997178305d7eee84a19e99c5dae3",
+        "test_sha256": "3ba3c2f328386f6bef16b896b8635a2c159a6730b4eaafc6b2781c4ce8211295",
+        "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/prepared-arm-legacy-retry-vm/validation-20260927_225345.log",
+        "returncode": 0,
+        "missing": [],
+        "kernel_errors": []
+      }
+    }
+  ],
+  "compatibility_builds": [
+    {
+      "tag": "source",
+      "sha256": "93086cf4a092e4670482c221b53e40df1f4c898206c85990331c1ec4294becb8",
+      "new_api_imports": false,
+      "loaded": false
+    },
+    {
+      "tag": "target-old",
+      "sha256": "ea842f655dc75197f723908a18bf750e106d113077d9f046da82541354061ae8",
+      "new_api_imports": false,
+      "loaded": false
+    }
+  ],
+  "prior_attempts": {
+    "arm-plan-regression-vm": {
+      "passed": true,
+      "host_loaded": false,
+      "rxe": true,
+      "retirement_audit": false,
+      "defer_creator_drop": false,
+      "kernel_sha256": "6d74216283bf87f76806ea4c94f118b59a80a0595d4de56a8698dd82a758fa31",
+      "module_sha256": "1c5131b5252570df8cc6c1c786bcdcd6c23c6407e8f74deb2dd547e9496dea69",
+      "test_sha256": "5756796a9b508913890deb52a4cb88ace23f8a88f69b577932a654ec25e79639",
+      "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/arm-plan-regression-vm/validation-20260927_224010.log",
+      "returncode": 0,
+      "missing": [],
+      "kernel_errors": []
+    },
+    "prepared-arm-module-vm": {
+      "passed": true,
+      "host_loaded": false,
+      "rxe": true,
+      "retirement_audit": false,
+      "defer_creator_drop": false,
+      "prepared_arm": true,
+      "kernel_sha256": "6d74216283bf87f76806ea4c94f118b59a80a0595d4de56a8698dd82a758fa31",
+      "module_sha256": "8b500e1f9f070884a9e805fa2fb83244794418d39c43977077743390f454fcf3",
+      "test_sha256": "3ba3c2f328386f6bef16b896b8635a2c159a6730b4eaafc6b2781c4ce8211295",
+      "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/prepared-arm-module-vm/validation-20260927_224545.log",
+      "returncode": 0,
+      "missing": [],
+      "kernel_errors": []
+    },
+    "pte-plan-repro-vm": {
+      "passed": false,
+      "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/pte-plan-repro-vm/validation-20260927_224707.log",
+      "missing": [
+        "SBK_PLAN_TEST_EXIT=0",
+        "SBK_PLAN_ALL_PASS"
+      ],
+      "bad": [],
+      "returncode": 0,
+      "sha256": {
+        "/home/k8s/SwiftBaton-AE-downtime-20260927-work/linux-5.15.167-arm-plan-kasan/arch/x86/boot/bzImage": "6d74216283bf87f76806ea4c94f118b59a80a0595d4de56a8698dd82a758fa31",
+        "/home/k8s/SwiftBaton-AE-downtime-20260927-work/pte-plan-repro-vm/module/plan-test-module.ko": "2f41ab86801a4d49529b360fdd71ae7f00a99d07df0be983472816508b2af053",
+        "/home/k8s/SwiftBaton-AE-downtime-20260927-work/pte-plan-repro-vm/root/plan-test": "6c7d5d4e4fe8770ad19cfeb5a7bdaf132a48471729899e86df2610111dc60568"
+      }
+    },
+    "prepared-arm-legacy-kernel-vm": {
+      "passed": false,
+      "host_loaded": false,
+      "rxe": true,
+      "retirement_audit": false,
+      "defer_creator_drop": false,
+      "prepared_arm": false,
+      "kernel_sha256": "e014c62b8c18c8982faf624f9aa73d0f5c08daed04ca64f07f07b13997944e54",
+      "module_sha256": "ccc6204a480956d699c47530c7fa5d9cb60bf51d64d2a53b14f3c61b75c83d53",
+      "test_sha256": "3ba3c2f328386f6bef16b896b8635a2c159a6730b4eaafc6b2781c4ce8211295",
+      "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/prepared-arm-legacy-kernel-vm/validation-20260927_224919.log",
+      "returncode": 0,
+      "missing": [
+        "SBK_REGRESSION_EXIT=0",
+        "SBK_VM_RDMA_TESTS_PASS"
+      ],
+      "kernel_errors": []
+    }
+  },
+  "health": "PASS original runtimes, module build IDs, boot IDs, QoS and migration cleanup"
+}
