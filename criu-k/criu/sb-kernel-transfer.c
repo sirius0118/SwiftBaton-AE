@@ -180,6 +180,9 @@ int sb_kernel_connect(int socket_fd, int source) {
       ret = -errno;
       goto fail;
     }
+    ret = sbk_catalog_prepare_workers(destination,
+          opts.sb_validation_workers ? opts.sb_validation_workers : 1);
+    if (ret) goto fail;
   }
   struct timeval deadline = {.tv_sec = 300};
   if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &deadline,
@@ -209,7 +212,7 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
   struct sbk_rdma_region *sparse = NULL;
   struct sbk_hot_range *hot_index = NULL;
   struct sbk_pm_snapshot *pagemap = NULL;
-  uint64_t begin = kernel_now_ns(), locked = 0, scan_ns = 0, validate_ns = 0, export_ns = 0, hot_ns = 0, stage;
+  uint64_t begin = kernel_now_ns(), locked = 0, scan_ns = 0, pagemap_ns = 0, plan_ns = 0, validate_ns = 0, export_ns = 0, hot_ns = 0, stage;
   if (!count)
     return 0;
   if (pid <= 0 || vpid <= 0)
@@ -251,8 +254,10 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     stage = kernel_now_ns();
     ret = sbk_pm_snapshot_create(pid, regions, count,
                opts.sb_validation_workers ? opts.sb_validation_workers : 1, &pagemap);
+    pagemap_ns = kernel_now_ns() - stage;
     if (!ret) ret = sbk_sparse_plan_snapshot(pid, regions, count, capacity, &sparse, &count, &stats, pagemap);
     scan_ns = kernel_now_ns() - stage;
+    plan_ns = scan_ns - pagemap_ns;
     if (ret) goto out;
     regions = sparse;
     pr_info("SB_KERNEL sparse pid=%d virtual=%llu data=%llu registered=%llu skipped=%llu regions=%u control_page=%u\n",
@@ -344,6 +349,9 @@ out:
   pr_info("SB_KERNEL final_export pid=%d workers=%u chunk_mb=%u effective_pages=%u peak=%u regions=%u result=%d\n",
           pid, opts.sb_kernel_export_workers, opts.sb_kernel_export_chunk_mb,
           export_span, export_peak, count, ret);
+  pr_info("SB_KERNEL final_scan pid=%d pagemap_us=%llu planning_us=%llu result=%d\n",
+          pid, (unsigned long long)(pagemap_ns / 1000),
+          (unsigned long long)(plan_ns / 1000), ret);
   pr_info("SB_KERNEL final_prepare pid=%d regions=%u result=%d lock_wait_us=%llu scan_us=%llu validation_us=%llu export_us=%llu hot_us=%llu total_us=%llu\n",
           pid, count, ret, (unsigned long long)((locked - begin) / 1000),
           (unsigned long long)(scan_ns / 1000), (unsigned long long)(validate_ns / 1000),
@@ -578,6 +586,13 @@ int sb_kernel_client_receive(int socket_fd) {
     }
   }
   ret = sbk_catalog_seal(destination, final_regions, nr_final);
+  struct sbk_catalog_timing timing = {0};
+  sbk_catalog_get_timing(destination, &timing);
+  pr_info("SB_KERNEL final_catalog regions=%u workers=%u validation_us=%llu prepare_us=%llu seal_us=%llu result=%d\n",
+          nr_final, opts.sb_validation_workers ? opts.sb_validation_workers : 1,
+          (unsigned long long)(timing.validate_ns / 1000),
+          (unsigned long long)(timing.prepare_ns / 1000),
+          (unsigned long long)(timing.seal_ns / 1000), ret);
 out:
   return ret;
 }

@@ -14,6 +14,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <time.h>
 
 #define SBK_CTL_MAGIC UINT32_C(0x53424b31)
 #define SBK_CTL_VERSION 1
@@ -35,11 +36,21 @@ struct catalog_entry {
 struct sbk_catalog {
   pthread_mutex_t stage_lock;
   int session, phase;
-  unsigned features;
+  unsigned features, prepare_workers;
   struct sbk_config config;
   struct catalog_entry **entries;
   size_t count;
+  struct sbk_catalog_timing timing;
 };
+static uint64_t catalog_now_ns(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ULL + t.tv_nsec;
+}
+void sbk_catalog_get_timing(const struct sbk_catalog *c,
+                            struct sbk_catalog_timing *timing) {
+  if (c && timing) *timing = c->timing;
+}
 static int full_io(int fd, void *buffer, size_t n, int output) {
   size_t done = 0;
   while (done < n) {
@@ -171,10 +182,10 @@ static void free_entry(struct catalog_entry *e) {
   free(e->hot);
   free(e);
 }
-static int new_entry(struct sbk_catalog *c, const struct sbk_catalog_record *r,
-                     struct catalog_entry **out) {
-  if (c->count == SBK_MAX_REGIONS)
-    return -E2BIG;
+/* Allocation has no catalog publication side effects, so distinct final
+ * entries can prepare independently. The caller joins before publication. */
+static int allocate_entry(struct sbk_catalog *c, const struct sbk_catalog_record *r,
+                          struct catalog_entry **out) {
   struct catalog_entry *e = calloc(1, sizeof(*e));
   if (!e)
     return -ENOMEM;
@@ -195,13 +206,93 @@ static int new_entry(struct sbk_catalog *c, const struct sbk_catalog_record *r,
     goto fail;
   if (ioctl(e->fd, SBK_IOC_WATCH_DRAIN, &e->drain_fd))
     goto fail;
-  c->entries[c->count++] = e;
   *out = e;
   return 0;
 fail:;
   int error = -errno;
   free_entry(e);
   return error;
+}
+static int new_entry(struct sbk_catalog *c, const struct sbk_catalog_record *r,
+                     struct catalog_entry **out) {
+  if (c->count == SBK_MAX_REGIONS) return -E2BIG;
+  int ret = allocate_entry(c, r, out);
+  if (!ret) c->entries[c->count++] = *out;
+  return ret;
+}
+int sbk_catalog_prepare_workers(struct sbk_catalog *c, unsigned workers) {
+  if (!c || !workers || workers > 32) return -EINVAL;
+  pthread_mutex_lock(&c->stage_lock);
+  int ret = c->phase ? -EINVAL : 0;
+  if (!ret) c->prepare_workers = workers;
+  pthread_mutex_unlock(&c->stage_lock);
+  return ret;
+}
+struct final_prepare_job {
+  struct sbk_catalog *catalog;
+  const struct sbk_catalog_final *final;
+  struct catalog_entry **entries;
+  size_t count, next;
+  int error;
+  pthread_mutex_t lock;
+};
+static void *final_prepare_worker(void *arg) {
+  struct final_prepare_job *job = arg;
+  for (;;) {
+    pthread_mutex_lock(&job->lock);
+    size_t i = job->next++;
+    int done = job->error || i >= job->count;
+    pthread_mutex_unlock(&job->lock);
+    if (done) break;
+    if (job->entries[i]) continue;
+    int ret = allocate_entry(job->catalog, &job->final[i].record, &job->entries[i]);
+    if (ret) {
+      pthread_mutex_lock(&job->lock);
+      if (!job->error) job->error = ret;
+      pthread_mutex_unlock(&job->lock);
+    }
+  }
+  return NULL;
+}
+static int prepare_final_entries(struct sbk_catalog *c,
+                                 const struct sbk_catalog_final *final, size_t n) {
+  struct catalog_entry **entries = calloc(n, sizeof(*entries));
+  unsigned char *fresh = calloc(n, 1);
+  size_t missing = 0;
+  int ret = -ENOMEM;
+  if (!entries || !fresh) goto out;
+  for (size_t i = 0; i < n; i++) {
+    entries[i] = find_entry(c, &final[i].record);
+    if (!entries[i]) { fresh[i] = 1; missing++; }
+  }
+  if (missing > SBK_MAX_REGIONS - c->count) { ret = -E2BIG; goto out; }
+  if (!missing) { ret = 0; goto out; }
+  struct final_prepare_job job = {.catalog=c, .final=final, .entries=entries, .count=n};
+  ret = pthread_mutex_init(&job.lock, NULL);
+  if (ret) { ret = -ret; goto out; }
+  pthread_t threads[31];
+  unsigned nr = 0, workers = c->prepare_workers;
+  if (workers > missing) workers = missing;
+  for (unsigned i = 1; i < workers; i++) {
+    /* If thread creation is unavailable, the caller still drains every
+     * unclaimed item. Already admitted helpers must always be joined. */
+    if (pthread_create(&threads[nr], NULL, final_prepare_worker, &job)) break;
+    nr++;
+  }
+  final_prepare_worker(&job);
+  for (unsigned i = 0; i < nr; i++) pthread_join(threads[i], NULL);
+  ret = job.error;
+  pthread_mutex_destroy(&job.lock);
+  if (!ret) {
+    for (size_t i = 0; i < n; i++)
+      if (fresh[i]) { c->entries[c->count++] = entries[i]; fresh[i] = 0; }
+  }
+out:
+  if (entries && fresh)
+    for (size_t i = 0; i < n; i++)
+      if (fresh[i] && entries[i]) free_entry(entries[i]);
+  free(fresh); free(entries);
+  return ret;
 }
 struct sbk_catalog *sbk_catalog_create(int session,
                                        const struct sbk_config *config) {
@@ -229,6 +320,7 @@ struct sbk_catalog *sbk_catalog_create(int session,
     free(c->entries); close(c->session); free(c); errno = init; return NULL;
   }
   c->config = *config;
+  c->prepare_workers = 1;
   struct sbk_capabilities caps;
   int cap_ret = ioctl(c->session, SBK_IOC_CAPABILITIES, &caps);
   if (cap_ret || caps.version != SBK_ABI_VERSION) {
@@ -317,6 +409,7 @@ int sbk_catalog_seal(struct sbk_catalog *c,
                      const struct sbk_catalog_final *final, size_t n) {
   if (!c || c->phase || !final || !n || n > SBK_MAX_REGIONS)
     return -EINVAL;
+  uint64_t begin = catalog_now_ns();
   for (size_t i = 0; i < n; i++) {
     const struct sbk_catalog_record *r = &final[i].record;
     if (!valid_record(r) || !r->restore_pid ||
@@ -342,14 +435,18 @@ int sbk_catalog_seal(struct sbk_catalog *c,
     }
   }
   c->phase = -1; /* Any subsequent failure requires discarding the catalog. */
+  c->timing.validate_ns = catalog_now_ns() - begin;
+  begin = catalog_now_ns();
+  int prepare_ret = prepare_final_entries(c, final, n);
+  c->timing.prepare_ns = catalog_now_ns() - begin;
+  begin = catalog_now_ns();
+  if (prepare_ret) return prepare_ret;
   for (size_t i = 0; i < n; i++) {
     const struct sbk_catalog_final *f = &final[i];
     struct catalog_entry *e = find_entry(c, &f->record);
     int ret;
-    if (!e) {
-      ret = new_entry(c, &f->record, &e);
-      if (ret)
-        return ret;
+    if (!e) return -ENOENT; /* All final entries were published after join. */
+    if (!e->staged) {
       ret = import_ps_slices(c, e);
       if (ret)
         return ret;
@@ -377,6 +474,7 @@ int sbk_catalog_seal(struct sbk_catalog *c,
     free_entry(c->entries[i]);
     c->entries[i] = c->entries[--c->count];
   }
+  c->timing.seal_ns = catalog_now_ns() - begin;
   c->phase = 1;
   return 0;
 }

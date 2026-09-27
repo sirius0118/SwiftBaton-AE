@@ -5,6 +5,11 @@
 #include <stddef.h>
 #include <stdint.h>
 struct sbk_catalog;
+struct sbk_catalog_timing {
+  uint64_t validate_ns, prepare_ns, seal_ns;
+};
+void sbk_catalog_get_timing(const struct sbk_catalog *catalog,
+                            struct sbk_catalog_timing *timing);
 struct sbk_catalog_record {
   uint32_t source_pid, restore_pid;
   uint64_t address;
@@ -21,6 +26,8 @@ struct sbk_catalog_final {
  */
 struct sbk_catalog *sbk_catalog_create(int session_fd,
                                        const struct sbk_config *config);
+/* Bounded final CONFIG preparation; call before seal. Default is serial. */
+int sbk_catalog_prepare_workers(struct sbk_catalog *catalog, unsigned workers);
 void sbk_catalog_destroy(struct sbk_catalog *catalog);
 /* Stage calls may run concurrently. The coordinator must join every stage
  * call before seal, destroy, serve, poll or totals; no other API is concurrent. */
