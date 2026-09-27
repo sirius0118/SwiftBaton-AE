@@ -63,6 +63,7 @@ struct sbk_context {
 	struct eventfd_ctx *drain_event;
 	atomic_t armed, drain_started, drained, drain_signaled;
 	atomic64_t retired_tokens;
+	atomic_t retirement_audited;
 	struct mutex control;
 	bool config_attempted, configured, mapped, background_started, pretransferred, sealed;
 	atomic_t stopping;
@@ -91,6 +92,9 @@ static const struct file_operations sbk_fops;
 static bool arm_timing;
 module_param(arm_timing, bool, 0444);
 MODULE_PARM_DESC(arm_timing, "Log anonymous ARM phase durations; disabled by default");
+static bool retirement_audit;
+module_param(retirement_audit, bool, 0444);
+MODULE_PARM_DESC(retirement_audit, "Diagnostic only: report first unfetched token retirement per region");
 static bool early_prefetch = true;
 module_param(early_prefetch, bool, 0444);
 MODULE_PARM_DESC(early_prefetch, "Queue neighbors after demand WR post, before completion; false retains late-trigger ablation");
@@ -545,6 +549,14 @@ static void sbk_anon_fault_done(void *cookie, u64 ns, vm_fault_t result)
 static void sbk_anon_release(void *cookie)
 {
 	struct sbk_entry *e = cookie;
+	int state = atomic_read_acquire(&e->state);
+	if (retirement_audit && state < READY &&
+	    !atomic_cmpxchg(&e->ctx->retirement_audited, 0, 1)) {
+		pr_info("SBK_RETIRE_UNFETCHED base=%lx index=%lu state=%d armed=%d mapped=%u pid=%d tgid=%d comm=%s\n",
+			e->ctx->base, e->index, state, atomic_read(&e->ctx->armed),
+			e->ctx->mapped, task_pid_nr(current), task_tgid_nr(current), current->comm);
+		dump_stack();
+	}
 	atomic64_inc(&e->ctx->retired_tokens);
 	sbk_maybe_drain(e->ctx);
 	kref_put(&e->ctx->refs, sbk_release_ref);

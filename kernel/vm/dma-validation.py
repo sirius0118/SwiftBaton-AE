@@ -4,6 +4,7 @@ from pathlib import Path
 import argparse, hashlib, json, os, shutil, subprocess, time
 p=argparse.ArgumentParser()
 p.add_argument('--kernel',required=True); p.add_argument('--output',required=True)
+p.add_argument('--retirement-audit',action='store_true')
 a=p.parse_args(); R=Path(__file__).resolve().parents[1]; K=Path(a.kernel).resolve()
 O=Path(a.output).resolve(); O.mkdir(parents=True,exist_ok=True)
 M=O/'module'; M.mkdir(exist_ok=True); (O/'include').mkdir(exist_ok=True)
@@ -62,6 +63,7 @@ echo SBK_TAINT=$(cat /proc/sys/kernel/tainted)
 echo SBK_DMA_VM_DONE
 poweroff -f
 '''
+if a.retirement_audit: init=init.replace('rdma_debug=1 ||', 'rdma_debug=1 retirement_audit=1 arm_timing=1 ||')
 (root/'init').write_text(init); (root/'init').chmod(0o755)
 env=dict(os.environ,KDIR=str(K),SBK_VM_ROOT=str(root)); env.pop('SBK_OFED_ROOT',None)
 subprocess.run(['python3',str(R/'vm/prepare.py')],env=env,check=True)
@@ -79,10 +81,12 @@ markers=['SBK_DMA_FILE_EXIT=0','SBK_DMA_ANON_EXIT=0','SBK_REGRESSION_EXIT=0','SB
     'SBK_UNLOADED=1','SBK_TAINT=12288','SBK_DMA_VM_DONE']
 markers += ['SBK_DMA_PEER_'+mode+'_'+role+'_EXIT=0' for mode in ['dma','ordinary'] for role in ['DEST','SOURCE']]
 markers += ['SBK_DMA_PROBE_DEST_EXIT=0','SBK_DMA_PROBE_SOURCE_EXIT=0']
+if a.retirement_audit: markers += ['SBK_RETIRE_UNFETCHED','SBK_ARM pages=']
 missing=[x for x in markers if x not in runtime]
 bad=[x for x in ['BUG:','WARNING:','Oops:','Kernel panic','general protection fault'] if x in runtime]
 def sha(f): return hashlib.sha256(f.read_bytes()).hexdigest()
 out=dict(passed=result.returncode==0 and not missing and not bad,host_loaded=False,rxe=True,
+    retirement_audit=a.retirement_audit,
     kernel_sha256=sha(K/'arch/x86/boot/bzImage'),module_sha256=sha(M/'swiftbaton_k.ko'),
     test_sha256=sha(root/'sbk_test'),log=str(log),returncode=result.returncode,missing=missing,kernel_errors=bad)
 (O/'result.json').write_text(json.dumps(out,indent=2)+'\n'); print(json.dumps(out,indent=2))
