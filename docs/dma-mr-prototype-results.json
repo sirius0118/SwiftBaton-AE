@@ -1,0 +1,302 @@
+{
+  "status": "kernel transport prototype validated; CRIU DMA protocol not integrated",
+  "physical_passed": true,
+  "test_sha256": "268fc22b38d462a2128a8c5d466bf61a920578977f421a7f0a471d33e530dcd4",
+  "vm_validation": {
+    "passed": true,
+    "host_loaded": false,
+    "rxe": true,
+    "kernel_sha256": "e014c62b8c18c8982faf624f9aa73d0f5c08daed04ca64f07f07b13997944e54",
+    "module_sha256": "ab71beafba2d04d3cd6f117331445aa4805069954cc359dd57994b4af1dec9e8",
+    "test_sha256": "268fc22b38d462a2128a8c5d466bf61a920578977f421a7f0a471d33e530dcd4",
+    "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-mr-peer-vm/validation-20260927_204644.log",
+    "returncode": 0,
+    "missing": [],
+    "kernel_errors": []
+  },
+  "physical_environment": {
+    "source": "knode2",
+    "destination": "knode3",
+    "interface": "ens4f1",
+    "device": "mlx5_1",
+    "gid": 3,
+    "numa_node": 0,
+    "bandwidth_cap_Gbps": 25,
+    "pages_per_probe": 1024,
+    "page_bytes": 4096
+  },
+  "nodes": {
+    "knode2": {
+      "before": {
+        "module": "/home/k8s/exper/zxz/live_migration/SwiftBaton-K/build/module-ofed-optimized/swiftbaton_k.ko",
+        "sha256": "a45f6f60bd56d55f3b0ce481ede1ba3ef61c0974df223e2ce800628618711e8a",
+        "kernel": "5.15.167",
+        "boot_id": "bd33be43-289f-4cb2-bd60-7dcc41440a78",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "candidate": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-mr-source/module/swiftbaton_k.ko",
+      "candidate_sha256": "66199293d192aee96573c072c06233b977f8853f9150756b127d0a7ace7fdfb2",
+      "switch_attempted": true,
+      "loaded": {
+        "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-mr-source/module/swiftbaton_k.ko",
+        "params": {
+          "session_dispatch": "Y",
+          "arm_timing": "N",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "restored": {
+        "loaded": "/home/k8s/exper/zxz/live_migration/SwiftBaton-K/build/module-ofed-optimized/swiftbaton_k.ko",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "after": {
+        "module": "/home/k8s/exper/zxz/live_migration/SwiftBaton-K/build/module-ofed-optimized/swiftbaton_k.ko",
+        "sha256": "a45f6f60bd56d55f3b0ce481ede1ba3ef61c0974df223e2ce800628618711e8a",
+        "kernel": "5.15.167",
+        "boot_id": "bd33be43-289f-4cb2-bd60-7dcc41440a78",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      }
+    },
+    "knode3": {
+      "before": {
+        "module": "/var/tmp/swiftbaton-k-check/swiftbaton_k.ko",
+        "sha256": "4fcd86e6413ef7a239d4f121e3617f137d5182a617046ffa7686ecb2b7a85231",
+        "kernel": "5.15.167-swiftbaton-k1",
+        "boot_id": "3220ec35-2ba6-4c80-93ee-ed1eba296d97",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "candidate": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/dma-mr-target.ko",
+      "candidate_sha256": "139572b12d4e51420c62760e0947112aba30509cbf2b6fb5d780a857a5007f7c",
+      "switch_attempted": true,
+      "loaded": {
+        "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/dma-mr-target.ko",
+        "params": {
+          "token_pool_test_fail_after": "-1",
+          "session_dispatch": "Y",
+          "arm_timing": "N",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "restored": {
+        "loaded": "/var/tmp/swiftbaton-k-check/swiftbaton_k.ko",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "after": {
+        "module": "/var/tmp/swiftbaton-k-check/swiftbaton_k.ko",
+        "sha256": "4fcd86e6413ef7a239d4f121e3617f137d5182a617046ffa7686ecb2b7a85231",
+        "kernel": "5.15.167-swiftbaton-k1",
+        "boot_id": "3220ec35-2ba6-4c80-93ee-ed1eba296d97",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      }
+    }
+  },
+  "trials": [
+    {
+      "label": "four-paths",
+      "ordinary": false,
+      "probe_only": false,
+      "returncodes": [
+        0,
+        0
+      ],
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-four-paths-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-four-paths-destination.log"
+      }
+    },
+    {
+      "label": "0-ordinary",
+      "ordinary": true,
+      "probe_only": true,
+      "returncodes": [
+        0,
+        0
+      ],
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-0-ordinary-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-0-ordinary-destination.log"
+      },
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9016",
+        "p50_ns": "8869",
+        "p95_ns": "9872",
+        "p99_ns": "12607",
+        "max_ns": "16795",
+        "clock_pair_mean_ns": "21",
+        "handler_mean_ns": "8080",
+        "handler_max_ns": "14842"
+      }
+    },
+    {
+      "label": "0-dma",
+      "ordinary": false,
+      "probe_only": true,
+      "returncodes": [
+        0,
+        0
+      ],
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-0-dma-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-0-dma-destination.log"
+      },
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9073",
+        "p50_ns": "8907",
+        "p95_ns": "9972",
+        "p99_ns": "12117",
+        "max_ns": "18314",
+        "clock_pair_mean_ns": "21",
+        "handler_mean_ns": "8129",
+        "handler_max_ns": "17350"
+      }
+    },
+    {
+      "label": "1-ordinary",
+      "ordinary": true,
+      "probe_only": true,
+      "returncodes": [
+        0,
+        0
+      ],
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-1-ordinary-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-1-ordinary-destination.log"
+      },
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9102",
+        "p50_ns": "8959",
+        "p95_ns": "9980",
+        "p99_ns": "12470",
+        "max_ns": "16697",
+        "clock_pair_mean_ns": "20",
+        "handler_mean_ns": "8162",
+        "handler_max_ns": "14983"
+      }
+    },
+    {
+      "label": "1-dma",
+      "ordinary": false,
+      "probe_only": true,
+      "returncodes": [
+        0,
+        0
+      ],
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-1-dma-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-1-dma-destination.log"
+      },
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9080",
+        "p50_ns": "8930",
+        "p95_ns": "9947",
+        "p99_ns": "12326",
+        "max_ns": "17248",
+        "clock_pair_mean_ns": "21",
+        "handler_mean_ns": "8138",
+        "handler_max_ns": "14439"
+      }
+    },
+    {
+      "label": "2-ordinary",
+      "ordinary": true,
+      "probe_only": true,
+      "returncodes": [
+        0,
+        0
+      ],
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-2-ordinary-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-2-ordinary-destination.log"
+      },
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9105",
+        "p50_ns": "8960",
+        "p95_ns": "9973",
+        "p99_ns": "12706",
+        "max_ns": "17339",
+        "clock_pair_mean_ns": "21",
+        "handler_mean_ns": "8152",
+        "handler_max_ns": "12789"
+      }
+    },
+    {
+      "label": "2-dma",
+      "ordinary": false,
+      "probe_only": true,
+      "returncodes": [
+        0,
+        0
+      ],
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-2-dma-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-probe-2-dma-destination.log"
+      },
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9115",
+        "p50_ns": "8960",
+        "p95_ns": "9967",
+        "p99_ns": "12359",
+        "max_ns": "16785",
+        "clock_pair_mean_ns": "21",
+        "handler_mean_ns": "8168",
+        "handler_max_ns": "15856"
+      }
+    }
+  ],
+  "container_downtime_new_path": null,
+  "container_TTR_new_path": null
+}

@@ -11,8 +11,10 @@
 #include <linux/kref.h>
 #include <linux/cred.h>
 #include <linux/rwsem.h>
+#include <linux/uaccess.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_cache.h>
+#include <rdma/ib_umem.h>
 #include "sbk_rdma.h"
 #include "sbk_dispatch.h"
 
@@ -30,7 +32,13 @@ MODULE_PARM_DESC(rdma_ack_timeout, "RC ACK timeout exponent, 0..31; default 12")
 MODULE_PARM_DESC(rdma_retry_count, "RC retry count, 0..7; default 3");
 
 struct sbk_rdma;
+struct sbk_remote_dma_map {
+	struct sbk_rdma_region region;
+	u64 addresses[];
+};
 struct sbk_exported_region {
+	struct ib_umem *umem;
+	struct sbk_remote_dma_map *dma;
 	struct list_head link;
 	struct ib_mr *mr;
 };
@@ -63,6 +71,11 @@ struct sbk_rdma {
 	struct ib_device *dev;
 	struct ib_pd *pd;
 	struct ib_mr *mr;
+	/* Separately owned driver DMA key: paired driver deregistration, not the
+	 * regular ib_mr wrapper/resource tracker. Like PD internal DMA MRs. */
+	struct ib_mr *dma_mr;
+	bool dma_mode;
+	struct sbk_remote_dma_map **remote_dma;
 	const struct ib_gid_attr *gid;
 	struct sbk_rdma_setup cfg;
 	struct sbk_rdma_endpoint peer;
@@ -121,6 +134,24 @@ void sbk_rdma_cancel(struct sbk_rdma *r)
 		wake_up_all(&r->available[lane]);
 }
 
+/* This raw driver MR follows the PD-internal DMA MR lifecycle on both
+ * upstream and OFED. Do not pass it to ib_dereg_mr: no generic MR tracker was
+ * created. Its PD usecount remains held until driver revocation succeeds. */
+static int sbk_dma_key_destroy(struct sbk_rdma *r)
+{
+	int ret;
+	if (!r->dma_mr) return 0;
+	ret = r->dev->ops.dereg_mr(r->dma_mr, NULL);
+	if (ret) return ret;
+	r->dma_mr = NULL;
+	atomic_dec(&r->pd->usecnt);
+	return 0;
+}
+static void sbk_export_dma_release(struct sbk_exported_region *e)
+{
+	if (e->umem) { ib_umem_release(e->umem); e->umem = NULL; }
+	kvfree(e->dma); e->dma = NULL;
+}
 int sbk_rdma_revoke_source(struct sbk_rdma *r)
 {
 	struct sbk_exported_region *region;
@@ -132,6 +163,8 @@ int sbk_rdma_revoke_source(struct sbk_rdma *r)
 	 * publication, so every successful registration is covered by this revoke. */
 	sbk_rdma_cancel(r);
 	down_write(&r->exports_sem);
+	ret = sbk_dma_key_destroy(r);
+	if (ret) goto out;
 	if (r->mr) {
 		ret = ib_dereg_mr(r->mr);
 		if (ret)
@@ -139,6 +172,7 @@ int sbk_rdma_revoke_source(struct sbk_rdma *r)
 		r->mr = NULL;
 	}
 	list_for_each_entry(region, &r->exports, link) {
+		sbk_export_dma_release(region);
 		if (!region->mr)
 			continue;
 		ret = ib_dereg_mr(region->mr);
@@ -179,6 +213,8 @@ static void sbk_rdma_destroy(struct kref *refs)
 				s->cq = NULL;
 			}
 		}
+	ret = sbk_dma_key_destroy(r);
+	if (ret) goto quarantine;
 	if (r->mr) {
 		ret = ib_dereg_mr(r->mr);
 		if (ret)
@@ -191,8 +227,13 @@ static void sbk_rdma_destroy(struct kref *refs)
 			if (ret)
 				goto quarantine;
 		}
+		sbk_export_dma_release(region);
 		list_del(&region->link);
 		kfree(region);
+	}
+	if (r->remote_dma) {
+		for (i = 1; i <= SBK_MAX_REGIONS; i++) kvfree(r->remote_dma[i]);
+		kvfree(r->remote_dma);
 	}
 	if (r->pd) {
 		ret = ib_dealloc_pd_user(r->pd, NULL);
@@ -212,6 +253,34 @@ quarantine:
 	sbk_quarantine(r, ret);
 }
 
+/* Must run in PS, before any exported/bound region. Enabling an already
+ * populated session would mix address interpretations and is rejected. */
+int sbk_rdma_dma_enable(struct sbk_rdma *r)
+{
+	struct ib_mr *mr;
+	int ret = 0;
+	if (!r || r->cfg.pages) return -EINVAL;
+	down_write(&r->exports_sem);
+	if (atomic_read(&r->stopped) || r->connect_attempted || r->dma_mode || r->next_region || r->exporting) {
+		ret = -EBUSY; goto out;
+	}
+	if (r->cfg.role == SBK_RDMA_SOURCE) {
+		if (!r->dev->ops.get_dma_mr) { ret = -EOPNOTSUPP; goto out; }
+		mr = r->dev->ops.get_dma_mr(r->pd, IB_ACCESS_REMOTE_READ);
+		if (IS_ERR(mr)) { ret = PTR_ERR(mr); goto out; }
+		mr->device = r->dev; mr->pd = r->pd;
+		mr->type = IB_MR_TYPE_DMA; mr->uobject = NULL; mr->need_inval = false;
+		atomic_inc(&r->pd->usecnt);
+		r->dma_mr = mr;
+	} else {
+		r->remote_dma = kvcalloc(SBK_MAX_REGIONS + 1, sizeof(*r->remote_dma), GFP_KERNEL);
+		if (!r->remote_dma) { ret = -ENOMEM; goto out; }
+	}
+	r->dma_mode = true;
+out:
+	up_write(&r->exports_sem);
+	return ret;
+}
 /* Caller already owns a live reference, normally under context control. */
 void sbk_rdma_get(struct sbk_rdma *r)
 {
@@ -233,8 +302,100 @@ static bool sbk_region_valid(const struct sbk_rdma_region *region)
 		!check_add_overflow(region->address, bytes, &end);
 }
 
-/* Caller owns a transport reference; current->mm is the region's owner.
- * No context control lock is held while ib_reg_user_mr faults/pins pages. */
+static bool sbk_dma_same(const struct sbk_rdma_region *a, const struct sbk_rdma_region *b)
+{
+	return a->id == b->id && a->rkey == b->rkey &&
+	       a->address == b->address && a->pages == b->pages;
+}
+static int sbk_dma_export(struct sbk_rdma *r, struct sbk_exported_region *e,
+			 const struct sbk_rdma_region *desc)
+{
+	unsigned long n = 0;
+	u64 start = ktime_get_ns(), pinned;
+#ifdef rdma_umem_for_each_dma_block
+	struct ib_block_iter biter;
+#else
+	struct scatterlist *sg;
+	int i;
+	u64 offset;
+#endif
+	e->dma = kvzalloc(struct_size(e->dma, addresses, desc->pages), GFP_KERNEL);
+	if (!e->dma) return -ENOMEM;
+	e->umem = ib_umem_get(r->dev, desc->address, desc->pages << PAGE_SHIFT, IB_ACCESS_REMOTE_READ);
+	if (IS_ERR(e->umem)) {
+		int ret = PTR_ERR(e->umem);
+		e->umem = NULL; sbk_export_dma_release(e); return ret;
+	}
+	pinned = ktime_get_ns();
+#ifdef rdma_umem_for_each_dma_block
+	rdma_umem_for_each_dma_block(e->umem, &biter, PAGE_SIZE) {
+		if (n == desc->pages) goto invalid;
+		e->dma->addresses[n++] = rdma_block_iter_dma_address(&biter);
+	}
+#else
+	for_each_sg(e->umem->sg_head.sgl, sg, e->umem->nmap, i) {
+		if (sg_dma_len(sg) & ~PAGE_MASK) goto invalid;
+		for (offset = 0; offset < sg_dma_len(sg); offset += PAGE_SIZE) {
+			if (n == desc->pages) goto invalid;
+			e->dma->addresses[n++] = sg_dma_address(sg) + offset;
+		}
+	}
+#endif
+	if (n != desc->pages) goto invalid;
+	for (n = 0; n < desc->pages; n++)
+		if ((e->dma->addresses[n] & ~PAGE_MASK) ||
+		    e->dma->addresses[n] > U64_MAX - (PAGE_SIZE - 1)) goto invalid;
+	if (rdma_debug)
+		pr_info("SBK_DMA_EXPORT pages=%llu pin_ns=%llu map_ns=%llu\n",
+			desc->pages, pinned - start, ktime_get_ns() - pinned);
+	return 0;
+invalid:
+	sbk_export_dma_release(e);
+	return -EINVAL;
+}
+/* Address vectors are immutable once published. A live region pins its
+ * transport, so fault reads need no address-table lock or extra references. */
+int sbk_rdma_dma_map(struct sbk_rdma *r, const struct sbk_dma_map *map, bool importing)
+{
+	struct sbk_remote_dma_map *dma = NULL;
+	struct sbk_exported_region *e;
+	const struct sbk_rdma_region *d = &map->region;
+	unsigned long i;
+	int ret = 0;
+	if (!r || !r->dma_mode || !sbk_region_valid(d) ||
+	    !d->id || d->id > SBK_MAX_REGIONS ||
+	    importing != (r->cfg.role == SBK_RDMA_DESTINATION)) return -EINVAL;
+	down_read(&r->exports_sem);
+	if (atomic_read(&r->stopped)) { ret = -ECANCELED; goto out; }
+	if (importing) {
+		dma = kvzalloc(struct_size(dma, addresses, d->pages), GFP_KERNEL);
+		if (!dma) { ret = -ENOMEM; goto out; }
+		dma->region = *d;
+		if (copy_from_user(dma->addresses, u64_to_user_ptr(map->addresses), d->pages * sizeof(u64))) {
+			ret = -EFAULT; goto free;
+		}
+		for (i = 0; i < d->pages; i++)
+			if ((dma->addresses[i] & ~PAGE_MASK) || dma->addresses[i] > U64_MAX - (PAGE_SIZE - 1)) {
+				ret = -EINVAL; goto free;
+			}
+		mutex_lock(&r->exports_lock);
+		if (r->remote_dma[d->id]) ret = -EEXIST;
+		else { smp_store_release(&r->remote_dma[d->id], dma); dma = NULL; }
+		mutex_unlock(&r->exports_lock);
+free:
+		kvfree(dma);
+	} else {
+		mutex_lock(&r->exports_lock);
+		list_for_each_entry(e, &r->exports, link)
+			if (e->dma && sbk_dma_same(&e->dma->region, d)) { dma = e->dma; break; }
+		mutex_unlock(&r->exports_lock);
+		ret = !dma ? -ENOENT : copy_to_user(u64_to_user_ptr(map->addresses), dma->addresses,
+						   d->pages * sizeof(u64)) ? -EFAULT : 0;
+	}
+out:
+	up_read(&r->exports_sem);
+	return ret;
+}
 int sbk_rdma_export_region(struct sbk_rdma *r, struct sbk_rdma_region *desc)
 {
 	struct sbk_exported_region *region;
@@ -266,13 +427,17 @@ int sbk_rdma_export_region(struct sbk_rdma *r, struct sbk_rdma_region *desc)
 	/* Only delegate the controller's mlock authority, preserving the calling
 	 * process's mm and pinned_vm accounting. No persistent credential change. */
 	saved = override_creds(r->registration_cred);
-	region->mr = ib_reg_user_mr(r->pd, desc->address, desc->pages << PAGE_SHIFT,
-				  desc->address, IB_ACCESS_REMOTE_READ);
+	if (r->dma_mode) ret = sbk_dma_export(r, region, desc);
+	else {
+		region->mr = ib_reg_user_mr(r->pd, desc->address, desc->pages << PAGE_SHIFT,
+					  desc->address, IB_ACCESS_REMOTE_READ);
+		if (IS_ERR(region->mr)) { ret = PTR_ERR(region->mr); region->mr = NULL; }
+	}
 	revert_creds(saved);
 	mutex_lock(&r->exports_lock);
 	r->exporting--;
-	if (IS_ERR(region->mr)) {
-		ret = PTR_ERR(region->mr);
+	if (ret) {
+		sbk_export_dma_release(region);
 		kfree(region);
 	} else {
 		/* Keep even a concurrently cancelled registration on the ownership
@@ -283,8 +448,9 @@ int sbk_rdma_export_region(struct sbk_rdma *r, struct sbk_rdma_region *desc)
 		if (atomic_read(&r->stopped))
 			ret = -ECANCELED;
 		else {
-			desc->rkey = region->mr->rkey;
+			desc->rkey = r->dma_mode ? r->dma_mr->rkey : region->mr->rkey;
 			desc->id = r->next_region;
+			if (region->dma) region->dma->region = *desc;
 		}
 	}
 	mutex_unlock(&r->exports_lock);
@@ -300,7 +466,11 @@ int sbk_rdma_get_region(struct sbk_rdma *r, const struct sbk_rdma_region *region
 	if (!sbk_rdma_ready(r, 0) || !sbk_region_valid(region) ||
 	    !region->id || region->id > SBK_MAX_REGIONS)
 		return -EINVAL;
-	kref_get(&r->refs);
+	if (r->dma_mode) {
+		struct sbk_remote_dma_map *dma = smp_load_acquire(&r->remote_dma[region->id]);
+		if (!dma || !sbk_dma_same(&dma->region, region)) return -EINVAL;
+	}
+	sbk_rdma_get(r);
 	return 0;
 }
 
@@ -621,6 +791,7 @@ int sbk_rdma_read_reserved(struct sbk_rdma *r, unsigned int lane,
 		  const struct sbk_rdma_region *region, const struct sbk_rdma_notify *notify)
 {
 	const struct ib_send_wr *bad;
+	struct sbk_remote_dma_map *dma = NULL;
 	struct ib_wc wc;
 	u64 deadline, sequence;
 	unsigned long mapped = 0, done = 0;
@@ -630,6 +801,11 @@ int sbk_rdma_read_reserved(struct sbk_rdma *r, unsigned int lane,
 	    !sbk_rdma_ready(r, r->cfg.pages) ||
 	    (region ? r->cfg.pages != 0 : r->cfg.pages == 0))
 		return -ENOTCONN;
+	if (r->dma_mode) {
+		if (!region || !region->id || region->id > SBK_MAX_REGIONS) return -EINVAL;
+		dma = smp_load_acquire(&r->remote_dma[region->id]);
+		if (!dma || !sbk_dma_same(&dma->region, region)) return -EINVAL;
+	}
 	for (i = 0; i < count; i++)
 		if (indices[i] >= (region ? region->pages : r->peer.pages))
 			return -EINVAL;
@@ -658,8 +834,8 @@ int sbk_rdma_read_reserved(struct sbk_rdma *r, unsigned int lane,
 		s->wr[i].wr.num_sge = 1;
 		s->wr[i].wr.opcode = IB_WR_RDMA_READ;
 		s->wr[i].wr.send_flags = IB_SEND_SIGNALED;
-		s->wr[i].remote_addr = (region ? region->address : r->peer.address) +
-					((u64)indices[i] << PAGE_SHIFT);
+		s->wr[i].remote_addr = dma ? dma->addresses[indices[i]] :
+			(region ? region->address : r->peer.address) + ((u64)indices[i] << PAGE_SHIFT);
 		s->wr[i].rkey = region ? region->rkey : r->peer.rkey;
 	}
 	err = ib_post_send(s->qp, &s->wr[0].wr, &bad);

@@ -1,13 +1,13 @@
 # SwiftBaton-K：借鉴 MITOSIS 的全局 DMA MR
 
-结论：可以省掉每个迁移区域单独创建普通 MR 的过程。仍然需要 MR/rkey、正确的 DMA 地址和页面生命周期管理。尚未在 SwiftBaton 中实现或启用全局远端访问。
+结论：可以省掉每个迁移区域单独创建普通 MR 的过程。仍然需要 MR/rkey、正确的 DMA 地址和页面生命周期管理。已完成可选内核传输原型并通过隔离内核及 Node2→Node3 实物网卡验证；CRIU 容器迁移协议尚未接入。详见 [原型验证报告](GLOBAL-DMA-MR-PROTOTYPE.md)。
 
 ## 已核对的依据
 
 - MITOSIS 本地版本 `3f9f11af3a58b53646d27b79dbd2e91ea55bef2e` 固定 KRCore 子模块到 `c0ca11582dc6937fc274e805fa696762d39e08f7`。
 - KRCore 的 [Context 初始化](https://github.com/SJTU-IPADS/krcore-artifacts/blob/c0ca11582dc6937fc274e805fa696762d39e08f7/KRdmaKit/src/context.rs#L60) 分配 PD，并调用 `ib_get_dma_mr` 建立全局 KMR；[内核 MemoryRegion](https://github.com/SJTU-IPADS/krcore-artifacts/blob/c0ca11582dc6937fc274e805fa696762d39e08f7/KRdmaKit/src/memory_region.rs#L158) 复用 context 的 key，将地址转成物理地址，不逐次调用普通用户 MR 注册。
 - MITOSIS 的 [COW4KPage](https://github.com/ProjectMitosisOS/mitosis-core/blob/3f9f11af3a58b53646d27b79dbd2e91ea55bef2e/mitosis/src/shadow_process/page.rs#L73) 仍调用 `pmem_get_page/pmem_put_page` 并管理 rmap；因此不能把它描述成完全无需引用管理。
-- Node2 当前运行 Linux 5.15.167、MLNX_OFED 5.4-1.0.3.0。`mlx5_1` 对应 PCI `0000:af:00.1`，IOMMU group 129 的实时 `type` 为 `identity`。安装的 OFED 源码 `/usr/src/ofa_kernel-5.4/drivers/infiniband/hw/mlx5/mr.c:678` 中 `mlx5_ib_get_dma_mr` 创建 PA 模式、length64 的 mkey，且 `umem=NULL`。这是实现可行性的证据，尚非实际 RDMA 读测试。
+- Node2 当前运行 Linux 5.15.167。初步检查发现本机安装的 OFED 5.4 源码；后续按实际加载模块核对，mlx5_core 为 5.8-6.0.4，模块编译使用与运行时匹配的 OFED 5.8 头文件及符号表。`mlx5_1` 对应 PCI `0000:af:00.1`，IOMMU group 129 的实时 `type` 为 `identity`。安装的 OFED 源码 `/usr/src/ofa_kernel-5.4/drivers/infiniband/hw/mlx5/mr.c:678` 中 `mlx5_ib_get_dma_mr` 创建 PA 模式、length64 的 mkey，且 `umem=NULL`。该驱动源码说明机制可行；后续已在实际运行的驱动上完成四路径 RDMA READ 验证，不能把安装的 5.4 源码版本当作运行时版本。
 
 ## 对当前实现的改动方向
 

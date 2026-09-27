@@ -42,6 +42,8 @@ void sbk_rdma_cancel(struct sbk_rdma *r);
 int sbk_rdma_revoke_source(struct sbk_rdma *r);
 int sbk_rdma_export_region(struct sbk_rdma *r, struct sbk_rdma_region *region);
 int sbk_rdma_get_region(struct sbk_rdma *r, const struct sbk_rdma_region *region);
+int sbk_rdma_dma_enable(struct sbk_rdma *r);
+int sbk_rdma_dma_map(struct sbk_rdma *r, const struct sbk_dma_map *map, bool importing);
 void sbk_rdma_get(struct sbk_rdma *r);
 void sbk_rdma_put(struct sbk_rdma *r);
 #endif

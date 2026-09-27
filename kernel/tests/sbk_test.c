@@ -768,6 +768,7 @@ static int peer_test(int source_side)
 #include "catalog-test.inc"
 #include "export-batch-test.inc"
 #include "session-dispatch-test.inc"
+#include "dma-mr-test.inc"
 
 int main(int argc, char **argv)
 {
@@ -776,6 +777,12 @@ int main(int argc, char **argv)
     use_anon = getenv("SBK_TEST_ANON") != NULL;
     use_token_pool = getenv("SBK_TEST_TOKEN_POOL") != NULL;
     printf("SBK_MAPPING_MODE=%s\n", use_anon ? "anonymous_PTE" : "file_fixture");
+    if (argc == 2 && !strcmp(argv[1], "--dma-peer-source")) return dma_peer_test(1);
+    if (argc == 2 && !strcmp(argv[1], "--dma-peer-destination")) return dma_peer_test(0);
+    if (getenv("SBK_TEST_DMA_ONLY")) {
+        test_dma_catalog(); test_dma_revoke_race();
+        puts("SBK_DMA_TESTS_PASS"); return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--peer-source")) return getenv("SBK_TEST_CATALOG") ? catalog_peer_test(1) : peer_test(1);
     if (argc == 2 && !strcmp(argv[1], "--peer-destination")) return getenv("SBK_TEST_CATALOG") ? catalog_peer_test(0) : peer_test(0);
     if (use_anon) test_token_pool();

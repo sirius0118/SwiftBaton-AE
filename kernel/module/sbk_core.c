@@ -1489,7 +1489,7 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	mutex_lock(&c->control);
 	switch (cmd) {
 	case SBK_IOC_CAPABILITIES:
-		caps.features |= SBK_FEATURE_PARALLEL_PS | SBK_FEATURE_PS_SLICE | SBK_FEATURE_PARALLEL_EXPORT;
+		caps.features |= SBK_FEATURE_PARALLEL_PS | SBK_FEATURE_PS_SLICE | SBK_FEATURE_PARALLEL_EXPORT | SBK_FEATURE_DMA_MR;
 		if (sbk_session_dispatch_enabled())
 			caps.features |= SBK_FEATURE_SESSION_DISPATCH;
 #ifdef CONFIG_SWIFTBATON_PTE
@@ -1515,6 +1515,18 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		drain.drained = atomic_read_acquire(&c->drained);
 		ret = copy_to_user(user, &drain, sizeof(drain)) ? -EFAULT : 0;
 		break;
+	case SBK_IOC_DMA_ENABLE:
+		ret = c->config_attempted || c->has_region ? -EBUSY : sbk_rdma_dma_enable(c->rdma);
+		break;
+	case SBK_IOC_DMA_EXPORT_MAP:
+	case SBK_IOC_DMA_IMPORT_MAP:
+	{
+		struct sbk_dma_map map;
+		if (c->config_attempted || c->has_region) ret = -EBUSY;
+		else if (copy_from_user(&map, user, sizeof(map))) ret = -EFAULT;
+		else ret = sbk_rdma_dma_map(c->rdma, &map, cmd == SBK_IOC_DMA_IMPORT_MAP);
+		break;
+	}
 	case SBK_IOC_REVOKE_SOURCE:
 		ret = sbk_rdma_revoke_source(c->rdma);
 		break;
