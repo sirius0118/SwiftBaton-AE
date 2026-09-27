@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import time
 import sys
-from k_mode import KernelSettings, validate_preflight, validate_container, validate_completion, validate_ps_config, validate_export_config, validate_dispatch
+from k_mode import KernelSettings, validate_preflight, validate_container, validate_completion, validate_ps_config, validate_export_config, validate_dispatch, validate_catalog_config
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[3]
@@ -112,7 +112,7 @@ if opts.kernel_transfer:
         precopy_workers=opts.precopy_workers, no_pretransfer=opts.no_pretransfer,
         no_prefetch=opts.no_prefetch, no_hot_first=opts.no_hot_first, dense=opts.kernel_dense,
         ps_chunk_mb=opts.kernel_ps_chunk_mb, export_workers=opts.kernel_export_workers,
-        export_chunk_mb=opts.kernel_export_chunk_mb)
+        export_chunk_mb=opts.kernel_export_chunk_mb, validation_workers=opts.validation_workers)
     try:
         kernel_settings.values()
     except ValueError as error:
@@ -699,6 +699,8 @@ try:
                 mode == 'Y', opts.prefetch_workers, opts.install_workers)
         STATE['kernel_export_settings'] = validate_export_config((OUT/'dump.log').read_text(errors='replace'),
             opts.kernel_export_workers, opts.kernel_export_chunk_mb)
+        STATE['kernel_catalog_settings'] = validate_catalog_config((OUT/'pageclient.log').read_text(errors='replace'),
+            opts.validation_workers)
         STATE['kernel_ps_settings'] = validate_ps_config((OUT/'dump.log').read_text(errors='replace'),
             opts.kernel_ps_chunk_mb, opts.no_pretransfer)
         completions = {label: json.loads(py(host, f'from pathlib import Path;print((Path({str(OUT)!r})/{label + ".completion.json"!r}).read_text())'))
