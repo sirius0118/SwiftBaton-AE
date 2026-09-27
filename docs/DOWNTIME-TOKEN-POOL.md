@@ -126,3 +126,13 @@ pool's measured benefit is in preparation during the stop window.
 K still requires substantial changes to PTE activation and preparation of
 registration/catalog resources before it can approach 40 ms. This candidate
 does not claim that goal or a consistent improvement in TTR across workloads.
+
+
+## Follow-up correction: effective K validation workers
+
+The later catalog investigation found that the K adapter discarded the requested
+`--validation-workers` setting when generating K configuration. The K runs in
+this checkpoint therefore used the default of 1 despite commands requesting 16.
+The measured numbers are unchanged. Commit `ff399036` fixes the propagation;
+see [the follow-up experiments](DOWNTIME-CATALOG.md) for corrected runtime
+settings, unsuccessful trials and the current limits.

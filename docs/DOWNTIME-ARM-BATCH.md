@@ -128,3 +128,13 @@ Next large K costs remain source preparation, directory construction and marker
 activation. A draft for parallel final-context allocation exists locally but
 is not part of this commit, binary or these results. It requires concurrency,
 failure-join and FD-ownership tests before deployment.
+
+
+## Follow-up correction: effective K validation workers
+
+The later catalog investigation found that the K adapter discarded the requested
+`--validation-workers` setting when generating K configuration. The K runs in
+this checkpoint therefore used the default of 1 despite commands requesting 16.
+The measured numbers are unchanged. Commit `ff399036` fixes the propagation;
+see [the follow-up experiments](DOWNTIME-CATALOG.md) for corrected runtime
+settings, unsuccessful trials and the current limits.
