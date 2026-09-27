@@ -1,0 +1,5 @@
+/root/
+/performance-root/
+/*.log
+/*.gz
+__pycache__/

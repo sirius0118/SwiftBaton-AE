@@ -2652,7 +2652,7 @@ int cr_restore_tasks(void)
 	if (fdstore_init())
 		goto err;
 
-	log_set_loglevel(5);
+	log_set_loglevel(LOG_INFO);
 	if (log_init("/var/lib/criu/restore.log") == -1) {
 		pr_perror("Can't initiate log");
 		goto err;

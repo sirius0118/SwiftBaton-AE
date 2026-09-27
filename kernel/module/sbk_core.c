@@ -27,6 +27,7 @@
 #include "sbk_uapi.h"
 #include "sbk_rdma.h"
 #include "sbk_dispatch.h"
+#include "sbk_token_pool.h"
 
 #define SBK_MAX_PAGES (1UL << 20)
 #define SBK_MAX_WORKERS 32
@@ -50,6 +51,7 @@ struct sbk_bg_worker {
 	struct sbk_context *ctx;
 };
 struct sbk_context {
+	struct sbk_token_pool *token_pool;
 	struct kref refs;
 	struct work_struct destroy;
 	struct work_struct drain;
@@ -147,6 +149,9 @@ static void sbk_destroy(struct work_struct *work)
 	kvfree(c->entries);
 	kvfree(c->order);
 	kvfree(c->token_ids);
+#ifdef CONFIG_SWIFTBATON_PTE
+	sbk_token_pool_put(c->token_pool);
+#endif
 	kfree(c);
 	/* module_exit flushes reap_wq before unloading its callback text. */
 	module_put(THIS_MODULE);
@@ -171,13 +176,17 @@ static void sbk_drain_work(struct work_struct *work)
 	struct sbk_context *c = container_of(work, struct sbk_context, drain);
 	/* All markers are gone, but background reads might still be completing
 	 * after munmap/discard. Join those DMA owners before allowing retirement. */
-	atomic_set(&c->stopping, 1);
 	if (c->bg_pool)
 		sbk_owner_stop(&c->owner);
 	else {
 		flush_workqueue(c->ft_wq);
 		flush_workqueue(c->bg_wq);
 	}
+	/* Retirement is not cancellation: an admitted batch can still own DMA
+	 * for pages whose last markers were discarded. Let it finish before
+	 * marking the context stopped; a real transport failure remains fatal.
+	 * The owner closes admission and joins all session jobs above. */
+	atomic_set(&c->stopping, 1);
 	atomic_set_release(&c->drained, 1);
 	sbk_signal_drain(c);
 	kref_put(&c->refs, sbk_release_ref);
@@ -542,6 +551,11 @@ static const struct sbk_pte_provider sbk_anon_provider = {
 	.installed = sbk_anon_installed, .release = sbk_anon_release,
 	.fault_done = sbk_anon_fault_done,
 };
+static void sbk_token_retain(void *cookie)
+{
+	struct sbk_entry *e = cookie;
+	kref_get(&e->ctx->refs);
+}
 static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 {
 	struct sbk_anon_arm a;
@@ -556,7 +570,9 @@ static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 	c->token_ids = kvcalloc(c->cfg.pages, sizeof(*c->token_ids), GFP_KERNEL);
 	if (!c->token_ids)
 		return -ENOMEM;
-	for (i = 0; i < c->cfg.pages; i++) {
+	c->tokens_created = sbk_token_pool_take(c->token_pool, c->entries,
+			sizeof(*c->entries), c->cfg.pages, c->token_ids, sbk_token_retain);
+	for (i = c->tokens_created; i < c->cfg.pages; i++) {
 		kref_get(&c->refs);
 		ret = sbk_pte_token_create(&sbk_anon_provider, &c->entries[i], &c->token_ids[i]);
 		if (ret) {
@@ -564,6 +580,7 @@ static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 			goto fail;
 		}
 		c->tokens_created++;
+		sbk_token_pool_fallback(c->token_pool);
 	}
 	c->base = a.address;
 	c->mm = current->mm;
@@ -649,7 +666,8 @@ static bool sbk_background_batches(struct sbk_context *c)
 	unsigned long first, last, j;
 	struct sbk_entry *batch[SBK_MAX_BATCH];
 	unsigned int count, i, quantum;
-	for (quantum = 0; quantum < SBK_DISPATCH_BATCHES && !atomic_read(&c->stopping); quantum++) {
+	for (quantum = 0; quantum < SBK_DISPATCH_BATCHES &&
+	     !atomic_read(&c->stopping) && !atomic_read(&c->drain_started); quantum++) {
 		struct sbk_rdma_slot *slot = NULL;
 		bool pending = false;
 		int err = 0;
@@ -697,7 +715,8 @@ static bool sbk_background_batches(struct sbk_context *c)
 			sbk_install_ahead(batch[i]);
 		cond_resched();
 	}
-	return !atomic_read(&c->stopping) && atomic_long_read(&c->cursor) < c->cfg.pages;
+	return !atomic_read(&c->stopping) && !atomic_read(&c->drain_started) &&
+	       atomic_long_read(&c->cursor) < c->cfg.pages;
 }
 
 static void sbk_background_work(struct work_struct *work)
@@ -1143,6 +1162,9 @@ static int sbk_bind_region(struct file *file, void __user *user)
 	struct sbk_region_bind bind;
 	struct sbk_rdma *r;
 	struct file *session;
+#ifdef CONFIG_SWIFTBATON_PTE
+	struct sbk_token_pool *pool = NULL;
+#endif
 	int ret;
 	if (copy_from_user(&bind, user, sizeof(bind)))
 		return -EFAULT;
@@ -1161,6 +1183,12 @@ static int sbk_bind_region(struct file *file, void __user *user)
 	ret = (parent->has_region || parent->config_attempted ||
 	       atomic_read(&parent->stopping)) ? -EINVAL :
 		sbk_rdma_get_region(r, &bind.remote);
+#ifdef CONFIG_SWIFTBATON_PTE
+	if (!ret) {
+		pool = parent->token_pool;
+		sbk_token_pool_get(pool);
+	}
+#endif
 	mutex_unlock(&parent->control);
 	if (ret)
 		goto out;
@@ -1171,8 +1199,16 @@ static int sbk_bind_region(struct file *file, void __user *user)
 		c->rdma = r;
 		c->region = bind.remote;
 		c->has_region = true;
+#ifdef CONFIG_SWIFTBATON_PTE
+		sbk_token_pool_put(c->token_pool);
+		c->token_pool = pool;
+		pool = NULL;
+#endif
 	}
 	mutex_unlock(&c->control);
+#ifdef CONFIG_SWIFTBATON_PTE
+	sbk_token_pool_put(pool);
+#endif
 	if (ret)
 		sbk_rdma_put(r);
 out:
@@ -1445,7 +1481,7 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		if (sbk_session_dispatch_enabled())
 			caps.features |= SBK_FEATURE_SESSION_DISPATCH;
 #ifdef CONFIG_SWIFTBATON_PTE
-		caps.features |= SBK_FEATURE_ANONYMOUS_PTE;
+		caps.features |= SBK_FEATURE_ANONYMOUS_PTE | SBK_FEATURE_TOKEN_POOL;
 #endif
 		ret = copy_to_user(user, &caps, sizeof(caps)) ? -EFAULT : 0;
 		break;
@@ -1469,6 +1505,34 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		break;
 	case SBK_IOC_REVOKE_SOURCE:
 		ret = sbk_rdma_revoke_source(c->rdma);
+		break;
+	case SBK_IOC_TOKEN_RESERVE:
+#ifdef CONFIG_SWIFTBATON_PTE
+	{
+		u64 pages;
+		if (c->mapped || atomic_read(&c->stopping))
+			ret = -EINVAL;
+		else if (copy_from_user(&pages, user, sizeof(pages)))
+			ret = -EFAULT;
+		else if (!pages || pages > SBK_TOKEN_POOL_MAX_PAGES)
+			ret = -EINVAL;
+		else
+			ret = sbk_token_pool_reserve(c->token_pool, pages);
+	}
+#else
+		ret = -EOPNOTSUPP;
+#endif
+		break;
+	case SBK_IOC_TOKEN_POOL_STATS:
+#ifdef CONFIG_SWIFTBATON_PTE
+	{
+		struct sbk_token_pool_stats pool_stats = {};
+		sbk_token_pool_stats(c->token_pool, &pool_stats);
+		ret = copy_to_user(user, &pool_stats, sizeof(pool_stats)) ? -EFAULT : 0;
+	}
+#else
+		ret = -EOPNOTSUPP;
+#endif
 		break;
 	case SBK_IOC_ARM_ANON:
 #ifdef CONFIG_SWIFTBATON_PTE
@@ -1625,6 +1689,12 @@ static int sbk_open(struct inode *inode, struct file *file)
 	INIT_WORK(&c->destroy, sbk_destroy);
 #ifdef CONFIG_SWIFTBATON_PTE
 	INIT_WORK(&c->drain, sbk_drain_work);
+	c->token_pool = sbk_token_pool_create(&sbk_anon_provider, reap_wq);
+	if (!c->token_pool) {
+		module_put(THIS_MODULE);
+		kfree(c);
+		return -ENOMEM;
+	}
 #endif
 	mutex_init(&c->control);
 	sbk_owner_init(&c->owner);

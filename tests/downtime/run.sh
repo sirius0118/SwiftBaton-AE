@@ -13,6 +13,20 @@ case "$sb_mode" in
   *) echo 'usage: bash tests/downtime/run.sh [normal|asan|tsan]' >&2; exit 2;;
 esac
 python3 "$sb_test/test_migration_window.py"
+python3 - "$sb_repo" "$sb_out" <<'PY'
+from pathlib import Path
+import sys
+r,out=map(Path,sys.argv[1:])
+def helper(mode):
+ s=(r/mode/'criu/cr-dump.c').read_text()
+ return s[s.index('struct precopy_final_job {'):s.index('\nint cr_dump_tasks(pid_t pid)')]
+s=helper('criu');assert s==helper('criu-k')
+(out/'validation-overlap.inc').write_text(s)
+PY
+cc -g -Wall -Wextra -Werror -pthread "${sb_flags[@]}" \
+  -iquote "$sb_out" -iquote "$sb_repo/criu/criu/include" \
+  "$sb_test/test_validation_overlap.c" -o "$sb_out/overlap"
+"$sb_out/overlap"
 cc -g -Wall -Wextra -Werror -pthread "${sb_flags[@]}" \
   -iquote "$sb_repo/criu/criu/include" "$sb_test/test_scheduler_bitmap.c" \
   "$sb_repo/criu/criu/sb-sched.c" -o "$sb_out/scheduler"

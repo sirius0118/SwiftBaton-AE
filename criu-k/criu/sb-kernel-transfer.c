@@ -358,6 +358,23 @@ out:
 }
 /* PS snapshots the running source, leaving original pages unpinned. The
  * receiver caches pages in kernel memory, without publishing any PTE. */
+/* Capacity hint only: virtual size may overestimate lazy pages. Dynamic maps,
+ * sparse holes, and the cap never alter final coverage or page correctness. */
+static uint64_t token_pool_hint(void) {
+  uint64_t pages = 0;
+  for (int i = 0; i < list_length; i++) {
+    char path[64]; unsigned long long size;
+    snprintf(path, sizeof(path), "/proc/%d/statm", pid_data_list[i].pid);
+    FILE *file = fopen(path, "re");
+    if (!file) continue;
+    int found = fscanf(file, "%llu", &size);
+    fclose(file);
+    if (found != 1) continue;
+    if (size >= SBK_TOKEN_POOL_MAX_PAGES - pages) return SBK_TOKEN_POOL_MAX_PAGES;
+    pages += size;
+  }
+  return pages;
+}
 int sb_kernel_send_ps(int socket_fd) {
   unsigned count = 0, sent = 0, skipped = 0;
   uint64_t pages = 0, begin = kernel_now_ns(), first = 0;
@@ -374,10 +391,12 @@ int sb_kernel_send_ps(int socket_fd) {
       return ret;
     }
   }
-  /* Version 3 counts planned regions. A fully zero wire record is an explicit
-   * skipped region (all candidates raced away). Final wire protocol stays v2. */
-  struct sbk_wire_header h = {SBK_WIRE_MAGIC, 3, count, 1}, ack;
-  if (sync_transfer(socket_fd, &h, sizeof(h), true)) { ret = -EIO; goto out; }
+  /* Version 4 adds a bounded resource hint before the existing PS records.
+   * It carries no page data or validity assertion. Final protocol stays v2. */
+  struct sbk_wire_header h = {SBK_WIRE_MAGIC, 4, count, 1}, ack;
+  uint64_t tokens = token_pool_hint();
+  if (sync_transfer(socket_fd, &h, sizeof(h), true) ||
+      sync_transfer(socket_fd, &tokens, sizeof(tokens), true)) { ret = -EIO; goto out; }
   for (unsigned i = 0; i < count; i++) {
     struct sbk_ps_region *p;
     struct sbk_wire_region w = {};
@@ -434,9 +453,23 @@ int sb_kernel_receive_ps(int socket_fd) {
   unsigned skipped = 0;
   int ret = -EPROTO;
   if (!destination || sync_transfer(socket_fd, &h, sizeof(h), false) ||
-      h.magic != SBK_WIRE_MAGIC || (h.version != 2 && h.version != 3) || h.reserved != 1 ||
+      h.magic != SBK_WIRE_MAGIC || (h.version != 2 && h.version != 3 && h.version != 4) || h.reserved != 1 ||
       h.count > SBK_MAX_REGIONS / 2 || (opts.sb_no_pretransfer && h.count))
     return -EPROTO;
+  if (h.version == 4) {
+    uint64_t tokens;
+    struct sbk_capabilities caps;
+    if (sync_transfer(socket_fd, &tokens, sizeof(tokens), false) ||
+        tokens > SBK_TOKEN_POOL_MAX_PAGES) return -EPROTO;
+    if (ioctl(session_fd, SBK_IOC_CAPABILITIES, &caps)) return -errno;
+    uint64_t started = kernel_now_ns();
+    bool supported = !!(caps.features & SBK_FEATURE_TOKEN_POOL);
+    if (tokens && supported && ioctl(session_fd, SBK_IOC_TOKEN_RESERVE, &tokens))
+      return -errno;
+    pr_info("SB_KERNEL token_pool_ps pages=%llu supported=%u elapsed_us=%llu\n",
+            (unsigned long long)tokens, supported,
+            (unsigned long long)((kernel_now_ns() - started) / 1000));
+  }
   if (h.count) {
     if (workers > h.count) workers = h.count;
     pool = sbk_work_create(workers, workers * 2, ps_receive_run, free);
@@ -445,7 +478,7 @@ int sb_kernel_receive_ps(int socket_fd) {
   for (unsigned i = 0; i < h.count; i++) {
     struct sbk_wire_region w, empty = {};
     if (sync_transfer(socket_fd, &w, sizeof(w), false)) { ret = -EIO; goto fail; }
-    if (h.version == 3 && !memcmp(&w, &empty, sizeof(w))) { skipped++; continue; }
+    if (h.version >= 3 && !memcmp(&w, &empty, sizeof(w))) { skipped++; continue; }
     if (!w.hot_count || w.dirty_count || w.hot_count > w.record.remote.pages ||
         w.record.remote.pages > (1ULL << 20)) { ret = -EPROTO; goto fail; }
     struct ps_receive_job *job = malloc(sizeof(*job) + w.hot_count * sizeof(uint64_t));
@@ -639,6 +672,14 @@ int sb_kernel_client_serve(int listen_fd, int socket_fd) {
           (unsigned long long)st.hits, (unsigned long long)st.waits,
           (unsigned long long)st.installed_ahead,
           (unsigned long long)st.skipped_install, (unsigned long long)st.batches);
+  struct sbk_token_pool_stats tokens;
+  if (!ioctl(session_fd, SBK_IOC_TOKEN_POOL_STATS, &tokens)) {
+    pr_info("SB_KERNEL token_pool_complete prepared=%llu claimed=%llu available=%llu fallback=%llu sealed=%u\n",
+            (unsigned long long)tokens.prepared, (unsigned long long)tokens.claimed,
+            (unsigned long long)tokens.available, (unsigned long long)tokens.fallback, tokens.sealed);
+    if (tokens.prepared != tokens.claimed + tokens.available ||
+        tokens.claimed + tokens.fallback != st.pages) { ret = -EPROTO; goto out; }
+  } else if (errno != ENOTTY && errno != EOPNOTSUPP) { ret = -errno; goto out; }
   struct sbk_dispatch_stats dispatch;
   if (!ioctl(session_fd, SBK_IOC_DISPATCH_STATS, &dispatch)) {
     for (unsigned int lane = 0; lane < 2; lane++) {

@@ -1,5 +1,8 @@
 # Experiments after the 56 ms freeze (2026-09-27)
 
+This report records the earlier `ba3c0089` candidate. Subsequent token-pool and
+validation-overlap changes are documented in [DOWNTIME-TOKEN-POOL.md](DOWNTIME-TOKEN-POOL.md).
+
 The immutable baseline is tag `swiftbaton-u-56ms-20260927`, commit
 `1e4fe1758e0b4918c74a23d31878b953a70ae842`. Development continues on
 `codex/downtime-after56-20260927`. This is an experimental candidate, not a

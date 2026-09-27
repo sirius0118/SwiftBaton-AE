@@ -56,6 +56,12 @@ struct sbk_region_seal {
 #define SBK_FEATURE_PS_SLICE (1U << 2)
 #define SBK_FEATURE_PARALLEL_EXPORT (1U << 3)
 #define SBK_FEATURE_SESSION_DISPATCH (1U << 4)
+#define SBK_FEATURE_TOKEN_POOL (1U << 5)
+#define SBK_TOKEN_POOL_MAX_PAGES (1U << 22)
+struct sbk_token_pool_stats {
+    __u64 available, prepared, claimed, fallback;
+    __u32 sealed, reserved;
+};
 struct sbk_ps_slice {
     __s32 source_fd;
     __u32 reserved;
@@ -144,4 +150,11 @@ struct sbk_rdma_setup {
 #define SBK_IOC_IMPORT_PS _IOW('B', 19, struct sbk_ps_slice)
 #define SBK_IOC_EXPORT_BATCH _IOWR('B', 20, struct sbk_export_batch)
 #define SBK_IOC_DISPATCH_STATS _IOR('B', 21, struct sbk_dispatch_stats)
+/* Reserve unbound tokens in PS. pages is a desired available count, not an
+ * increment. No mapping, remote descriptor or speculative byte is trusted.
+ * First ARM closes reservation admission; shortages use normal allocation.
+ * A failed allocation/copyin never publishes PTEs; partial reservations remain
+ * session-owned and are reclaimed on close. Region fds share the session pool. */
+#define SBK_IOC_TOKEN_RESERVE _IOW('B', 22, __u64)
+#define SBK_IOC_TOKEN_POOL_STATS _IOR('B', 23, struct sbk_token_pool_stats)
 #endif
