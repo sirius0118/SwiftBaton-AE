@@ -27,9 +27,9 @@ Current verification:
 | --- | --- | --- |
 | Native CRIU | Unmodified upstream v3.18 and rsocket image transfer | Standalone process, Redis container, 100k and 500k Redis/YCSB with full key/canary verification |
 | PCLive prototype | Two PS snapshots: second snapshot RDMA-reads into the same target memfd and refreshes anonymous resident staging in place; final validity and `mremap` adoption | 100k and 500k Redis/YCSB with full key/canary validation |
-| Optimized post-copy prototype | PS payload disabled; independent demand and address-order BG lanes | 100k-key Redis/YCSB smoke, PF=543, BG=64,966, FT=PS=0 |
-| Hybrid-copy prototype | PS staging plus independent demand/BG; address-order BG | 100k-key Redis/YCSB smoke, PS=18,622, PF=99, BG=46,788 |
-| Remote-fork prototype | Kernel demand-only during service; target exit retires unused markers before source MR revocation | 100k-key Redis/YCSB smoke, PF=42,163, FT=BG=PS=0, 815 retired unused |
+| Optimized post-copy prototype | PS payload disabled; independent demand and address-order BG lanes | 100k smoke and 500k Redis/YCSB, PF=73,581, BG=1,663,096, FT=PS=0 in full run |
+| Hybrid-copy prototype | PS staging plus independent demand/BG; address-order BG | 100k smoke and 500k Redis/YCSB, PS=756,179, PF=32,758, BG=947,740 in full run |
+| Remote-fork prototype | Kernel demand-only during service; target exit retires unused markers before source MR revocation | 100k smoke and 500k Redis/YCSB, PF=1,545,059, FT=BG=PS=0, 17,422 retired unused in full run |
 
 `baseline/run.py` selects a profile, holds the same migration lock as the main
 driver, verifies CRIU binary hashes on both hosts, and restores both installed
@@ -69,3 +69,5 @@ owned containers removed. `baseline/report.py` builds a matched-workload table
 from validated result/state files and rejects missing cleanup or unstable
 target throughput. U profiles use native ibverbs, K uses kernel RDMA, and
 native CRIU uses rsocket; results are not yet transport-normalized speedups.
+The full matched-workload measurements, raw artifact paths, metric definitions
+and implementation limits are recorded in `baseline/results-20260928.md`.

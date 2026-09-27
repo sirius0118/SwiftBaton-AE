@@ -31,6 +31,12 @@
 
 #define LAZY_PAGES_RESTORE_FINISHED 0x52535446U
 #define SBK_WIRE_MAGIC 0x53424b43U
+/* Remote-fork keeps the source export alive for the entire destination
+ * service lifetime. The old five-minute control timeout expired exactly as
+ * a 300-second workload entered full-key validation, although data transfer
+ * was still active. Keep a bounded failure timeout, but leave room for
+ * workload, poststeady sampling, validation and destination shutdown. */
+#define SBK_SESSION_TIMEOUT_SEC 3600
 struct sbk_wire_header {
   uint32_t magic, version, count, reserved;
 };
@@ -405,7 +411,7 @@ int sb_kernel_connect(int socket_fd, int source) {
           opts.sb_kernel_catalog_workers ? opts.sb_kernel_catalog_workers : 1);
     if (ret) goto fail;
   }
-  struct timeval deadline = {.tv_sec = 300};
+  struct timeval deadline = {.tv_sec = SBK_SESSION_TIMEOUT_SEC};
   if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &deadline,
                  sizeof(deadline)) ||
       setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &deadline,
@@ -1223,7 +1229,7 @@ int sb_kernel_client_serve(int listen_fd, int socket_fd) {
   close(listen_fd);
   if (client < 0)
     return -errno;
-  struct timeval deadline = {.tv_sec = 300};
+  struct timeval deadline = {.tv_sec = SBK_SESSION_TIMEOUT_SEC};
   struct timespec start, now;
   clock_gettime(CLOCK_MONOTONIC, &start);
   if (setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &deadline,
@@ -1243,7 +1249,7 @@ int sb_kernel_client_serve(int listen_fd, int socket_fd) {
     struct pollfd p = {.fd = finished ? -1 : client, .events = POLLIN};
     ret = -EIO;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    if (now.tv_sec - start.tv_sec > 300) {
+    if (now.tv_sec - start.tv_sec > SBK_SESSION_TIMEOUT_SEC) {
       ret = -ETIMEDOUT;
       goto out;
     }
