@@ -134,6 +134,90 @@ static struct sbk_source_prearm *source_prearm_find(int pid,
   }
   return NULL;
 }
+static int source_range_compare(const void *a, const void *b) {
+  const struct sbk_rdma_region *x = a, *y = b;
+  return (x->address > y->address) - (x->address < y->address);
+}
+/* Split CRIU's frozen VMAs around still-valid prearmed MRs. Every omitted
+ * page is pinned by a read-only MR whose notifier was installed before GUP;
+ * all other pages, including PS candidates and newly faulted gaps, retain
+ * the ordinary frozen pagemap scan. Return 0 to keep the old full scan. */
+static int source_partition_prearmed(int pid, const struct sbk_rdma_region *input,
+                                    unsigned count, unsigned capacity,
+                                    struct sbk_rdma_region **scan, unsigned *scan_count,
+                                    struct sbk_rdma_region **trusted,
+                                    unsigned *trusted_count, uint64_t *virtual_pages) {
+  struct sbk_rdma_region *ready = NULL, *remaining = NULL, *stable = NULL;
+  unsigned nr_ready = 0, nr_scan = 0, nr_trusted = 0;
+  uint64_t previous = 0, pages = 0;
+  *scan = *trusted = NULL;
+  *scan_count = *trusted_count = 0;
+  *virtual_pages = 0;
+  if (!source_prearm_count || !count || count > capacity) return 0;
+  for (unsigned i = 0; i < count; i++) {
+    const struct sbk_rdma_region *r = &input[i];
+    if (!r->pages || r->pages > (1U << 20) || (r->address & 4095) ||
+        r->address < previous || r->address > UINT64_MAX - r->pages * 4096)
+      return 0;
+    previous = r->address + r->pages * 4096;
+    pages += r->pages;
+  }
+  ready = calloc(source_prearm_count, sizeof(*ready));
+  if (!ready) return 0;
+  for (unsigned i = 0; i < source_prearm_count; i++) {
+    const struct sbk_source_prearm *p = &source_prearm[i];
+    if (p->pid != pid || !p->pfns) continue;
+    struct sbk_prearm_status status = {.region = p->region};
+    if (ioctl(session_fd, SBK_IOC_PREARM_STATUS, &status) || !status.valid)
+      continue;
+    ready[nr_ready++] = (struct sbk_rdma_region){
+        .address = p->region.address, .pages = p->region.pages};
+  }
+  if (!nr_ready) goto fallback;
+  qsort(ready, nr_ready, sizeof(*ready), source_range_compare);
+  for (unsigned i = 1; i < nr_ready; i++)
+    if (ready[i - 1].address + ready[i - 1].pages * 4096 > ready[i].address)
+      goto fallback;
+  remaining = calloc(count + nr_ready, sizeof(*remaining));
+  stable = calloc(nr_ready, sizeof(*stable));
+  if (!remaining || !stable) goto fallback;
+  unsigned first = 0;
+  for (unsigned i = 0; i < count; i++) {
+    const struct sbk_rdma_region *r = &input[i];
+    uint64_t cursor = r->address, end = cursor + r->pages * 4096;
+    while (first < nr_ready &&
+           ready[first].address + ready[first].pages * 4096 <= cursor) first++;
+    for (unsigned j = first; j < nr_ready && ready[j].address < end; j++) {
+      uint64_t next = ready[j].address + ready[j].pages * 4096;
+      if (ready[j].address < cursor || next > end) continue;
+      if (ready[j].address > cursor)
+        remaining[nr_scan++] = (struct sbk_rdma_region){
+            .address = cursor, .pages = (ready[j].address - cursor) / 4096};
+      stable[nr_trusted++] = ready[j];
+      cursor = next;
+    }
+    if (cursor < end)
+      remaining[nr_scan++] = (struct sbk_rdma_region){
+          .address = cursor, .pages = (end - cursor) / 4096};
+  }
+  if (!nr_trusted || nr_trusted >= capacity ||
+      nr_scan > capacity - nr_trusted) goto fallback;
+  free(ready);
+  *scan = remaining; *scan_count = nr_scan;
+  *trusted = stable; *trusted_count = nr_trusted;
+  *virtual_pages = pages;
+  return 1;
+fallback:
+  free(ready); free(remaining); free(stable);
+  return 0;
+}
+static bool source_trusted_exact(const struct sbk_rdma_region *trusted,
+                                 unsigned count, const struct sbk_rdma_region *r) {
+  for (unsigned i = 0; i < count; i++)
+    if (trusted[i].address == r->address && trusted[i].pages == r->pages)
+      return true;
+  return false;
+}
 static struct sbk_source_hot *source_hot_find(int pid,
                                               const struct sbk_rdma_region *r) {
   for (unsigned i = 0; i < source_hot_count; i++) {
@@ -355,6 +439,9 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
   unsigned hot_cached = 0, hot_derived = 0, hot_fallback = 0;
   struct sbk_hot_range *hot_index = NULL;
   struct sbk_pm_snapshot *pagemap = NULL;
+  struct sbk_rdma_region *scan_input = NULL, *trusted_regions = NULL, *scan_plan = NULL;
+  unsigned scan_input_count = 0, trusted_count = 0, scan_plan_count = 0;
+  bool fast_sparse = false;
   uint64_t begin = kernel_now_ns(), locked = 0, scan_ns = 0, pagemap_ns = 0, plan_ns = 0, validate_ns = 0, export_ns = 0, hot_ns = 0, stage;
   if (!count)
     return 0;
@@ -393,20 +480,82 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     if (remaining > 1 && capacity / remaining >= count)
       capacity /= remaining;
     if (!opts.sb_kernel_dense) {
-    struct sbk_sparse_stats stats;
-    stage = kernel_now_ns();
-    ret = sbk_pm_snapshot_create(pid, regions, count,
-               opts.sb_validation_workers ? opts.sb_validation_workers : 1, &pagemap);
-    pagemap_ns = kernel_now_ns() - stage;
-    if (!ret) ret = sbk_sparse_plan_snapshot(pid, regions, count, capacity, &sparse, &count, &stats, pagemap);
-    scan_ns = kernel_now_ns() - stage;
-    plan_ns = scan_ns - pagemap_ns;
-    if (ret) goto out;
-    regions = sparse;
-    pr_info("SB_KERNEL sparse pid=%d virtual=%llu data=%llu registered=%llu skipped=%llu regions=%u control_page=%u\n",
-            pid, (unsigned long long)stats.virtual_pages, (unsigned long long)stats.data_pages,
-            (unsigned long long)stats.registered_pages,
-            (unsigned long long)(stats.virtual_pages - stats.registered_pages), count, stats.control_page);
+      struct sbk_sparse_stats stats = {};
+      uint64_t virtual_pages = 0, trusted_pages = 0;
+      stage = kernel_now_ns();
+      fast_sparse = opts.sb_kernel_ps_mr &&
+          source_partition_prearmed(pid, regions, count, capacity,
+                                    &scan_input, &scan_input_count,
+                                    &trusted_regions, &trusted_count,
+                                    &virtual_pages);
+      if (fast_sparse) {
+        if (scan_input_count) {
+          ret = sbk_pm_snapshot_create(pid, scan_input, scan_input_count,
+                     opts.sb_validation_workers ? opts.sb_validation_workers : 1, &pagemap);
+          pagemap_ns = kernel_now_ns() - stage;
+          if (!ret) ret = sbk_sparse_plan_snapshot(pid, scan_input, scan_input_count,
+                      capacity - trusted_count, &scan_plan, &scan_plan_count,
+                      &stats, pagemap);
+          if (ret) goto out;
+          if (stats.control_page) {
+            free(scan_plan);
+            scan_plan = NULL;
+            scan_plan_count = 0;
+            stats.registered_pages = 0;
+            stats.control_page = 0;
+          }
+        } else pagemap_ns = kernel_now_ns() - stage;
+        sparse = calloc(capacity, sizeof(*sparse));
+        if (!sparse) { ret = -ENOMEM; goto out; }
+        unsigned a = 0, b = 0, used = 0;
+        uint64_t last = 0;
+        while (a < trusted_count || b < scan_plan_count) {
+          const struct sbk_rdma_region *next;
+          if (b == scan_plan_count ||
+              (a < trusted_count && trusted_regions[a].address < scan_plan[b].address))
+            next = &trusted_regions[a++];
+          else next = &scan_plan[b++];
+          if (used && next->address < last) { fast_sparse = false; break; }
+          sparse[used++] = *next;
+          last = next->address + next->pages * 4096;
+        }
+        unsigned chunk_pages = opts.sb_kernel_export_chunk_mb * 256;
+        uint64_t needed = 0;
+        if (chunk_pages) for (unsigned i = 0; i < used; i++)
+          needed += (sparse[i].pages + chunk_pages - 1) / chunk_pages;
+        if (used > capacity || (chunk_pages && needed > capacity)) fast_sparse = false;
+        if (fast_sparse) {
+          for (unsigned i = 0; i < trusted_count; i++) trusted_pages += trusted_regions[i].pages;
+          stats.virtual_pages = virtual_pages;
+          stats.data_pages += trusted_pages;
+          stats.registered_pages += trusted_pages;
+          count = used;
+          regions = sparse;
+        } else {
+          free(sparse); sparse = NULL;
+          free(scan_plan); scan_plan = NULL;
+          sbk_pm_snapshot_free(pagemap); pagemap = NULL;
+          pagemap_ns = 0;
+        }
+      }
+      if (!fast_sparse) {
+        ret = sbk_pm_snapshot_create(pid, regions, count,
+                   opts.sb_validation_workers ? opts.sb_validation_workers : 1, &pagemap);
+        pagemap_ns = kernel_now_ns() - stage;
+        if (!ret) ret = sbk_sparse_plan_snapshot(pid, regions, count, capacity,
+                                                  &sparse, &count, &stats, pagemap);
+        if (ret) goto out;
+        regions = sparse;
+      }
+      scan_ns = kernel_now_ns() - stage;
+      plan_ns = scan_ns - pagemap_ns;
+      pr_info("SB_KERNEL sparse pid=%d virtual=%llu data=%llu registered=%llu skipped=%llu regions=%u control_page=%u\n",
+              pid, (unsigned long long)stats.virtual_pages, (unsigned long long)stats.data_pages,
+              (unsigned long long)stats.registered_pages,
+              (unsigned long long)(stats.virtual_pages - stats.registered_pages), count, stats.control_page);
+      pr_info("SB_KERNEL sparse_prearm pid=%d enabled=%u trusted=%u trusted_pages=%llu residual=%u residual_pages=%llu\n",
+              pid, fast_sparse, trusted_count, (unsigned long long)trusted_pages,
+              scan_input_count, (unsigned long long)(virtual_pages - trusted_pages));
     }
     if (opts.sb_kernel_export_chunk_mb) {
       struct sbk_rdma_region *chunks;
@@ -439,7 +588,12 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     struct sbk_catalog_final *f = &final_regions[base + i];
     uint64_t *dirty;
     const uint64_t *observed = pagemap ? sbk_pm_snapshot_find(pagemap, regions[i].address, regions[i].pages) : NULL;
-    if (pagemap && !observed) { ret = -ERANGE; goto out; }
+    bool trusted_exact = fast_sparse && source_trusted_exact(trusted_regions, trusted_count, &regions[i]);
+    if ((pagemap && !observed && !trusted_exact) ||
+        (trusted_exact && sb_kernel_ps_has_candidates(pid, regions[i].address, regions[i].pages))) {
+      ret = -ERANGE;
+      goto out;
+    }
     ret = sb_kernel_ps_validate_snapshot(pid, &regions[i], observed, &dirty, &f->dirty_count);
     if (ret)
       goto out;
@@ -456,9 +610,11 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
       struct sbk_source_prearm *p = f->dirty_count ? NULL : source_prearm_find(pid, &regions[i]);
       const uint64_t *observed = p && pagemap ?
           sbk_pm_snapshot_find(pagemap, regions[i].address, regions[i].pages) : NULL;
+      bool trusted_exact = fast_sparse && source_trusted_exact(trusted_regions, trusted_count, &regions[i]);
       struct sbk_prearm_status status = p ? (struct sbk_prearm_status){.region = p->region} :
                                                (struct sbk_prearm_status){};
-      bool pfn_ok = p && observed && source_pfns_equal(p->pfns, observed, regions[i].pages);
+      bool pfn_ok = p && ((observed && source_pfns_equal(p->pfns, observed, regions[i].pages)) ||
+                          (!observed && trusted_exact));
       bool notifier_ok = pfn_ok && !ioctl(session_fd, SBK_IOC_PREARM_STATUS, &status) && status.valid;
       if (notifier_ok) {
         regions[i] = p->region;
@@ -466,7 +622,7 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
       } else {
         if (p) {
           prearm_invalid++;
-          if (!observed) prearm_no_snapshot++;
+          if (!observed && !trusted_exact) prearm_no_snapshot++;
           else if (!pfn_ok) prearm_pfn_changed++;
           else prearm_notifier_changed++;
         }
@@ -486,6 +642,17 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
   export_ns = kernel_now_ns() - stage;
   if (ret)
     goto out;
+  if (fast_sparse) for (unsigned i = 0; i < trusted_count; i++) {
+    struct sbk_source_prearm *p = source_prearm_find(pid, &trusted_regions[i]);
+    struct sbk_prearm_status status = p ?
+        (struct sbk_prearm_status){.region = p->region} : (struct sbk_prearm_status){};
+    if (!p || ioctl(session_fd, SBK_IOC_PREARM_STATUS, &status) || !status.valid) {
+      /* The trusted sparse plan omitted these pagemap reads. Do not publish
+       * that plan after any intervening map invalidation. */
+      ret = -EAGAIN;
+      goto out;
+    }
+  }
   stage = kernel_now_ns();
   if (!opts.sb_no_hot_first && count) {
     hot_index = calloc(count, sizeof(*hot_index));
@@ -562,6 +729,9 @@ out:
   if (fallback != regions) free(fallback);
   free(fallback_index);
   free(sparse);
+  free(scan_input);
+  free(scan_plan);
+  free(trusted_regions);
   sbk_pm_snapshot_free(pagemap);
   if (reservation_locked) pthread_mutex_unlock(&final_gate.lock);
   sbk_final_release(&final_gate, ret);
