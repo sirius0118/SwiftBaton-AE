@@ -1,0 +1,380 @@
+{
+  "commit": "9032c3d2ad24fde3ef2eab5cc50a179c335a483c",
+  "vm": {
+    "passed": true,
+    "host_loaded": false,
+    "rxe": true,
+    "retirement_audit": false,
+    "defer_creator_drop": true,
+    "kernel_sha256": "e014c62b8c18c8982faf624f9aa73d0f5c08daed04ca64f07f07b13997944e54",
+    "module_sha256": "0b2571a4b1e5c9408d14a79b2ddbb922a161d5579a67aad68e801fe7836afeb2",
+    "test_sha256": "5756796a9b508913890deb52a4cb88ace23f8a88f69b577932a654ec25e79639",
+    "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-vm/validation-20260927_212921.log",
+    "returncode": 0,
+    "missing": [],
+    "kernel_errors": []
+  },
+  "sync_vm": {
+    "passed": true,
+    "host_loaded": false,
+    "rxe": true,
+    "retirement_audit": false,
+    "defer_creator_drop": false,
+    "kernel_sha256": "e014c62b8c18c8982faf624f9aa73d0f5c08daed04ca64f07f07b13997944e54",
+    "module_sha256": "6443f3d8bbe02d0db873db6720a85b5e85e4d366c2daed8f0ddb16c607137b22",
+    "test_sha256": "5756796a9b508913890deb52a4cb88ace23f8a88f69b577932a654ec25e79639",
+    "log": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-sync-vm/validation-20260927_213035.log",
+    "returncode": 0,
+    "missing": [],
+    "kernel_errors": []
+  },
+  "nodes": {
+    "knode2": {
+      "before": {
+        "module": "/home/k8s/exper/zxz/live_migration/SwiftBaton-K/build/module-ofed-optimized/swiftbaton_k.ko",
+        "sha256": "a45f6f60bd56d55f3b0ce481ede1ba3ef61c0974df223e2ce800628618711e8a",
+        "kernel": "5.15.167",
+        "boot_id": "bd33be43-289f-4cb2-bd60-7dcc41440a78",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "candidate": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-mr-source/module/swiftbaton_k.ko",
+      "candidate_sha256": "66199293d192aee96573c072c06233b977f8853f9150756b127d0a7ace7fdfb2",
+      "switch_attempted": true,
+      "loaded": {
+        "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/dma-mr-source/module/swiftbaton_k.ko",
+        "params": {
+          "session_dispatch": "Y",
+          "arm_timing": "N",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "restored": {
+        "loaded": "/home/k8s/exper/zxz/live_migration/SwiftBaton-K/build/module-ofed-optimized/swiftbaton_k.ko",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "after": {
+        "module": "/home/k8s/exper/zxz/live_migration/SwiftBaton-K/build/module-ofed-optimized/swiftbaton_k.ko",
+        "sha256": "a45f6f60bd56d55f3b0ce481ede1ba3ef61c0974df223e2ce800628618711e8a",
+        "kernel": "5.15.167",
+        "boot_id": "bd33be43-289f-4cb2-bd60-7dcc41440a78",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      }
+    },
+    "knode3": {
+      "before": {
+        "module": "/var/tmp/swiftbaton-k-check/swiftbaton_k.ko",
+        "sha256": "4fcd86e6413ef7a239d4f121e3617f137d5182a617046ffa7686ecb2b7a85231",
+        "kernel": "5.15.167-swiftbaton-k1",
+        "boot_id": "3220ec35-2ba6-4c80-93ee-ed1eba296d97",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "candidate": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/creator-drop-target.ko",
+      "candidate_sha256": "18ff8fbdf93eb806e25fa711419b20e2420b88e376947425cd9ff442059354da",
+      "switch_attempted": true,
+      "loaded": {
+        "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/creator-drop-target.ko",
+        "params": {
+          "token_pool_test_fail_after": "-1",
+          "retirement_audit": "Y",
+          "session_dispatch": "Y",
+          "creator_drop_test_delay_ms": "0",
+          "arm_timing": "Y",
+          "early_prefetch": "Y",
+          "defer_creator_drop": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "restored": {
+        "loaded": "/var/tmp/swiftbaton-k-check/swiftbaton_k.ko",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "after": {
+        "module": "/var/tmp/swiftbaton-k-check/swiftbaton_k.ko",
+        "sha256": "4fcd86e6413ef7a239d4f121e3617f137d5182a617046ffa7686ecb2b7a85231",
+        "kernel": "5.15.167-swiftbaton-k1",
+        "boot_id": "3220ec35-2ba6-4c80-93ee-ed1eba296d97",
+        "params": {
+          "session_dispatch": "Y",
+          "early_prefetch": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      }
+    }
+  },
+  "steps": [],
+  "probes": [
+    {
+      "label": "repeat-0-0",
+      "defer": false,
+      "loaded": {
+        "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/creator-drop-target.ko",
+        "params": {
+          "token_pool_test_fail_after": "-1",
+          "retirement_audit": "Y",
+          "session_dispatch": "Y",
+          "creator_drop_test_delay_ms": "0",
+          "arm_timing": "Y",
+          "early_prefetch": "Y",
+          "defer_creator_drop": "N",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-0-0-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-0-0-destination.log"
+      },
+      "returncodes": [
+        0,
+        0
+      ],
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9174",
+        "p50_ns": "8983",
+        "p95_ns": "9991",
+        "p99_ns": "15043",
+        "max_ns": "19803",
+        "clock_pair_mean_ns": "21",
+        "handler_mean_ns": "8235",
+        "handler_max_ns": "18873"
+      }
+    },
+    {
+      "label": "repeat-0-1",
+      "defer": true,
+      "loaded": {
+        "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/creator-drop-target.ko",
+        "params": {
+          "token_pool_test_fail_after": "-1",
+          "retirement_audit": "Y",
+          "session_dispatch": "Y",
+          "creator_drop_test_delay_ms": "0",
+          "arm_timing": "Y",
+          "early_prefetch": "Y",
+          "defer_creator_drop": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-0-1-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-0-1-destination.log"
+      },
+      "returncodes": [
+        0,
+        0
+      ],
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9459",
+        "p50_ns": "9226",
+        "p95_ns": "10317",
+        "p99_ns": "15395",
+        "max_ns": "20738",
+        "clock_pair_mean_ns": "21",
+        "handler_mean_ns": "8501",
+        "handler_max_ns": "17391"
+      }
+    },
+    {
+      "label": "repeat-1-0",
+      "defer": false,
+      "loaded": {
+        "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/creator-drop-target.ko",
+        "params": {
+          "token_pool_test_fail_after": "-1",
+          "retirement_audit": "Y",
+          "session_dispatch": "Y",
+          "creator_drop_test_delay_ms": "0",
+          "arm_timing": "Y",
+          "early_prefetch": "Y",
+          "defer_creator_drop": "N",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-1-0-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-1-0-destination.log"
+      },
+      "returncodes": [
+        0,
+        0
+      ],
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9098",
+        "p50_ns": "8937",
+        "p95_ns": "9948",
+        "p99_ns": "14471",
+        "max_ns": "19303",
+        "clock_pair_mean_ns": "21",
+        "handler_mean_ns": "8160",
+        "handler_max_ns": "18252"
+      }
+    },
+    {
+      "label": "repeat-1-1",
+      "defer": true,
+      "loaded": {
+        "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/creator-drop-target.ko",
+        "params": {
+          "token_pool_test_fail_after": "-1",
+          "retirement_audit": "Y",
+          "session_dispatch": "Y",
+          "creator_drop_test_delay_ms": "0",
+          "arm_timing": "Y",
+          "early_prefetch": "Y",
+          "defer_creator_drop": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-1-1-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-1-1-destination.log"
+      },
+      "returncodes": [
+        0,
+        0
+      ],
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9396",
+        "p50_ns": "9179",
+        "p95_ns": "10211",
+        "p99_ns": "15160",
+        "max_ns": "19026",
+        "clock_pair_mean_ns": "20",
+        "handler_mean_ns": "8443",
+        "handler_max_ns": "18078"
+      }
+    },
+    {
+      "label": "repeat-2-0",
+      "defer": false,
+      "loaded": {
+        "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/creator-drop-target.ko",
+        "params": {
+          "token_pool_test_fail_after": "-1",
+          "retirement_audit": "Y",
+          "session_dispatch": "Y",
+          "creator_drop_test_delay_ms": "0",
+          "arm_timing": "Y",
+          "early_prefetch": "Y",
+          "defer_creator_drop": "N",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-2-0-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-2-0-destination.log"
+      },
+      "returncodes": [
+        0,
+        0
+      ],
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9074",
+        "p50_ns": "8905",
+        "p95_ns": "9920",
+        "p99_ns": "13745",
+        "max_ns": "17374",
+        "clock_pair_mean_ns": "21",
+        "handler_mean_ns": "8137",
+        "handler_max_ns": "16337"
+      }
+    },
+    {
+      "label": "repeat-2-1",
+      "defer": true,
+      "loaded": {
+        "loaded": "/home/k8s/SwiftBaton-AE-downtime-20260927/build/creator-drop-target.ko",
+        "params": {
+          "token_pool_test_fail_after": "-1",
+          "retirement_audit": "Y",
+          "session_dispatch": "Y",
+          "creator_drop_test_delay_ms": "0",
+          "arm_timing": "Y",
+          "early_prefetch": "Y",
+          "defer_creator_drop": "Y",
+          "rdma_ack_timeout": "12",
+          "rdma_debug": "N",
+          "rdma_retry_count": "3"
+        }
+      },
+      "logs": {
+        "source": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-2-1-source.log",
+        "destination": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/creator-drop-probe-repeat-2-1-destination.log"
+      },
+      "returncodes": [
+        0,
+        0
+      ],
+      "fault": {
+        "mapping": "anonymous_PTE",
+        "n": "1024",
+        "mean_ns": "9476",
+        "p50_ns": "9234",
+        "p95_ns": "10320",
+        "p99_ns": "15275",
+        "max_ns": "19226",
+        "clock_pair_mean_ns": "20",
+        "handler_mean_ns": "8507",
+        "handler_max_ns": "18128"
+      }
+    }
+  ],
+  "diagnostic_only": true,
+  "passed": true
+}
