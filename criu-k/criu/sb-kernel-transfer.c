@@ -437,7 +437,6 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
   unsigned fallback_count = 0, prearm_reused = 0, prearm_invalid = 0;
   unsigned prearm_no_snapshot = 0, prearm_pfn_changed = 0, prearm_notifier_changed = 0;
   unsigned hot_cached = 0, hot_derived = 0, hot_fallback = 0;
-  struct sbk_hot_range *hot_index = NULL;
   struct sbk_pm_snapshot *pagemap = NULL;
   struct sbk_rdma_region *scan_input = NULL, *trusted_regions = NULL, *scan_plan = NULL;
   unsigned scan_input_count = 0, trusted_count = 0, scan_plan_count = 0;
@@ -654,10 +653,6 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     }
   }
   stage = kernel_now_ns();
-  if (!opts.sb_no_hot_first && count) {
-    hot_index = calloc(count, sizeof(*hot_index));
-    if (!hot_index) { ret = -ENOMEM; goto out; }
-  }
   for (unsigned int i = 0; i < count; i++) {
     struct sbk_catalog_final *f = &final_regions[base + i];
     f->record.remote = regions[i];
@@ -671,14 +666,14 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
       hot_cached++;
       continue;
     }
-    uint64_t *hot = malloc(regions[i].pages * sizeof(*hot));
-    if (!hot) {
-      ret = -ENOMEM;
-      goto out;
-    }
-    f->hot = hot;
     struct sbk_source_hot *cover = source_hot_cover(pid, &regions[i]);
     if (cover) {
+      uint64_t *hot = malloc(regions[i].pages * sizeof(*hot));
+      if (!hot) {
+        ret = -ENOMEM;
+        goto out;
+      }
+      f->hot = hot;
       uint64_t offset = (regions[i].address - cover->address) / 4096;
       for (size_t j = 0; j < cover->count; j++) {
         uint64_t source_index = cover->order[j];
@@ -688,23 +683,10 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
       hot_derived++;
       continue;
     }
-    hot_index[hot_fallback++] = (struct sbk_hot_range){
-        .address = regions[i].address, .pages = regions[i].pages,
-        .order = hot, .used = &f->hot_count};
-  }
-  if (hot_fallback) {
-    ret = sbk_hot_index_prepare(hot_index, hot_fallback);
-    if (ret)
-      goto out;
-    /* Preserve sampled order; filter it against the actual final ranges.
-     * Unmapped PS addresses remain harmless scheduling hints. */
-    for (unsigned p = 0; p < hot_snapshot_count; p++) {
-      const struct sbk_hot_snapshot *h = &hot_snapshots[p];
-      if (h->pid != pid) continue;
-      ret = sbk_hot_index_append_runs(hot_index, hot_fallback, h->addresses, h->count,
-                                      h->runs, h->run_count);
-      if (ret) goto out;
-    }
+    /* A range absent from the PS layout has no prepared heat order. It is
+     * still installed by ordinary K background/demand paths; an empty hint
+     * avoids a frozen-stage scan of the entire sampled heat list. */
+    hot_fallback++;
   }
   hot_ns = kernel_now_ns() - stage;
 out:
@@ -725,7 +707,6 @@ out:
           (unsigned long long)(scan_ns / 1000), (unsigned long long)(validate_ns / 1000),
           (unsigned long long)(export_ns / 1000), (unsigned long long)(hot_ns / 1000),
           (unsigned long long)((kernel_now_ns() - begin) / 1000));
-  free(hot_index);
   if (fallback != regions) free(fallback);
   free(fallback_index);
   free(sparse);
