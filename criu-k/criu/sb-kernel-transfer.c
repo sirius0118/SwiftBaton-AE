@@ -58,6 +58,50 @@ struct sbk_hot_snapshot {
 };
 static struct sbk_hot_snapshot *hot_snapshots;
 static unsigned hot_snapshot_count;
+struct sbk_source_prearm {
+  int pid;
+  struct sbk_rdma_region region;
+  uint64_t *pfns;
+};
+static struct sbk_catalog_layout *source_layout;
+static unsigned source_layout_count;
+static struct sbk_source_prearm *source_prearm;
+static unsigned source_prearm_count;
+#define SBK_PM_PRESENT (1ULL << 63)
+#define SBK_PM_PFN_MASK ((1ULL << 55) - 1)
+static int source_pagemap_read(int pid, uint64_t address, uint64_t pages, uint64_t *entries) {
+  char path[64];
+  snprintf(path, sizeof(path), "/proc/%d/pagemap", pid);
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return -errno;
+  size_t bytes = pages * sizeof(*entries), done = 0;
+  while (done < bytes) {
+    ssize_t n = pread(fd, (char *)entries + done, bytes - done,
+                      address / 4096 * sizeof(*entries) + done);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) { int ret = n ? -errno : -EIO; close(fd); return ret; }
+    done += n;
+  }
+  close(fd);
+  return 0;
+}
+static bool source_pfns_equal(const uint64_t *baseline, const uint64_t *observed,
+                              uint64_t pages) {
+  if (!baseline || !observed) return false;
+  for (uint64_t i = 0; i < pages; i++)
+    if (!(observed[i] & SBK_PM_PRESENT) ||
+        (observed[i] & SBK_PM_PFN_MASK) != baseline[i]) return false;
+  return true;
+}
+static struct sbk_source_prearm *source_prearm_find(int pid,
+                                                   const struct sbk_rdma_region *r) {
+  for (unsigned i = 0; i < source_prearm_count; i++) {
+    struct sbk_source_prearm *p = &source_prearm[i];
+    if (p->pid == pid && p->region.address == r->address &&
+        p->region.pages == r->pages && p->pfns) return p;
+  }
+  return NULL;
+}
 static void release_hot_snapshots(void) {
   for (unsigned i = 0; i < hot_snapshot_count; i++) {
     free(hot_snapshots[i].addresses);
@@ -107,7 +151,11 @@ static uint64_t kernel_now_ns(void) {
 
 int sb_kernel_options(void) {
   if (!opts.sb_kernel_transfer)
-    return (opts.sb_kernel_dma_mr || opts.sb_kernel_ps_arm) ? -EINVAL : 0;
+    return (opts.sb_kernel_dma_mr || opts.sb_kernel_ps_arm || opts.sb_kernel_ps_mr) ? -EINVAL : 0;
+  if (opts.sb_kernel_ps_mr && (!opts.sb_kernel_ps_arm || opts.sb_kernel_dma_mr || opts.sb_kernel_dense)) {
+    pr_err("K source PS MR requires PS ARM, sparse planning and ordinary MRs\n");
+    return -EINVAL;
+  }
   if ((!opts.lazy_pages && opts.mode != CR_LAZY_PAGES) || !opts.sb_image_rdma ||
       !opts.sb_u_precopy || opts.sb_parent_stage || opts.sb_parallel_transfer ||
       opts.track_mem || opts.sb_defer_fault_credits) {
@@ -171,6 +219,11 @@ int sb_kernel_connect(int socket_fd, int source) {
     ret = -EOPNOTSUPP;
     goto fail;
   }
+  if (source && opts.sb_kernel_ps_mr && !(caps.features & SBK_FEATURE_REMOTE_PREARM)) {
+    pr_err("SwiftBaton-K source PS MR capability unavailable\n");
+    ret = -EOPNOTSUPP;
+    goto fail;
+  }
   if (opts.sb_kernel_dma_mr && !(caps.features & SBK_FEATURE_DMA_MR)) {
     pr_err("SwiftBaton-K DMA MR capability unavailable\n");
     ret = -EOPNOTSUPP;
@@ -226,6 +279,7 @@ int sb_kernel_connect(int socket_fd, int source) {
   }
   peer_fd = socket_fd;
   pr_info("SB_KERNEL ps_arm_mode role=%s enabled=%u\n", source ? "source" : "destination", opts.sb_kernel_ps_arm);
+  pr_info("SB_KERNEL ps_mr_mode role=%s enabled=%u\n", source ? "source" : "destination", opts.sb_kernel_ps_mr);
   pr_info("SB_KERNEL connected role=%s device=%s PF=%u FT=%u BG=%u "
           "pretransfer=%s dma_mr=%u\n",
           source ? "source" : "destination", setup.device, setup.slots[0],
@@ -243,6 +297,9 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
   int ret = 0;
   unsigned export_peak = 0, export_span = 1U << 20;
   struct sbk_rdma_region *sparse = NULL;
+  struct sbk_rdma_region *fallback = NULL;
+  unsigned *fallback_index = NULL;
+  unsigned fallback_count = 0, prearm_reused = 0, prearm_invalid = 0;
   struct sbk_hot_range *hot_index = NULL;
   struct sbk_pm_snapshot *pagemap = NULL;
   uint64_t begin = kernel_now_ns(), locked = 0, scan_ns = 0, pagemap_ns = 0, plan_ns = 0, validate_ns = 0, export_ns = 0, hot_ns = 0, stage;
@@ -337,8 +394,36 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
   }
   validate_ns = kernel_now_ns() - stage;
   stage = kernel_now_ns();
-  ret = sb_kernel_export_seized(ctl, session_fd, regions, count,
-                                opts.sb_kernel_export_workers, &export_peak);
+  if (opts.sb_kernel_ps_mr && source_prearm_count) {
+    fallback = calloc(count, sizeof(*fallback));
+    fallback_index = calloc(count, sizeof(*fallback_index));
+    if (!fallback || !fallback_index) { ret = -ENOMEM; goto out; }
+    for (unsigned i = 0; i < count; i++) {
+      struct sbk_catalog_final *f = &final_regions[base + i];
+      struct sbk_source_prearm *p = f->dirty_count ? NULL : source_prearm_find(pid, &regions[i]);
+      const uint64_t *observed = p && pagemap ?
+          sbk_pm_snapshot_find(pagemap, regions[i].address, regions[i].pages) : NULL;
+      struct sbk_prearm_status status = p ? (struct sbk_prearm_status){.region = p->region} :
+                                               (struct sbk_prearm_status){};
+      if (p && observed && source_pfns_equal(p->pfns, observed, regions[i].pages) &&
+          !ioctl(session_fd, SBK_IOC_PREARM_STATUS, &status) && status.valid) {
+        regions[i] = p->region;
+        prearm_reused++;
+      } else {
+        if (p) prearm_invalid++;
+        fallback_index[fallback_count] = i;
+        fallback[fallback_count++] = regions[i];
+      }
+    }
+  } else {
+    fallback = regions;
+    fallback_count = count;
+  }
+  if (fallback_count)
+    ret = sb_kernel_export_seized(ctl, session_fd, fallback, fallback_count,
+                                  opts.sb_kernel_export_workers, &export_peak);
+  if (!ret && fallback != regions)
+    for (unsigned i = 0; i < fallback_count; i++) regions[fallback_index[i]] = fallback[i];
   export_ns = kernel_now_ns() - stage;
   if (ret)
     goto out;
@@ -381,6 +466,8 @@ out:
   pr_info("SB_KERNEL final_export pid=%d workers=%u chunk_mb=%u effective_pages=%u peak=%u regions=%u result=%d\n",
           pid, opts.sb_kernel_export_workers, opts.sb_kernel_export_chunk_mb,
           export_span, export_peak, count, ret);
+  pr_info("SB_KERNEL final_prearm pid=%d enabled=%u reused=%u fallback=%u invalid=%u result=%d\n",
+          pid, opts.sb_kernel_ps_mr, prearm_reused, fallback_count, prearm_invalid, ret);
   pr_info("SB_KERNEL final_scan pid=%d pagemap_us=%llu planning_us=%llu result=%d\n",
           pid, (unsigned long long)(pagemap_ns / 1000),
           (unsigned long long)(plan_ns / 1000), ret);
@@ -390,6 +477,8 @@ out:
           (unsigned long long)(export_ns / 1000), (unsigned long long)(hot_ns / 1000),
           (unsigned long long)((kernel_now_ns() - begin) / 1000));
   free(hot_index);
+  if (fallback != regions) free(fallback);
+  free(fallback_index);
   free(sparse);
   sbk_pm_snapshot_free(pagemap);
   if (reservation_locked) pthread_mutex_unlock(&final_gate.lock);
@@ -450,8 +539,77 @@ static int send_ps_layout(int socket_fd) {
   if (!ret) pr_info("SB_KERNEL ps_layout role=source regions=%u pages=%llu pids=%u skipped_pids=%u skipped_ranges=%u elapsed_us=%llu\n",
       count, (unsigned long long)stats.pages, stats.pids, stats.skipped_pids, stats.skipped_ranges,
       (unsigned long long)((kernel_now_ns() - begin) / 1000));
+  if (!ret && opts.sb_kernel_ps_mr) {
+    source_layout = layout;
+    source_layout_count = count;
+    layout = NULL;
+  }
   free(layout);
   return ret;
+}
+/* PS pre-registration is a hint. Only ranges with no copied PS candidates may
+ * be pinned while the source runs: ib_umem_get(FOLL_WRITE) can itself mark
+ * soft-dirty and would otherwise invalidate the PS epoch. The final frozen
+ * plan plus exact PFNs and notifier status decide every actual reuse. */
+static void source_prearm_ps(void) {
+  if (!opts.sb_kernel_ps_mr || !source_layout_count || session_fd < 0) return;
+  source_prearm = calloc(source_layout_count, sizeof(*source_prearm));
+  if (!source_prearm) return;
+  unsigned eligible = 0, registered = 0, valid = 0, skipped_ps = 0;
+  uint64_t start = kernel_now_ns();
+  for (unsigned cursor = 0; cursor < source_layout_count;) {
+    struct sbk_prearm_batch request = {};
+    unsigned slots[SBK_MAX_BATCH], n = 0;
+    int pid = source_layout[cursor].source_pid;
+    request.pid = pid;
+    request.batch.workers = opts.sb_kernel_export_workers;
+    while (cursor < source_layout_count &&
+           source_layout[cursor].source_pid == (uint32_t)pid && n < SBK_MAX_BATCH) {
+      const struct sbk_catalog_layout *l = &source_layout[cursor++];
+      if (sb_kernel_ps_has_candidates(pid, l->address, l->pages)) {
+        skipped_ps++;
+        continue;
+      }
+      slots[n] = source_prearm_count;
+      source_prearm[source_prearm_count++] = (struct sbk_source_prearm){
+          .pid = pid, .region = {.address = l->address, .pages = l->pages}};
+      request.batch.regions[n] = source_prearm[slots[n]].region;
+      n++;
+    }
+    if (!n) continue;
+    eligible += n;
+    request.batch.count = n;
+    if (ioctl(session_fd, SBK_IOC_PREARM_BATCH, &request)) {
+      pr_warn("SB_KERNEL source_prearm pid=%d batch=%u ioctl=%d fallback=1\n",
+              pid, n, errno);
+      continue; /* The session still owns any successful partial MRs. */
+    }
+    registered += n;
+    for (unsigned i = 0; i < n; i++) {
+      struct sbk_source_prearm *p = &source_prearm[slots[i]];
+      p->region = request.batch.regions[i];
+      uint64_t *entries = malloc(p->region.pages * sizeof(*entries));
+      if (!entries) continue;
+      int ret = source_pagemap_read(pid, p->region.address, p->region.pages, entries);
+      if (!ret) {
+        for (uint64_t j = 0; j < p->region.pages; j++) {
+          if (!(entries[j] & SBK_PM_PRESENT) || !(entries[j] & SBK_PM_PFN_MASK)) {
+            ret = -EAGAIN;
+            break;
+          }
+          entries[j] &= SBK_PM_PFN_MASK;
+        }
+      }
+      struct sbk_prearm_status status = {.region = p->region};
+      if (!ret && (ioctl(session_fd, SBK_IOC_PREARM_STATUS, &status) || !status.valid))
+        ret = -EAGAIN;
+      if (ret) free(entries);
+      else { p->pfns = entries; valid++; }
+    }
+  }
+  pr_info("SB_KERNEL source_prearm_ps layout=%u eligible=%u registered=%u valid=%u skipped_ps=%u elapsed_us=%llu\n",
+          source_layout_count, eligible, registered, valid, skipped_ps,
+          (unsigned long long)((kernel_now_ns() - start) / 1000));
 }
 static int receive_ps_layout(int socket_fd) {
   if (!opts.sb_kernel_ps_arm) return 0;
@@ -521,6 +679,7 @@ int sb_kernel_send_ps(int socket_fd) {
   if (ret) return ret;
   if (sync_transfer(socket_fd, &ack, sizeof(ack), false) || memcmp(&h, &ack, sizeof(h)))
     return -EIO;
+  source_prearm_ps();
   pr_info("SB_KERNEL PS transferred regions=%u planned=%u skipped=%u pages=%llu source_resumed=1 first_send_us=%llu total_us=%llu streaming=1\n",
           sent, count, skipped, (unsigned long long)pages,
           (unsigned long long)(first ? (first - begin) / 1000 : 0),
@@ -906,6 +1065,13 @@ void sb_kernel_transfer_close(void) {
     free((void *)final_regions[i].dirty);
   }
   sb_kernel_ps_destroy();
+  for (unsigned i = 0; i < source_prearm_count; i++) free(source_prearm[i].pfns);
+  free(source_prearm);
+  source_prearm = NULL;
+  source_prearm_count = 0;
+  free(source_layout);
+  source_layout = NULL;
+  source_layout_count = 0;
   release_hot_snapshots();
   free(final_regions);
   final_regions = NULL;

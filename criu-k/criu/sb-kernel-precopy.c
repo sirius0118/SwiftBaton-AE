@@ -450,6 +450,18 @@ out:
 }
 int sb_kernel_ps_validate(int pid, const struct sbk_rdma_region *r, uint64_t **dirty, size_t *nr)
 { return sb_kernel_ps_validate_snapshot(pid,r,NULL,dirty,nr); }
+bool sb_kernel_ps_has_candidates(int pid, uint64_t address, uint64_t pages) {
+  uint64_t end = address + pages * PS_PAGE;
+  if (end < address) return true;
+  for (unsigned i = 0; i < ps_count; i++) {
+    const struct sbk_ps_region *p = &ps[i];
+    uint64_t p_end = p->record.address + p->record.remote.pages * PS_PAGE;
+    if (p->record.source_pid == (uint32_t)pid && p->count &&
+        p->record.address < end && p_end > address)
+      return true;
+  }
+  return false;
+}
 void sb_kernel_ps_destroy(void) {
   if (ps_work.pool || ps_work.groups || ps_work.completed)
     sb_kernel_ps_finish(true);

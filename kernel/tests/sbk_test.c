@@ -769,6 +769,7 @@ static int peer_test(int source_side)
 #include "token-pool-test.inc"
 #include "catalog-test.inc"
 #include "export-batch-test.inc"
+#include "prearm-test.inc"
 #include "session-dispatch-test.inc"
 #include "dma-mr-test.inc"
 #include "creator-drop-test.inc"
@@ -809,6 +810,7 @@ int main(int argc, char **argv)
     if (getenv("SBK_TEST_RDMA")) {
         if (use_prepared_arm) test_unbound_regions();
         test_rdma_export_batch();
+        test_source_prearm();
         test_rdma_catalog();
         test_session_dispatch();
         test_rdma_export_revoke();

@@ -42,6 +42,15 @@ struct sbk_export_batch {
     __u32 count, workers, completed, peak;
     struct sbk_rdma_region regions[SBK_MAX_BATCH];
 };
+struct sbk_prearm_batch {
+    __s32 pid;
+    __u32 reserved;
+    struct sbk_export_batch batch;
+};
+struct sbk_prearm_status {
+    struct sbk_rdma_region region;
+    __u32 valid, reserved;
+};
 struct sbk_region_bind {
     __s32 session_fd;
     __u32 reserved;
@@ -60,6 +69,7 @@ struct sbk_region_seal {
 #define SBK_FEATURE_DMA_MR (1U << 6)
 #define SBK_FEATURE_PREPARED_ARM (1U << 7)
 #define SBK_FEATURE_UNBOUND_REGION (1U << 8)
+#define SBK_FEATURE_REMOTE_PREARM (1U << 9)
 #define SBK_TOKEN_POOL_MAX_PAGES (1U << 22)
 struct sbk_token_pool_stats {
     __u64 available, prepared, claimed, fallback;
@@ -184,4 +194,8 @@ struct sbk_dma_map {
  * validates the final MR and invalidates the final dirty/PFN set. The view's
  * cancellation never cancels the shared catalog transport. */
 #define SBK_IOC_BIND_UNBOUND _IOW('B', 28, __s32)
+/* Source PS preregistration is advisory. Recheck status and exact PFNs after
+ * the source is frozen; mapping invalidation forces ordinary final export. */
+#define SBK_IOC_PREARM_BATCH _IOWR('B', 29, struct sbk_prearm_batch)
+#define SBK_IOC_PREARM_STATUS _IOWR('B', 30, struct sbk_prearm_status)
 #endif

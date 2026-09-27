@@ -22,5 +22,8 @@ int sb_kernel_ps_validate(int pid, const struct sbk_rdma_region *region,
                           uint64_t **dirty, size_t *nr);
 int sb_kernel_ps_validate_snapshot(int pid, const struct sbk_rdma_region *region,
                           const uint64_t *pagemap_entries, uint64_t **dirty, size_t *nr);
+/* Conservative: any PS region with copied pages overlapping this span keeps
+ * its soft-dirty epoch untouched by source-MR pre-registration. */
+bool sb_kernel_ps_has_candidates(int pid, uint64_t address, uint64_t pages);
 void sb_kernel_ps_destroy(void);
 #endif

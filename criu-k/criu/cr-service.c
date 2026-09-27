@@ -1025,6 +1025,8 @@ pr_warn("执行到这\n");
 				opts.sb_u_precopy = strstr(buf + 10, "yes") != NULL;
 			}else if (!strncmp(buf, "kernel-ps-arm=", 14)) {
 				opts.sb_kernel_ps_arm = !strncmp(buf + 14, "yes", 3);
+			}else if (!strncmp(buf, "kernel-ps-mr=", 13)) {
+				opts.sb_kernel_ps_mr = !strncmp(buf + 13, "yes", 3);
 			}else if (!strncmp(buf, "kernel-dma-mr=", 14)) {
 				opts.sb_kernel_dma_mr = !strncmp(buf + 14, "yes", 3);
 			}else if (!strncmp(buf, "kernel-catalog-workers=", 23)) {
@@ -1257,6 +1259,8 @@ static int restore_using_req(int sk, CriuOpts *req)
 				opts.sb_u_precopy = strstr(buf + 10, "yes") != NULL;
 			}else if (!strncmp(buf, "kernel-ps-arm=", 14)) {
 				opts.sb_kernel_ps_arm = !strncmp(buf + 14, "yes", 3);
+			}else if (!strncmp(buf, "kernel-ps-mr=", 13)) {
+				opts.sb_kernel_ps_mr = !strncmp(buf + 13, "yes", 3);
 			}else if (!strncmp(buf, "kernel-dma-mr=", 14)) {
 				opts.sb_kernel_dma_mr = !strncmp(buf + 14, "yes", 3);
 			}else if (!strncmp(buf, "kernel-catalog-workers=", 23)) {

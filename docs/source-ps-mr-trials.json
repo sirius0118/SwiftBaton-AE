@@ -1,0 +1,214 @@
+{
+  "stage": "source PS MR preregistration",
+  "branch": "codex/k-prearm-after-stage25",
+  "source_module_sha256": "259275dcdb92713c390565f118079759326e5439426a617a3d13e896bb6832b0",
+  "criu_sha256": "0db20156d2afc27cbc663a1df67bb6e0ef45309bc75af11578d6b62a7a6fac27",
+  "previous_full_client_gap_ms": [
+    169.560218,
+    172.831123
+  ],
+  "runs": [
+    {
+      "name": "smoke",
+      "run_dir": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/sb_ae_20260928_014816",
+      "driver_result": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/driver-K-20260928_014815/result.json",
+      "host_trial": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/prearm-trial-smoke-20260928_014808.json",
+      "client_gap_ms": 37.017592,
+      "source_ps_mr": {
+        "layout": 272,
+        "eligible": 176,
+        "registered": 176,
+        "valid": 176,
+        "skipped_ps": 96,
+        "elapsed_us": 3465
+      },
+      "source_final_prearm": {
+        "pid": 1018168,
+        "enabled": 1,
+        "reused": 176,
+        "fallback": 96,
+        "invalid": 0,
+        "result": 0
+      },
+      "source_final_prepare": {
+        "pid": 1018168,
+        "regions": 272,
+        "result": 0,
+        "lock_wait_us": 0,
+        "scan_us": 991,
+        "validation_us": 1036,
+        "export_us": 5142,
+        "hot_us": 289,
+        "total_us": 7747
+      },
+      "target_catalog": {
+        "regions": 272,
+        "workers": 16,
+        "validation_us": 177,
+        "prepare_us": 88,
+        "seal_us": 2524,
+        "result": 0
+      },
+      "ttr90_start_s": 0.0,
+      "ttr_valid": true,
+      "reconnect_calls": 0,
+      "kernel_stats": {
+        "regions": 272,
+        "pages": 42977,
+        "PF": 760,
+        "FT": 2064,
+        "BG": 14025,
+        "errors": 0,
+        "fault_ns": 9279506,
+        "fault_max_ns": 86081,
+        "PS": 34630,
+        "invalid": 8502,
+        "faults": 1937,
+        "hits": 1141,
+        "waits": 43,
+        "ahead": 41040,
+        "skipped": 6,
+        "batches": 1405,
+        "retired_unfetched": 0,
+        "valid_PS": 26128
+      },
+      "canary_byte_verified": true,
+      "validation_passed": true
+    },
+    {
+      "name": "redis-1",
+      "run_dir": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/sb_ae_20260928_015020",
+      "driver_result": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/driver-K-20260928_015019/result.json",
+      "host_trial": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/prearm-trial-redis-20260928_015011.json",
+      "client_gap_ms": 121.996431,
+      "source_ps_mr": {
+        "layout": 419,
+        "eligible": 319,
+        "registered": 319,
+        "valid": 298,
+        "skipped_ps": 100,
+        "elapsed_us": 391544
+      },
+      "source_final_prearm": {
+        "pid": 1019715,
+        "enabled": 1,
+        "reused": 298,
+        "fallback": 121,
+        "invalid": 0,
+        "result": 0
+      },
+      "source_final_prepare": {
+        "pid": 1019715,
+        "regions": 419,
+        "result": 0,
+        "lock_wait_us": 0,
+        "scan_us": 13787,
+        "validation_us": 5791,
+        "export_us": 26931,
+        "hot_us": 10192,
+        "total_us": 57046
+      },
+      "target_catalog": {
+        "regions": 419,
+        "workers": 16,
+        "validation_us": 3398,
+        "prepare_us": 317,
+        "seal_us": 13500,
+        "result": 0
+      },
+      "ttr90_start_s": 2.0899999141693115,
+      "ttr_valid": true,
+      "reconnect_calls": 32,
+      "kernel_stats": {
+        "regions": 419,
+        "pages": 1562765,
+        "PF": 23209,
+        "FT": 100434,
+        "BG": 1096383,
+        "errors": 0,
+        "fault_ns": 413470287,
+        "fault_max_ns": 708284,
+        "PS": 517548,
+        "invalid": 174809,
+        "faults": 59130,
+        "hits": 16614,
+        "waits": 17525,
+        "ahead": 1505429,
+        "skipped": 2907,
+        "batches": 47580,
+        "retired_unfetched": 0,
+        "valid_PS": 342739
+      },
+      "canary_byte_verified": true,
+      "validation_passed": true
+    },
+    {
+      "name": "redis-2",
+      "run_dir": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/sb_ae_20260928_015335",
+      "driver_result": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/driver-K-20260928_015334/result.json",
+      "host_trial": "/home/k8s/SwiftBaton-AE-downtime-20260927-work/prearm-trial-redis-20260928_015326.json",
+      "client_gap_ms": 118.168149,
+      "source_ps_mr": {
+        "layout": 413,
+        "eligible": 318,
+        "registered": 318,
+        "valid": 242,
+        "skipped_ps": 95,
+        "elapsed_us": 426782
+      },
+      "source_final_prearm": {
+        "pid": 1021665,
+        "enabled": 1,
+        "reused": 242,
+        "fallback": 171,
+        "invalid": 0,
+        "result": 0
+      },
+      "source_final_prepare": {
+        "pid": 1021665,
+        "regions": 413,
+        "result": 0,
+        "lock_wait_us": 0,
+        "scan_us": 12033,
+        "validation_us": 4696,
+        "export_us": 27817,
+        "hot_us": 10690,
+        "total_us": 55602
+      },
+      "target_catalog": {
+        "regions": 413,
+        "workers": 16,
+        "validation_us": 3311,
+        "prepare_us": 192,
+        "seal_us": 12245,
+        "result": 0
+      },
+      "ttr90_start_s": 1.7699999809265137,
+      "ttr_valid": true,
+      "reconnect_calls": 32,
+      "kernel_stats": {
+        "regions": 413,
+        "pages": 1562778,
+        "PF": 22354,
+        "FT": 95868,
+        "BG": 1044396,
+        "errors": 0,
+        "fault_ns": 400261586,
+        "fault_max_ns": 174774,
+        "PS": 517706,
+        "invalid": 117546,
+        "faults": 58551,
+        "hits": 17233,
+        "waits": 17138,
+        "ahead": 1506074,
+        "skipped": 2648,
+        "batches": 41743,
+        "retired_unfetched": 0,
+        "valid_PS": 400160
+      },
+      "canary_byte_verified": true,
+      "validation_passed": true
+    }
+  ],
+  "note": "Client gap is successful-return intersection; stage25 and current workload share profile but runs vary. Per-record values checked for presence/length; canary checked bytewise."
+}

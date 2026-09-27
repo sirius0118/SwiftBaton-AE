@@ -21,6 +21,8 @@
 #include <linux/delay.h>
 #include <linux/bitmap.h>
 #include <linux/overflow.h>
+#include <linux/capability.h>
+#include <linux/pid.h>
 #ifdef CONFIG_SWIFTBATON_PTE
 #include <linux/swiftbaton_pte.h>
 #endif
@@ -1407,6 +1409,7 @@ struct sbk_export_job {
 	struct sbk_rdma *rdma;
 	struct mm_struct *mm;
 	struct sbk_export_batch batch;
+	bool prearm;
 	unsigned long memlock_limit;
 	atomic_t next, error, completed, active, peak;
 };
@@ -1426,7 +1429,9 @@ static void sbk_export_run(struct sbk_export_job *job)
 		peak = atomic_read(&job->peak);
 		while (active > peak && !atomic_try_cmpxchg(&job->peak, &peak, active))
 			;
-		ret = sbk_rdma_export_region(job->rdma, &job->batch.regions[index]);
+		ret = job->prearm ?
+			sbk_rdma_prearm_region(job->rdma, &job->batch.regions[index], job->mm) :
+			sbk_rdma_export_region(job->rdma, &job->batch.regions[index]);
 		atomic_dec(&job->active);
 		if (ret)
 			atomic_cmpxchg(&job->error, 0, ret);
@@ -1446,20 +1451,35 @@ static int sbk_export_thread(void *arg)
 	complete(&worker->done);
 	return 0;
 }
-static int sbk_export_batch(struct sbk_context *c, void __user *user)
+static int sbk_export_batch(struct sbk_context *c, void __user *user, bool prearm)
 {
 	struct sbk_export_job *job;
 	struct sbk_export_worker *workers = NULL;
+	struct pid *source_pid = NULL;
+	struct task_struct *source_task = NULL;
+	int pid = 0;
+	u32 reserved = 0;
 	unsigned int i, launched = 0, nr;
 	int ret = -EINVAL;
 	job = kzalloc(sizeof(*job), GFP_KERNEL);
 	if (!job)
 		return -ENOMEM;
+	if (prearm) {
+		struct sbk_prearm_batch __user *request = user;
+		if (!capable(CAP_SYS_ADMIN)) { ret = -EPERM; goto free_job; }
+		if (get_user(pid, &request->pid) ||
+		    get_user(reserved, &request->reserved)) {
+			ret = -EFAULT;
+			goto free_job;
+		}
+		if (pid <= 0 || reserved) goto free_job;
+		user = &request->batch;
+	}
 	if (copy_from_user(&job->batch, user, sizeof(job->batch))) {
 		ret = -EFAULT;
 		goto free_job;
 	}
-	if (!current->mm || !job->batch.count || job->batch.count > SBK_MAX_BATCH ||
+	if ((!prearm && !current->mm) || !job->batch.count || job->batch.count > SBK_MAX_BATCH ||
 	    !job->batch.workers || job->batch.workers > SBK_MAX_WORKERS ||
 	    job->batch.completed || job->batch.peak)
 		goto free_job;
@@ -1484,10 +1504,23 @@ static int sbk_export_batch(struct sbk_context *c, void __user *user)
 	mutex_unlock(&c->control);
 	/* mm_users, not just mm_count: prevents address-space teardown while any
 	 * helper runs, even if another thread kills the owner during this ioctl. */
-	job->mm = current->mm;
-	mmget(job->mm);
+	job->prearm = prearm;
+	if (prearm) {
+		source_pid = find_get_pid(pid);
+		source_task = source_pid ? get_pid_task(source_pid, PIDTYPE_PID) : NULL;
+		if (source_pid) put_pid(source_pid);
+		job->mm = source_task ? get_task_mm(source_task) : NULL;
+		if (source_task) put_task_struct(source_task);
+		if (!job->mm) {
+			ret = -ESRCH;
+			goto put_rdma;
+		}
+	} else {
+		job->mm = current->mm;
+		mmget(job->mm);
+	}
 	job->memlock_limit = rlimit(RLIMIT_MEMLOCK);
-	if (nr == 1) {
+	if (nr == 1 && !prearm) {
 		sbk_export_run(job);
 	} else {
 		for (i = 0; i < nr && !atomic_read(&job->error); i++) {
@@ -1527,6 +1560,7 @@ static int sbk_export_batch(struct sbk_context *c, void __user *user)
 	 * As in EXPORT_REGION, close/revoke reclaims all partial registrations. */
 	if (copy_to_user(user, &job->batch, sizeof(job->batch)))
 		ret = -EFAULT;
+put_rdma:
 	sbk_rdma_put(job->rdma);
 free_workers:
 	kfree(workers);
@@ -1547,10 +1581,13 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	struct sbk_page_info p;
 	struct sbk_rdma_setup setup;
 	struct sbk_rdma_endpoint peer;
+	struct sbk_prearm_status prearm_status;
 	struct sbk_entry *e;
 	int ret = 0, i;
 	if (cmd == SBK_IOC_EXPORT_BATCH)
-		return sbk_export_batch(c, user);
+		return sbk_export_batch(c, user, false);
+	if (cmd == SBK_IOC_PREARM_BATCH)
+		return sbk_export_batch(c, user, true);
 	if (cmd == SBK_IOC_EXPORT_REGION)
 		return sbk_export_region(c, user);
 	if (cmd == SBK_IOC_BIND_REGION)
@@ -1564,7 +1601,7 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	mutex_lock(&c->control);
 	switch (cmd) {
 	case SBK_IOC_CAPABILITIES:
-		caps.features |= SBK_FEATURE_PARALLEL_PS | SBK_FEATURE_PS_SLICE | SBK_FEATURE_PARALLEL_EXPORT | SBK_FEATURE_DMA_MR;
+		caps.features |= SBK_FEATURE_PARALLEL_PS | SBK_FEATURE_PS_SLICE | SBK_FEATURE_PARALLEL_EXPORT | SBK_FEATURE_DMA_MR | SBK_FEATURE_REMOTE_PREARM;
 		if (sbk_session_dispatch_enabled())
 			caps.features |= SBK_FEATURE_SESSION_DISPATCH;
 #ifdef CONFIG_SWIFTBATON_PTE
@@ -1574,6 +1611,15 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		caps.features |= SBK_FEATURE_PREPARED_ARM | SBK_FEATURE_UNBOUND_REGION;
 #endif
 		ret = copy_to_user(user, &caps, sizeof(caps)) ? -EFAULT : 0;
+		break;
+	case SBK_IOC_PREARM_STATUS:
+		if (copy_from_user(&prearm_status, user, sizeof(prearm_status))) {
+			ret = -EFAULT;
+			break;
+		}
+		ret = sbk_rdma_prearm_status(c->rdma, &prearm_status);
+		if (!ret && copy_to_user(user, &prearm_status, sizeof(prearm_status)))
+			ret = -EFAULT;
 		break;
 	case SBK_IOC_WATCH_DRAIN:
 #ifdef CONFIG_SWIFTBATON_PTE

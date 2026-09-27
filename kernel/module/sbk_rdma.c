@@ -12,6 +12,7 @@
 #include <linux/cred.h>
 #include <linux/rwsem.h>
 #include <linux/uaccess.h>
+#include <linux/mmu_notifier.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_cache.h>
 #include <rdma/ib_umem.h>
@@ -41,7 +42,32 @@ struct sbk_exported_region {
 	struct sbk_remote_dma_map *dma;
 	struct list_head link;
 	struct ib_mr *mr;
+	struct sbk_rdma_region identity;
+	struct mmu_interval_notifier prearm_interval;
+	atomic_t prearm_invalid;
+	bool prearm_live;
 };
+static bool sbk_prearm_invalidate(struct mmu_interval_notifier *interval,
+				 const struct mmu_notifier_range *range,
+				 unsigned long cur_seq)
+{
+	struct sbk_exported_region *e = container_of(interval, struct sbk_exported_region,
+							prearm_interval);
+	(void)range;
+	(void)cur_seq;
+	atomic_set(&e->prearm_invalid, 1);
+	return true;
+}
+static const struct mmu_interval_notifier_ops sbk_prearm_ops = {
+	.invalidate = sbk_prearm_invalidate,
+};
+static void sbk_prearm_remove(struct sbk_exported_region *e)
+{
+	if (e->prearm_live) {
+		mmu_interval_notifier_remove(&e->prearm_interval);
+		e->prearm_live = false;
+	}
+}
 struct sbk_rdma_slot {
 	struct sbk_rdma *owner;
 	struct ib_cq *cq;
@@ -173,12 +199,13 @@ int sbk_rdma_revoke_source(struct sbk_rdma *r)
 	}
 	list_for_each_entry(region, &r->exports, link) {
 		sbk_export_dma_release(region);
-		if (!region->mr)
-			continue;
-		ret = ib_dereg_mr(region->mr);
-		if (ret)
-			goto out;
-		region->mr = NULL;
+		if (region->mr) {
+			ret = ib_dereg_mr(region->mr);
+			if (ret)
+				goto out;
+			region->mr = NULL;
+		}
+		sbk_prearm_remove(region);
 	}
 out:
 	up_write(&r->exports_sem);
@@ -228,6 +255,7 @@ static void sbk_rdma_destroy(struct kref *refs)
 				goto quarantine;
 		}
 		sbk_export_dma_release(region);
+		sbk_prearm_remove(region);
 		list_del(&region->link);
 		kfree(region);
 	}
@@ -396,7 +424,8 @@ out:
 	up_read(&r->exports_sem);
 	return ret;
 }
-int sbk_rdma_export_region(struct sbk_rdma *r, struct sbk_rdma_region *desc)
+static int sbk_rdma_export_common(struct sbk_rdma *r,
+		struct sbk_rdma_region *desc, struct mm_struct *prearm_mm)
 {
 	struct sbk_exported_region *region;
 	const struct cred *saved;
@@ -424,6 +453,16 @@ int sbk_rdma_export_region(struct sbk_rdma *r, struct sbk_rdma_region *desc)
 	r->exporting++;
 	r->export_peak = max(r->export_peak, r->exporting);
 	mutex_unlock(&r->exports_lock);
+	if (prearm_mm) {
+		/* The notifier must be active before GUP. A concurrent unmap/COW
+		 * invalidates the hint, so final export falls back to a fresh MR. */
+		atomic_set(&region->prearm_invalid, 0);
+		ret = mmu_interval_notifier_insert(&region->prearm_interval, prearm_mm,
+				desc->address, desc->pages << PAGE_SHIFT, &sbk_prearm_ops);
+		if (ret)
+			goto finish;
+		region->prearm_live = true;
+	}
 	/* Only delegate the controller's mlock authority, preserving the calling
 	 * process's mm and pinned_vm accounting. No persistent credential change. */
 	saved = override_creds(r->registration_cred);
@@ -434,9 +473,11 @@ int sbk_rdma_export_region(struct sbk_rdma *r, struct sbk_rdma_region *desc)
 		if (IS_ERR(region->mr)) { ret = PTR_ERR(region->mr); region->mr = NULL; }
 	}
 	revert_creds(saved);
+finish:
 	mutex_lock(&r->exports_lock);
 	r->exporting--;
 	if (ret) {
+		sbk_prearm_remove(region);
 		sbk_export_dma_release(region);
 		kfree(region);
 	} else {
@@ -450,11 +491,54 @@ int sbk_rdma_export_region(struct sbk_rdma *r, struct sbk_rdma_region *desc)
 		else {
 			desc->rkey = r->dma_mode ? r->dma_mr->rkey : region->mr->rkey;
 			desc->id = r->next_region;
+			region->identity = *desc;
 			if (region->dma) region->dma->region = *desc;
 		}
 	}
 	mutex_unlock(&r->exports_lock);
 unlock:
+	up_read(&r->exports_sem);
+	return ret;
+}
+int sbk_rdma_export_region(struct sbk_rdma *r, struct sbk_rdma_region *desc)
+{
+	return sbk_rdma_export_common(r, desc, NULL);
+}
+int sbk_rdma_prearm_region(struct sbk_rdma *r, struct sbk_rdma_region *desc,
+			 struct mm_struct *mm)
+{
+	if (!r || !mm || current->mm != mm || r->dma_mode)
+		return -EINVAL;
+	return sbk_rdma_export_common(r, desc, mm);
+}
+int sbk_rdma_prearm_status(struct sbk_rdma *r, struct sbk_prearm_status *status)
+{
+	struct sbk_exported_region *e;
+	int ret = -ENOENT;
+	if (!r || r->cfg.role != SBK_RDMA_SOURCE || !status ||
+	    !status->region.id || status->reserved)
+		return -EINVAL;
+	status->valid = 0;
+	down_read(&r->exports_sem);
+	if (atomic_read(&r->stopped)) {
+		ret = -ECANCELED;
+		goto out;
+	}
+	mutex_lock(&r->exports_lock);
+	list_for_each_entry(e, &r->exports, link) {
+		if (e->identity.id != status->region.id)
+			continue;
+		if (memcmp(&e->identity, &status->region, sizeof(e->identity)) ||
+		    !e->prearm_live) {
+			ret = -EINVAL;
+			break;
+		}
+		status->valid = !atomic_read(&e->prearm_invalid);
+		ret = 0;
+		break;
+	}
+	mutex_unlock(&r->exports_lock);
+out:
 	up_read(&r->exports_sem);
 	return ret;
 }

@@ -41,6 +41,9 @@ static inline int sbk_rdma_read(struct sbk_rdma *r, unsigned int lane, struct pa
 void sbk_rdma_cancel(struct sbk_rdma *r);
 int sbk_rdma_revoke_source(struct sbk_rdma *r);
 int sbk_rdma_export_region(struct sbk_rdma *r, struct sbk_rdma_region *region);
+int sbk_rdma_prearm_region(struct sbk_rdma *r, struct sbk_rdma_region *region,
+			  struct mm_struct *mm);
+int sbk_rdma_prearm_status(struct sbk_rdma *r, struct sbk_prearm_status *status);
 int sbk_rdma_get_region(struct sbk_rdma *r, const struct sbk_rdma_region *region);
 int sbk_rdma_dma_enable(struct sbk_rdma *r);
 int sbk_rdma_dma_map(struct sbk_rdma *r, const struct sbk_dma_map *map, bool importing);

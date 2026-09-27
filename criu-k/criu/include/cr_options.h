@@ -183,6 +183,7 @@ struct cr_options {
 	unsigned sb_kernel_catalog_workers;
 	bool sb_kernel_dma_mr;
 	bool sb_kernel_ps_arm;
+	bool sb_kernel_ps_mr;
 	unsigned sb_precopy_limit_mb;
 	int sync_port;
 #endif

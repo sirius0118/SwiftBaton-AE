@@ -18,6 +18,7 @@ SESSION_DISPATCH = 16
 DMA_MR = 64
 PREPARED_ARM = 128
 UNBOUND_REGION = 256
+REMOTE_PREARM = 512
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class KernelSettings:
     catalog_workers: int = 1
     dma_mr: bool = False
     ps_arm: bool = False
+    ps_mr: bool = False
 
     def values(self):
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,31}', self.device):
@@ -68,6 +70,10 @@ class KernelSettings:
                   'kernel-export-chunk-mb': self.export_chunk_mb}
         if self.ps_arm:
             values['kernel-ps-arm'] = True
+        if self.ps_mr:
+            if not self.ps_arm or self.dma_mr or self.dense:
+                raise ValueError('Source PS MR requires PS ARM, sparse planning and ordinary MR')
+            values['kernel-ps-mr'] = True
         if self.dma_mr:
             values['kernel-dma-mr'] = True
         for option in ('no_pretransfer', 'no_prefetch', 'no_hot_first', 'dense'):
@@ -145,7 +151,7 @@ def host_probe(binary, device, gid):
     return result
 
 
-def validate_preflight(hosts, export_workers=1, dma_mr=False, ps_arm=False):
+def validate_preflight(hosts, export_workers=1, dma_mr=False, ps_arm=False, ps_mr=False):
     errors = []
     reference = hosts.get('knode2', {}).get('binary_sha256')
     for host in ('knode2', 'knode3'):
@@ -167,6 +173,8 @@ def validate_preflight(hosts, export_workers=1, dma_mr=False, ps_arm=False):
             errors.append(host + ': DMA MR transport unavailable')
         if host == 'knode2' and export_workers > 1 and not features & PARALLEL_EXPORT:
             errors.append(host + ': parallel final MR export unavailable')
+        if host == 'knode2' and ps_mr and not features & REMOTE_PREARM:
+            errors.append(host + ': source PS MR pre-registration unavailable')
         if host == 'knode3' and ps_arm and features & (PREPARED_ARM | UNBOUND_REGION) != PREPARED_ARM | UNBOUND_REGION:
             errors.append(host + ': PS ARM preparation unavailable')
         if host == 'knode3' and not features & ANONYMOUS_PTE:
@@ -359,3 +367,32 @@ def validate_ps_arm_config(dump_log, pageclient_log, enabled):
         (not v['reused'] and v['reused_pages']) or (not v['discarded'] and v['discarded_pages'])):
         raise ValueError('Inconsistent PS ARM final resource accounting')
     return dict(enabled=True, **values)
+
+
+def validate_source_prearm(dump_log, enabled):
+    """Reject a Docker service config that silently drops the source option."""
+    modes = re.findall(r'SB_KERNEL ps_mr_mode role=source enabled=(\d+)', dump_log)
+    if modes != [str(int(enabled))]:
+        raise ValueError('Executing source PS MR mode differs from requested mode')
+    summaries = re.findall(r'SB_KERNEL source_prearm_ps layout=(\d+) eligible=(\d+) '
+        r'registered=(\d+) valid=(\d+) skipped_ps=(\d+) elapsed_us=(\d+)', dump_log)
+    rows = re.findall(r'SB_KERNEL final_prearm pid=(\d+) enabled=(\d+) reused=(\d+) '
+        r'fallback=(\d+) invalid=(\d+) result=(-?\d+)', dump_log)
+    if not rows or any(int(row[1]) != int(enabled) or int(row[5]) for row in rows):
+        raise ValueError('Missing or inconsistent final source PS MR accounting')
+    if not enabled:
+        if summaries or any(int(row[2]) for row in rows):
+            raise ValueError('Source PS MR ran when disabled')
+        return {'enabled': False}
+    if len(summaries) != 1:
+        raise ValueError('Missing or duplicate source PS MR registration summary')
+    layout, eligible, registered, valid, skipped, elapsed = map(int, summaries[0])
+    if not (0 <= valid <= registered <= eligible <= layout and skipped <= layout and elapsed > 0):
+        raise ValueError('Invalid source PS MR registration accounting')
+    reused = sum(int(row[2]) for row in rows)
+    fallback = sum(int(row[3]) for row in rows)
+    if reused > valid or not reused + fallback:
+        raise ValueError('Invalid final source PS MR reuse accounting')
+    return dict(enabled=True, layout=layout, eligible=eligible, registered=registered,
+                valid=valid, skipped_ps=skipped, elapsed_us=elapsed,
+                reused=reused, fallback=fallback)
