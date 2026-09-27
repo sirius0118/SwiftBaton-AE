@@ -41,6 +41,7 @@
 #ifdef RDMA_CODESIGN
 #include "common/shregion.h"
 #include "RDMA.h"
+#include "common/sb-stage-align.h"
 
 extern int item_num;
 extern uint64_t pidset[MAX_PROCESS];
@@ -1327,6 +1328,12 @@ int prepare_mm_pid(struct pstree_item *i)
 		list_add_tail(&vma->list, &ri->vmas.h);
 
 		if (vma_area_is_private(vma, kdat.task_size)) {
+			if (opts.sb_parent_stage) {
+				if (vma_area_len(vma) > ULONG_MAX - SB_STAGE_ALIGNMENT - 2 * PAGE_SIZE ||
+				    ri->vmas.rst_priv_size > ULONG_MAX - SB_STAGE_ALIGNMENT - vma_area_len(vma) - 2 * PAGE_SIZE)
+					return -1;
+				ri->vmas.rst_priv_size += SB_STAGE_ALIGNMENT;
+			}
 			ri->vmas.rst_priv_size += vma_area_len(vma);
 			if (vma_has_guard_gap_hidden(vma))
 				ri->vmas.rst_priv_size += PAGE_SIZE;
@@ -1480,6 +1487,11 @@ static int premap_private_vma(struct pstree_item *t, struct vma_area *vma, void 
 	 */
 	if (vma_area_is(vma, VMA_AREA_SHSTK))
 		size += PAGE_SIZE;
+
+	/* Space for each alignment gap was reserved with rst_priv_size. Keep
+	 * the temporary and final addresses congruent at PTE-table boundaries. */
+	if (opts.sb_parent_stage)
+		*tgt_addr += sb_stage_alignment_padding((uintptr_t)*tgt_addr, vma->e->start);
 
 	if (!vma_inherited(vma)) {
 		int flag = 0;

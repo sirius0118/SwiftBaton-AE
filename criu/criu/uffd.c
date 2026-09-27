@@ -2359,6 +2359,7 @@ int cr_lazy_pages(bool daemon)
 	if (!pre_mr || sync_transfer(sync_pretransfer, pre_mr,
 				    sizeof(struct data_buffer) * item_num, false))
 		return -1;
+	sb_parallel_prepare_traces(0, item_num);
 	pre_mr->length2 = (uint64_t)ONE_AREA_SIZE * item_num;
 	item_num = 0;
 

@@ -1,3 +1,4 @@
+#include "sb-cutover.h"
 #include "sb-proc.h"
 #include "sb-transfer.h"
 #include "sb-images.h"
@@ -3112,6 +3113,7 @@ sbk_ps_memory_ready:
 	}
 	if (sb_images_publish(sync_pretransfer, DUMP_NAMESPACE_DONE))
 		goto err;
+	sb_parallel_prepare_traces(1, 0);
 	sb_trace("dump.ps_namespaces_ready");
 	update_state(sync_fd, DUMP_NAMESPACE_DONE);
 	if (opts.sb_parent_stage) {
@@ -3132,6 +3134,16 @@ sbk_ps_memory_ready:
 	}
 	// DOCKERTODO: 接受restrer中的信息，知道要开始停机收取每个进程了
 	wait_state(sync_fd, START_PROCESS_DUMP);
+	if (opts.sb_kernel_transfer && opts.sb_vma_cache) {
+		sb_trace("vma.cache_ps_begin");
+		sb_vma_cache_refresh();
+		sb_trace("vma.cache_ps_done");
+	}
+	if (opts.sb_buffered_cutover) {
+		sb_trace("dump.gate_request_begin");
+		if (!opts.sb_image_rdma || sb_cutover_wait_closed(get_service_fd(IMG_FD_OFF))) goto err;
+		sb_trace("dump.gate_request_done");
+	}
 	sb_trace("dump.is_enter");
 
 	// ---- 容器正式开始停机 ----

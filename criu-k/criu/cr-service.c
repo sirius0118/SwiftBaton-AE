@@ -998,9 +998,26 @@ pr_warn("执行到这\n");
 			}else if (!strncmp(buf, "batch-pages=", 12)) {
 				opts.sb_batch_pages = atoi(buf + 12);
 				if (!opts.sb_batch_pages || opts.sb_batch_pages > 256) goto exit;
+			}else if (!strncmp(buf, "buffered-cutover=", 17)) {
+				opts.sb_buffered_cutover = strstr(buf + 17, "yes") != NULL;
+			}else if (!strncmp(buf, "stage-max-mb=", 13)) {
+				opts.sb_stage_max_mb = strtoul(buf + 13, NULL, 10);
+				if (opts.sb_stage_max_mb > 65536) goto exit;
 			}else if (!strncmp(buf, "parent-stage=", 13)) {
 				opts.sb_parent_stage = strstr(buf + 13, "yes") != NULL;
-			}else if (!strncmp(buf, "vma-cache=", 10)) {
+			}else if (!strncmp(buf, "network-lock=", 13)) {
+                char *method = buf + 13;
+                method[strcspn(method, "\r\n")] = '\0';
+                if (!strcmp(method, "iptables"))
+                    opts.network_lock_method = NETWORK_LOCK_IPTABLES;
+                else if (!strcmp(method, "nftables"))
+                    opts.network_lock_method = NETWORK_LOCK_NFTABLES;
+                else {
+                    pr_err("AE network-lock requires iptables or nftables; external skip fencing is not configured\n");
+                    goto exit;
+                }
+                pr_info("SB_NETWORK method=%s\n", method);
+            }else if (!strncmp(buf, "vma-cache=", 10)) {
 				opts.sb_vma_cache = !strncmp(buf + 10, "yes", 3);
 			}else if (!strncmp(buf, "fd-placeholder=", 15)) {
 				opts.sb_fd_placeholder = strstr(buf + 15, "yes") != NULL;
@@ -1206,9 +1223,26 @@ static int restore_using_req(int sk, CriuOpts *req)
 			}else if (!strncmp(buf, "batch-pages=", 12)) {
 				opts.sb_batch_pages = atoi(buf + 12);
 				if (!opts.sb_batch_pages || opts.sb_batch_pages > 256) goto exit;
+			}else if (!strncmp(buf, "buffered-cutover=", 17)) {
+				opts.sb_buffered_cutover = strstr(buf + 17, "yes") != NULL;
+			}else if (!strncmp(buf, "stage-max-mb=", 13)) {
+				opts.sb_stage_max_mb = strtoul(buf + 13, NULL, 10);
+				if (opts.sb_stage_max_mb > 65536) goto exit;
 			}else if (!strncmp(buf, "parent-stage=", 13)) {
 				opts.sb_parent_stage = strstr(buf + 13, "yes") != NULL;
-			}else if (!strncmp(buf, "vma-cache=", 10)) {
+			}else if (!strncmp(buf, "network-lock=", 13)) {
+                char *method = buf + 13;
+                method[strcspn(method, "\r\n")] = '\0';
+                if (!strcmp(method, "iptables"))
+                    opts.network_lock_method = NETWORK_LOCK_IPTABLES;
+                else if (!strcmp(method, "nftables"))
+                    opts.network_lock_method = NETWORK_LOCK_NFTABLES;
+                else {
+                    pr_err("AE network-lock requires iptables or nftables; external skip fencing is not configured\n");
+                    goto exit;
+                }
+                pr_info("SB_NETWORK method=%s\n", method);
+            }else if (!strncmp(buf, "vma-cache=", 10)) {
 				opts.sb_vma_cache = !strncmp(buf + 10, "yes", 3);
 			}else if (!strncmp(buf, "fd-placeholder=", 15)) {
 				opts.sb_fd_placeholder = strstr(buf + 15, "yes") != NULL;

@@ -37,9 +37,12 @@ parser.add_argument('--numa-node', type=int, choices=[0, 1], help='Bind both con
 parser.add_argument('--runtime-snapshot', action='store_true', help='Read owned container CPU/NUMA/page layout before workload and after it; no timed-window sampling')
 parser.add_argument('--poststeady-seconds', type=int, default=0, help='Optional fresh-client target throughput run after the migration workload, 10..120 seconds')
 parser.add_argument('--port', type=int, default=6390)
+parser.add_argument('--network-lock', choices=['iptables','nftables'], default='iptables', help='CRIU network isolation backend; nftables avoids external helper fork/exec')
 parser.add_argument('--image-rdma', action='store_true', help='Keep CRIU images in tmpfs and transfer over RDMA')
+parser.add_argument('--buffered-cutover', action='store_true', help='Hold experiment client packets before conntrack while migrating; release after all tasks resume')
 parser.add_argument('--fast-cutover', action='store_true', help='Arm a direct control connection before checkpoint')
 parser.add_argument('--u-precopy', action='store_true', help='Use real PS snapshots with final soft-dirty/PFN validation')
+parser.add_argument('--stage-max-mb', type=int, default=0, help='Limit inherited anonymous PS stage only; zero is unlimited, remaining valid PS pages install during AS')
 parser.add_argument('--parent-stage', action='store_true', help='Prepare anonymous pages in restore parent during PS, inherit and remap')
 parser.add_argument('--parallel-transfer', action='store_true', help='Use independent demand, adjacent prefetch and background RDMA lanes')
 parser.add_argument('--install-workers', type=int, default=4)
@@ -94,7 +97,7 @@ if opts.kernel_transfer:
         parser.error('K requires --image-rdma and --u-precopy')
     if opts.batch_pages != 32:
         parser.error('Current K uses 32-page RDMA batches; --batch-pages must be 32')
-    unsupported = {'parent-stage','parallel-transfer','vma-cache','defer-fault-credits',
+    unsupported = {'parent-stage','parallel-transfer','defer-fault-credits',
         'serial-ps-prepare','dynamic-memory','page-trace','page-probe','kernel-trace',
         'fault-read-batch','fault-install-workers','copy-workers','serial-precopy-ack',
         'sync-fault-transport','rdma-mtu','fault-trace','spin-lifecycle','reader-preferred-lock',
@@ -132,8 +135,8 @@ if opts.dynamic_memory and not opts.memory_children:
     parser.error('--dynamic-memory requires --memory-children')
 if opts.cow_descendants and not opts.memory_children:
     parser.error('--cow-descendants requires --memory-children')
-if opts.vma_cache and not opts.parent_stage:
-    parser.error('--vma-cache requires --parent-stage')
+if opts.vma_cache and not (opts.parent_stage or opts.kernel_transfer):
+    parser.error('--vma-cache requires --parent-stage or --kernel-transfer')
 if opts.fd_placeholder and not opts.u_precopy:
     parser.error('--fd-placeholder requires --u-precopy')
 if opts.fd_adversarial and not opts.fd_groups:
@@ -167,6 +170,8 @@ if not 1 <= opts.copy_workers <= 32 or not 1 <= opts.install_workers <= 32 or no
     parser.error('copy-workers and install-workers must be 1..32 and batch-pages must be 1..256')
 if opts.parent_stage and not opts.u_precopy:
     parser.error('--parent-stage requires --u-precopy')
+if opts.buffered_cutover and not (opts.fast_cutover and opts.image_rdma):
+    parser.error('--buffered-cutover requires --fast-cutover --image-rdma')
 if (opts.u_precopy or opts.fast_cutover) and not opts.image_rdma:
     parser.error('--u-precopy and --fast-cutover require --image-rdma')
 if not 1 <= opts.precopy_workers <= 32 or not 1 <= opts.precopy_limit_mb <= 65536:
@@ -198,8 +203,13 @@ for option in ['no_prefetch', 'no_hot_first', 'no_pretransfer', 'serial_precopy_
 if kernel_settings:
     # Use exactly the same K options for checkpoint, restore and page-client.
     precopy_config = kernel_settings.config() + f'precopy-limit-mb={opts.precopy_limit_mb}\n'
+    if opts.vma_cache:precopy_config += 'vma-cache=yes\n'
     if opts.fd_placeholder:
         precopy_config += 'fd-placeholder=yes\n'
+if opts.stage_max_mb < 0 or opts.stage_max_mb > 65536 or (opts.stage_max_mb and not opts.parent_stage):
+    parser.error('--stage-max-mb requires --parent-stage and 0..65536 MiB')
+if opts.stage_max_mb:
+    precopy_config += f'stage-max-mb={opts.stage_max_mb}\n'
 NAME = 'sb_ae_' + time.strftime('%Y%m%d_%H%M%S')
 TRACE_TAG = 'sbpf' + NAME[-6:]
 OBSERVER = BASE / 'ae-work/kernel-observation'
@@ -397,8 +407,14 @@ def capture_logs():
                 (OUT / name).write_bytes(data)
             except Exception as e:
                 event('collect_log_error', name=name, error=str(e))
+    if opts.buffered_cutover:
+        for name in ['cutover-target.json', 'cutover_resume.log', 'cutover-nat-target.json']:
+            try:
+                (OUT / name).write_text(cmd('knode3', ['sudo', '-n', 'cat', str(OUT / name)]) + '\n')
+            except Exception as e:
+                event('collect_log_error', name=name, error=str(e))
     if opts.fast_cutover:
-        for name in ['cutover-client.json', 'cutover_listener.log']:
+        for name in ['cutover-client.json', 'cutover_listener.log', 'cutover-nat-client.json'] if opts.buffered_cutover else ['cutover-client.json', 'cutover_listener.log']:
             try:
                 (OUT / name).write_text(cmd('knode1', ['sudo', '-n', 'cat', str(OUT / name)]) + '\n')
             except Exception as e:
@@ -525,7 +541,7 @@ try:
     STATE['source_key_count'] = count
     save()
     runtime_snapshot('knode2', 'source-before-workload')
-    job('run', base_cmd + ['-t'])
+    job('run', base_cmd + ['-t', '-p', 'swiftbaton.success.gaps.dir=' + str(OUT / 'success-gaps')])
     event('workload_started')
     time.sleep(opts.warmup)
     STATE['source_memory_before_migration'] = cmd('knode2', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory'])
@@ -540,13 +556,15 @@ try:
     save()
     config = '[criu]\nlazy-pages=yes\naddress=0.0.0.0\nport=12346\nsync_addr=10.0.0.63\nsync_port=4568\n'
     config += precopy_config
+    config += f'network-lock={opts.network_lock}\n'
+    if opts.buffered_cutover: config += 'buffered-cutover=yes\n'
     if opts.image_rdma:
         config += 'image-rdma=yes\n'
     py('knode2', f'from pathlib import Path;p=Path({mig!r});p.mkdir();(p/"imgs_dir").mkdir();(p/"work_dir").mkdir();(p/"config_ck.cfg").write_text({config!r})')
     if opts.fast_cutover:
         if not opts.image_rdma:
             raise RuntimeError('--fast-cutover currently requires --image-rdma')
-        cutover = dict(name=NAME, token=secrets.token_hex(24), port=opts.port, nat_rule=rule,
+        cutover = dict(name=NAME, token=secrets.token_hex(24), port=opts.port, nat_rule=rule, buffered=opts.buffered_cutover,
                        stop_file=f'/dev/shm/swiftbaton-images-{pid}/stop')
         path = str(OUT / 'cutover-config.json')
         py('knode1', f'from pathlib import Path;p=Path({path!r});p.write_text({json.dumps(cutover)!r});p.chmod(0o600)')
@@ -594,9 +612,16 @@ try:
         cmd('knode3', ['sudo', '-n', 'cp', '-a', mig + '/imgs_dir', checkpoint_dir])
     config = f'[criu]\nlazy-pages=yes\naddress=10.0.0.62\nport=12346\nsync_addr=10.0.0.62\nsync_port=4568\nimgs_dir={mig}/imgs_dir\n'
     config += precopy_config
+    config += f'network-lock={opts.network_lock}\n'
+    if opts.buffered_cutover: config += 'buffered-cutover=yes\n'
     if opts.image_rdma:
         config += 'image-rdma=yes\n'
     py('knode3', f'from pathlib import Path;Path({mig + "/config_res.cfg"!r}).write_text({config!r})')
+    if opts.buffered_cutover:
+        path = str(OUT / 'cutover-config.json')
+        py('knode3', f'from pathlib import Path;p=Path({path!r});p.parent.mkdir(parents=True,exist_ok=True);p.write_text({json.dumps(cutover)!r});p.chmod(0o600)')
+        spawn('knode3', 'cutover_resume', ['python3', str(Path(__file__).with_name('fast_cutover.py')), 'resume', path])
+        wait_for('knode3', str(OUT / 'cutover.target-connected'), 10)
     spawn('knode3', 'restore', ['docker', 'start', '--checkpoint', 'migrate_dir', NAME])
     work = '/run/containerd/io.containerd.runtime.v2.task/moby/' + STATE['knode3_cid'] + '/work'
     wait_for('knode3', work + '/sync.sock')
@@ -707,6 +732,7 @@ for p in Path('/proc').iterdir():
     save()
     event('source_retired', event_time_ns=completions['checkpoint']['time_ns'] if opts.kernel_transfer else None)
     await_job('run', opts.duration + 60)
+    subprocess.run(['rsync', '-az', 'knode1:' + str(OUT / 'success-gaps') + '/', str(OUT / 'success-gaps') + '/'], check=True, timeout=30)
     runtime_snapshot('knode3', 'target-after-workload')
     if opts.poststeady_seconds:
         # A separate JVM and log preserve the original recovery measurement.

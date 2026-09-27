@@ -43,6 +43,52 @@ static unsigned int nr_final;
 static struct sbk_final_gate final_gate = SBK_FINAL_GATE_INIT;
 extern volatile struct pid_data_list *pid_data_list;
 extern int list_length;
+/* Sampling is complete before sb_kernel_send_ps(). Keep its exact priority
+ * order in compact arrays during PS instead of walking cold linked lists
+ * while the application is frozen. These are hints, never page validity. */
+struct sbk_hot_snapshot {
+  int pid;
+  uint64_t *addresses;
+  size_t count;
+};
+static struct sbk_hot_snapshot *hot_snapshots;
+static unsigned hot_snapshot_count;
+static void release_hot_snapshots(void) {
+  for (unsigned i = 0; i < hot_snapshot_count; i++)
+    free(hot_snapshots[i].addresses);
+  free(hot_snapshots);
+  hot_snapshots = NULL;
+  hot_snapshot_count = 0;
+}
+static int prepare_hot_snapshots(void) {
+  if (opts.sb_no_hot_first) return 0;
+  if (hot_snapshots || list_length <= 0 || list_length > MAX_PROCESS)
+    return -EINVAL;
+  hot_snapshots = calloc(list_length, sizeof(*hot_snapshots));
+  if (!hot_snapshots) return -ENOMEM;
+  hot_snapshot_count = list_length;
+  for (unsigned p = 0; p < hot_snapshot_count; p++) {
+    struct sbk_hot_snapshot *h = &hot_snapshots[p];
+    size_t capacity = 0;
+    h->pid = pid_data_list[p].pid;
+    for (int score = PRIORITY_QUEUE_LEVEL - 1; score >= 0; score--)
+      for (volatile struct score_list *node = pid_data_list[p].dirtylist[score]; node; node = node->next) {
+        if (h->count == capacity) {
+          if (capacity > SIZE_MAX / sizeof(*h->addresses) / 2) {
+            release_hot_snapshots(); return -EOVERFLOW;
+          }
+          size_t next = capacity ? capacity * 2 : 4096;
+          uint64_t *addresses = realloc(h->addresses, next * sizeof(*addresses));
+          if (!addresses) { release_hot_snapshots(); return -ENOMEM; }
+          h->addresses = addresses;
+          capacity = next;
+        }
+        h->addresses[h->count++] = node->addr;
+      }
+    pr_info("SB_KERNEL hot_ps pid=%d pages=%zu\n", h->pid, h->count);
+  }
+  return 0;
+}
 static uint64_t kernel_now_ns(void) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -277,18 +323,14 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     ret = sbk_hot_index_prepare(hot_index, count);
     if (ret)
       goto out;
-    /* Walk each sampled priority list once. The old region-outer loop visited
-     * every heat node once per final MR while the application was stopped. */
-    for (int p = 0; p < list_length; p++) {
-      if (pid_data_list[p].pid != pid)
-        continue;
-      for (int score = PRIORITY_QUEUE_LEVEL - 1; score >= 0; score--) {
-        volatile struct score_list *s = pid_data_list[p].dirtylist[score];
-        for (; s; s = s->next) {
-          ret = sbk_hot_index_append(hot_index, count, s->addr);
-          if (ret)
-            goto out;
-        }
+    /* Preserve sampled order; filter it against the actual final ranges.
+     * Unmapped PS addresses remain harmless scheduling hints. */
+    for (unsigned p = 0; p < hot_snapshot_count; p++) {
+      const struct sbk_hot_snapshot *h = &hot_snapshots[p];
+      if (h->pid != pid) continue;
+      for (size_t j = 0; j < h->count; j++) {
+        ret = sbk_hot_index_append(hot_index, count, h->addresses[j]);
+        if (ret) goto out;
       }
     }
   }
@@ -314,6 +356,10 @@ int sb_kernel_send_ps(int socket_fd) {
   unsigned count = 0, sent = 0, skipped = 0;
   uint64_t pages = 0, begin = kernel_now_ns(), first = 0;
   int ret = 0;
+  sb_trace("kernel.hot_ps_begin");
+  ret = prepare_hot_snapshots();
+  if (ret) return ret;
+  sb_trace("kernel.hot_ps_done");
   if (!opts.sb_no_pretransfer) {
     sb_trace("kernel.ps_register_begin");
     ret = sb_kernel_ps_begin(session_fd, &count);
@@ -636,6 +682,7 @@ void sb_kernel_transfer_close(void) {
     free((void *)final_regions[i].dirty);
   }
   sb_kernel_ps_destroy();
+  release_hot_snapshots();
   free(final_regions);
   final_regions = NULL;
   nr_final = 0;

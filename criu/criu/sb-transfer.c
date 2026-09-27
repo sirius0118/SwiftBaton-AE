@@ -51,6 +51,8 @@ static struct span *spans;
 static size_t span_count, begin_span[MAX_PROCESS], end_span[MAX_PROCESS];
 static uint64_t source_pages, seed_pages;
 static struct sb_sched *scheduler;
+static void *scheduler_reserve;
+static size_t scheduler_reserve_bytes;
 static bool feed_done, source_done, source_demand_drained, client_done;
 static bool source_seed_committing;
 static pthread_mutex_t pf_client_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -118,9 +120,14 @@ static struct bg_directory {
     struct bg_range *ranges;
     unsigned count;
     uint64_t pages,*cells;
+    bool cells_from_reserve;
     struct sb_bg_assist_queue assists;
     uint64_t direct,queued,overflow;
 } bg_directories[MAX_PROCESS];
+/* Capacity only: address ranges are rebuilt from final UFFD registrations. */
+static uint64_t *bg_cells_reserve;
+static size_t bg_cells_capacity, bg_cells_used;
+
 static struct bg_descriptor { struct sb_bg_owner owner; uint64_t *directory; } bg_descriptors[SB_BG_PAGE_SLOTS];
 static struct sb_bg_cursor bg_cursors[SB_BG_SLOTS];
 static uint64_t bg_observed[SB_BG_SLOTS];
@@ -147,6 +154,10 @@ static void fault_trace_bind(struct fault_trace *t,const char *role,unsigned pid
 static void fault_trace_init_capacity(struct fault_trace *t,unsigned capacity)
 {
     if (!opts.sb_fault_trace) return;
+    if (t->events) {
+        if (t->capacity != capacity) die("trace capacity changed after PS");
+        return;
+    }
     t->capacity=capacity;
     t->events=mmap(NULL,(size_t)t->capacity*sizeof(*t->events),PROT_READ|PROT_WRITE,
         MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE,-1,0);
@@ -159,11 +170,62 @@ static void fault_trace_init(struct fault_trace *t)
 static void target_trace_init(struct fault_trace *t)
 {
     fault_trace_init(t);
-    if (!opts.sb_install_trace) return;
+    if (!opts.sb_install_trace || t->installs) return;
     t->installs=mmap(NULL,INSTALL_TRACE_CAPACITY*sizeof(*t->installs),PROT_READ|PROT_WRITE,
         MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE,-1,0);
     if (t->installs==MAP_FAILED) die("install trace allocation");
 }
+/* Only the coordinator calls this, before any lane threads exist. Process
+ * growth after PS is supported by the same idempotent final-phase call. Trace
+ * buffers remain private to their eventual worker, and are never reset live. */
+void sb_parallel_prepare_traces(int source, unsigned processes)
+{
+    if (!opts.sb_parallel_transfer) return;
+    if (processes > MAX_PROCESS) die("PS trace process count");
+    sb_trace(source ? "transfer.source_trace_prepare_begin" : "transfer.target_trace_prepare_begin");
+    if (source) {
+        fault_trace_init_capacity(&source_trace, 4 * FAULT_TRACE_CAPACITY);
+        fault_trace_init(&source_ft_trace);
+        /* This is capacity only. Final VMAs and valid-page ownership are still
+         * rebuilt under suspension. If they exceed the PS budget, use the
+         * existing exact-size allocation. No stale VMA/PFN state is reused. */
+        if (!scheduler_reserve && opts.sb_precopy_limit_mb) {
+            scheduler_reserve_bytes = sb_sched_size((uint64_t)opts.sb_precopy_limit_mb * 256, 4096);
+            if (!scheduler_reserve_bytes) die("PS scheduler capacity");
+            scheduler_reserve = mmap(NULL, scheduler_reserve_bytes, PROT_READ | PROT_WRITE,
+                MAP_SHARED | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+            if (scheduler_reserve == MAP_FAILED) die("PS scheduler reserve");
+        }
+    } else {
+        if (!bg_cells_reserve && opts.sb_precopy_limit_mb) {
+            bg_cells_capacity = (uint64_t)opts.sb_precopy_limit_mb * 256;
+            if (bg_cells_capacity > SIZE_MAX / sizeof(uint64_t)) die("PS BG capacity");
+            bg_cells_reserve = mmap(NULL, bg_cells_capacity * sizeof(uint64_t),
+                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+            if (bg_cells_reserve == MAP_FAILED) die("PS BG reserve");
+        }
+        for (unsigned w = 0; w < (opts.sb_install_workers ? opts.sb_install_workers : 4); w++)
+            target_trace_init(&bg_workers[w].trace);
+        fault_trace_init(&target_tx_trace);
+        fault_trace_init(&target_pf_dispatch_trace);
+        target_trace_init(&target_ft_trace);
+        pf_allocated_workers = opts.sb_fault_install_workers > 2 ? opts.sb_fault_install_workers : 2;
+        for (unsigned p = 0; p < processes; p++) {
+            target_trace_init(&target_trace[p]);
+            target_trace_init(&ft_installers[p].trace);
+            if (!pf_installers[p]) {
+                if (posix_memalign((void **)&pf_installers[p], 64,
+                                  pf_allocated_workers * sizeof(*pf_installers[p])))
+                    die("PF installer allocation");
+                memset(pf_installers[p], 0, pf_allocated_workers * sizeof(*pf_installers[p]));
+            }
+            for (unsigned w = 0; w < pf_allocated_workers; w++)
+                target_trace_init(&pf_installers[p][w].trace);
+        }
+    }
+    sb_trace(source ? "transfer.source_trace_prepare_done" : "transfer.target_trace_prepare_done");
+}
+
 static void install_trace_finish(struct fault_trace *t)
 {
     if (!t->installs) return;
@@ -335,17 +397,22 @@ static void build_catalog(void)
     if (!source_pages) return;
     bytes = sb_sched_size(source_pages, 4096);
     if (!bytes) die("scheduler size");
-    memory = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (scheduler_reserve && bytes <= scheduler_reserve_bytes) {
+        memory = scheduler_reserve;
+        scheduler_reserve = NULL;
+    } else {
+        if (scheduler_reserve) munmap(scheduler_reserve, scheduler_reserve_bytes);
+        scheduler_reserve = NULL;
+        memory = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    }
     if (memory == MAP_FAILED || !(scheduler = sb_sched_init(memory, bytes, source_pages, 4096))) die("scheduler allocation");
     for (size_t r = 0; r < span_count; r++) {
         struct span *s = &spans[r];
         volatile unsigned long *bitmap = PidVma[s->process]->vmas[s->vma].bitmap;
-        for (uint64_t page = 0; page < (s->end - s->start) / P; page++) {
-            if ((bitmap[page / (8 * sizeof(long))] >> (page % (8 * sizeof(long)))) & 1UL) {
-                if (sb_sched_seed(scheduler, s->first + page)) die("precopy reservation");
-                seed_pages++;
-            }
-        }
+        uint64_t seeded;
+        if (sb_sched_seed_bitmap(scheduler, s->first, (s->end - s->start) / P, bitmap, &seeded))
+            die("precopy reservation");
+        seed_pages += seeded;
     }
     pr_info("SB_TRANSFER catalog pages=%llu precopy_pending=%llu ranges=%zu\n",
             (unsigned long long)source_pages, (unsigned long long)seed_pages, span_count);
@@ -887,7 +954,9 @@ int sb_parallel_server(int socket)
     pr_info("SB_TRANSFER policy pretransfer=%u prefetch=%u hot_first=%u\n",
         !opts.sb_no_pretransfer, !opts.sb_no_prefetch, !opts.sb_no_hot_first);
     pr_info("SB_READY_SCAN fixed=%u\n",opts.sb_fixed_ready_scan);
+    sb_trace("transfer.source_catalog_begin");
     build_catalog();
+    sb_trace("transfer.source_catalog_done");
     /* This one buffer aggregates six PF stages plus coalesced requests from
      * every process. Keep a bounded larger capacity than per-worker traces. */
     fault_trace_init_capacity(&source_trace,4*FAULT_TRACE_CAPACITY);
@@ -968,9 +1037,15 @@ static void bg_directory_init(void)
             if ((r->end-r->start)/P>SIZE_MAX/sizeof(uint64_t)-d->pages) die("BG directory size");
             d->pages+=(r->end-r->start)/P;
         }
-        d->cells=mmap(NULL,d->pages*sizeof(*d->cells),PROT_READ|PROT_WRITE,
-            MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE,-1,0);
-        if (d->cells==MAP_FAILED) die("BG directory allocation");
+        if (bg_cells_reserve && d->pages <= bg_cells_capacity - bg_cells_used) {
+            d->cells = bg_cells_reserve + bg_cells_used;
+            bg_cells_used += d->pages;
+            d->cells_from_reserve = true;
+        } else {
+            d->cells=mmap(NULL,d->pages*sizeof(*d->cells),PROT_READ|PROT_WRITE,
+                MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE,-1,0);
+            if (d->cells==MAP_FAILED) die("BG directory allocation");
+        }
     }
     for (unsigned i=0;i<(opts.sb_install_workers?opts.sb_install_workers:4);i++) {
         bg_workers[i].index=i;
@@ -1527,21 +1602,12 @@ int sb_parallel_client(int socket)
     if (sync_transfer(socket, &count, sizeof(count), false) || count != (unsigned)item_num || count > MAX_PROCESS ||
         sync_transfer(socket, peers, count * sizeof(*peers), false)) return -1;
     if (sb_uffd_lifecycle_start()) return -1;
+    sb_trace("transfer.target_directory_begin");
     bg_directory_init();
-    fault_trace_init(&target_tx_trace);
-    fault_trace_init(&target_pf_dispatch_trace);
+    sb_trace("transfer.target_directory_done");
+    sb_parallel_prepare_traces(0, item_num);
     pr_info("SB_FAULT_READ_BATCH configured=%u effective=%u\n",opts.sb_fault_read_batch,opts.sb_fault_install_workers?opts.sb_fault_read_batch:1);
-    pf_allocated_workers=opts.sb_fault_install_workers>2 ? opts.sb_fault_install_workers : 2;
-    target_trace_init(&target_ft_trace);
-    for (int p=0;p<item_num;p++) {
-        target_trace_init(&target_trace[p]);
-        ft_installers[p].pid=pidset[p];
-        /* Allocate equally in the serial ablation, outside the hot path. */
-        target_trace_init(&ft_installers[p].trace);
-        if (posix_memalign((void **)&pf_installers[p],64,pf_allocated_workers*sizeof(*pf_installers[p]))) die("PF installer allocation");
-        memset(pf_installers[p],0,pf_allocated_workers*sizeof(*pf_installers[p]));
-        for (unsigned w=0;w<pf_allocated_workers;w++) target_trace_init(&pf_installers[p][w].trace);
-    }
+    for (int p = 0; p < item_num; p++) ft_installers[p].pid = pidset[p];
     if (!opts.sb_sync_fault_transport && pthread_create(&fault_tx_thread,NULL,client_fault_tx,peers)) die("client fault transmitter");
     for (int p = 0; p < item_num; p++) {
         int found = -1;
@@ -1559,6 +1625,7 @@ int sb_parallel_client(int socket)
         if (pthread_create(&demand[p], NULL, client_demand, &process[p])) die("client demand workers");
     }
     if (opts.sb_fault_install_workers && pthread_create(&fault_dispatch_thread,NULL,client_fault_dispatch,NULL)) die("PF dispatcher thread");
+    sb_trace("transfer.target_demand_workers_ready");
     if (sb_precopy_client_start(opts.sb_precopy_workers ? opts.sb_precopy_workers : 4)) return -1;
     if (pthread_create(&precopy, NULL, client_precopy_ack, NULL) || pthread_create(&prefetch, NULL, client_prefetch, NULL) ||
         pthread_create(&background, NULL, client_background, NULL)) die("client lanes");
@@ -1577,8 +1644,14 @@ int sb_parallel_client(int socket)
     uint64_t bg_direct=0,bg_queued=0,bg_overflow=0,bg_normal=0;
     for (int p=0;p<item_num;p++) {
         bg_direct+=bg_directories[p].direct;bg_queued+=bg_directories[p].queued;bg_overflow+=bg_directories[p].overflow;
-        munmap(bg_directories[p].cells,bg_directories[p].pages*sizeof(uint64_t));
+        if (!bg_directories[p].cells_from_reserve)
+            munmap(bg_directories[p].cells,bg_directories[p].pages*sizeof(uint64_t));
         free(bg_directories[p].ranges);
+    }
+    if (bg_cells_reserve) {
+        munmap(bg_cells_reserve, bg_cells_capacity * sizeof(uint64_t));
+        bg_cells_reserve = NULL;
+        bg_cells_capacity = bg_cells_used = 0;
     }
     for (unsigned i=0;i<(opts.sb_install_workers?opts.sb_install_workers:4);i++) {
         bg_normal+=bg_workers[i].installed;

@@ -9,6 +9,8 @@ int sb_stage_send(int socket, int snapshot_fd, void *buffer, uint64_t length);
 int sb_stage_receive(int socket, unsigned workers);
 /* -1 preserves the current policy; otherwise bind each stage before copying. */
 void sb_stage_set_numa_node(int node);
+/* Limit inherited pages only; the complete PS cache remains available in AS. */
+void sb_stage_set_max_mb(unsigned int mb);
 int sb_stage_prune(int image_dir_fd);
 int sb_stage_finalize(int image_dir_fd);
 /* Enable only around restoration-tree forks; utility children need no pages. */

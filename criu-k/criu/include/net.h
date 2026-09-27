@@ -31,6 +31,8 @@ extern int collect_net_namespaces(bool for_dump);
 
 extern int network_lock(void);
 extern void network_unlock(void);
+extern int network_unlock_restore(void);
+extern void network_unlock_cleanup(void);
 extern int network_lock_internal(void);
 
 extern struct ns_desc net_ns_desc;

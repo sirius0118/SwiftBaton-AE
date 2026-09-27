@@ -1,3 +1,4 @@
+#include "sb-cutover.h"
 #include "sb-kernel-transfer.h"
 #include "sb-images.h"
 
@@ -2026,14 +2027,20 @@ static int finalize_restore_detach(void)
 				continue;
 			}
 
+			/* Bracket the actual per-thread release. The later aggregate
+			 * tasks_resumed message is not an application service timestamp. */
+			sb_trace_task("restore.thread_regs_begin", pid);
 			if (arch_set_thread_regs_nosigrt(&item->threads[i])) {
 				pr_perror("Restoring regs for %d failed", pid);
 				return -1;
 			}
+			sb_trace_task("restore.thread_regs_done", pid);
+			sb_trace_task("restore.thread_detach_begin", pid);
 			if (ptrace(PTRACE_DETACH, pid, NULL, 0)) {
 				pr_perror("Unable to detach %d", pid);
 				return -1;
 			}
+			sb_trace_task("restore.thread_detach_done", pid);
 		}
 	}
 	return 0;
@@ -2323,8 +2330,14 @@ skip_ns_bouncing:
 		goto out_kill;
 
 #ifdef DOCKER
+	/* Source isolation permits NAT preparation in parallel with final dump.
+	 * Its exact bindings must exist before restored sockets leave repair. */
+	if (opts.sb_buffered_cutover &&
+	    sb_cutover_wait_named(get_service_fd(IMG_FD_OFF), "sb-nat-ready"))
+		goto out_kill;
 	/* Unlock network before disabling repair mode on sockets */
-	network_unlock();
+	if (network_unlock_restore())
+		goto out_kill_network_unlocked;
 #endif
 	/*
 	 * Stop getting sigchld, after we resume the tasks they
@@ -2338,7 +2351,10 @@ skip_ns_bouncing:
 	 * or a connection.
 	 */
 	// 这里会attach到目标进程
-	attach_to_tasks(root_seized);
+	sb_trace("restore.attach_begin");
+	if (attach_to_tasks(root_seized))
+		goto out_kill_network_unlocked;
+	sb_trace("restore.attach_done");
 
 	if (restore_switch_stage(CR_STATE_RESTORE_CREDS))
 		goto out_kill_network_unlocked;
@@ -2404,6 +2420,9 @@ skip_ns_bouncing:
 		goto out_kill_network_unlocked;
 
 	sb_trace("restore.tasks_resumed");
+	if (opts.sb_buffered_cutover && sb_cutover_marker(get_service_fd(IMG_FD_OFF), "sb-tasks-resumed"))
+		goto out_kill_network_unlocked;
+	network_unlock_cleanup();
 	pr_info("Restore finished successfully. Tasks resumed.\n");
 	write_stats(RESTORE_STATS);
 
@@ -2445,6 +2464,7 @@ out_kill:
 	}
 
 out:
+	network_unlock_cleanup();
 	depopulate_roots_yard(mnt_ns_fd, true);
 	stop_usernsd();
 	__restore_switch_stage(CR_STATE_FAIL);
@@ -2666,6 +2686,7 @@ int cr_restore_tasks(void)
 		if (!opts.sb_u_precopy || !opts.sb_image_rdma) goto err;
 		sb_trace("restore.stage_ps_begin");
 		sb_stage_set_numa_node(opts.sb_stage_numa_node);
+		sb_stage_set_max_mb(opts.sb_stage_max_mb);
 		if (sb_stage_receive(page_sync, opts.sb_precopy_workers ? opts.sb_precopy_workers : 4)) goto err;
 		sb_trace("restore.stage_ps_done");
 	}
@@ -2713,8 +2734,10 @@ int cr_restore_tasks(void)
 
 #ifndef DOCKER
 	// 这里创建好 pstree
+	sb_trace("restore.prepare_pstree_begin");
 	if (prepare_pstree() < 0)
 		goto err;
+	sb_trace("restore.prepare_pstree_done");
 #else
 	sb_trace("restore.ps_begin");
 	ret = do_mnt_precreate();
@@ -2779,8 +2802,10 @@ int cr_restore_tasks(void)
 	// ret = run_page_client();
 	
 	// TODO:这里需要加入一个判断，判断page-client是否启动完毕。启动完毕之后才能后续操作
+	sb_trace("restore.prepare_pstree_begin");
 	if (prepare_pstree() < 0)
 		goto err;
+	sb_trace("restore.prepare_pstree_done");
 
 	if (crtools_prepare_shared() < 0)
 		goto err;
@@ -2789,8 +2814,10 @@ int cr_restore_tasks(void)
 	if (criu_signals_setup() < 0)
 		goto clean_cgroup;
 
+	sb_trace("restore.lazy_socket_begin");
 	if (prepare_lazy_pages_socket() < 0)
 		goto clean_cgroup;
+	sb_trace("restore.lazy_socket_done");
 
 #ifdef MUL_UFFD
 pr_warn("执行到这\n");

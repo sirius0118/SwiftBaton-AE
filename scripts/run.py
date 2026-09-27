@@ -6,12 +6,23 @@ R=Path(__file__).resolve().parents[1]
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('mode',choices=['U','K']);p.add_argument('--profile',choices=['smoke','redis'],default='smoke')
 g=p.add_mutually_exclusive_group();g.add_argument('--check',action='store_true');g.add_argument('--execute',action='store_true')
+p.add_argument('--network-lock', choices=['iptables','nftables'])
+p.add_argument('--vma-cache', action='store_true')
+p.add_argument('--buffered-cutover', action='store_true')
+p.add_argument('--stage-max-mb', type=int)
+p.add_argument('--validation-workers', type=int, choices=range(1,33))
 a=p.parse_args()
 W=Path(os.environ.get('SB_AE_WORK_ROOT',str(R.parent/(R.name+'-work')))).resolve()
 if R==W or R in W.parents:raise SystemExit('SB_AE_WORK_ROOT must be outside the source repository')
 profile=json.loads((R/'configs/profiles.json').read_text())[a.mode][:]
 if a.profile=='smoke':
  for key,value in [('--records','100000'),('--field-length','1024'),('--duration','45'),('--warmup','10'),('--threads','16')]:profile[profile.index(key)+1]=value
+if a.validation_workers is not None:
+ profile[profile.index('--validation-workers')+1]=str(a.validation_workers)
+if a.stage_max_mb is not None:profile += ['--stage-max-mb', str(a.stage_max_mb)]
+if a.buffered_cutover:profile += ['--buffered-cutover']
+if a.network_lock:profile += ['--network-lock',a.network_lock]
+if a.vma_cache and '--vma-cache' not in profile:profile += ['--vma-cache']
 argv=[sys.executable,str(R/'scripts/ae'/a.mode.lower()/'run_ae.py')]+profile
 if not (a.execute or a.check):
  print(json.dumps(dict(mode=a.mode,profile=a.profile,command=argv,results=str(W),mutates_hosts=False),indent=2));sys.exit(0)
@@ -81,6 +92,9 @@ assert list((r/'build/YCSB/core/target/dependency').glob('*.jar')),'Missing YCSB
 print(json.dumps(names))
 '''
 remote('knode1',client,[R])
+if a.buffered_cutover:
+ remote('knode1', "import ctypes;ctypes.CDLL('libnetfilter_queue.so.1');ctypes.CDLL('libnftables.so.1');ctypes.CDLL('libnetfilter_conntrack.so.3')")
+if a.buffered_cutover:remote('knode3', "import ctypes;ctypes.CDLL('libnetfilter_conntrack.so.3')")
 image_ref=os.environ.get('SB_REDIS_IMAGE',json.loads((R/'configs/lab.json').read_text())['redis_image'])
 image_ids={}
 for host in previous:
@@ -105,7 +119,7 @@ try:
    if line.startswith('STATE='):state=Path(line.strip().split('=',1)[1]);result['state']=str(state)
   result['driver_rc']=proc.wait()
  if result['driver_rc'] or state is None or not json.loads(state.read_text()).get('success'):raise RuntimeError('Migration failed; inspect '+str(out/'run.log'))
- scripts=['analyze_run.py','analyze_recovery.py','verify_images.py']
+ scripts=['analyze_run.py','analyze_recovery.py','verify_images.py','analyze_success_gaps.py']
  if a.mode=='U':scripts+=['analyze_transport.py','analyze_faults.py']
  result['analysis']={}
  for name in scripts:

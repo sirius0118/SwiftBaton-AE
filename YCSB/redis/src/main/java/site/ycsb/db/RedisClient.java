@@ -116,7 +116,9 @@ public class RedisClient extends DB {
   }
 
 
-  private void reconnect(){
+  private void reconnect(Exception reason){
+    System.err.println("SB_RECONNECT mono_ns=" + System.nanoTime() + " cause=" + reason.getClass().getName()
+        + " nested=" + (reason.getCause() == null ? "none" : reason.getCause().getClass().getName()));
     long startTime = System.nanoTime();
     Properties props = getProperties();
     int port;
@@ -170,7 +172,7 @@ public class RedisClient extends DB {
           StringByteIterator.putAllAsByteIterators(result, jedis.hgetAll(key));
           break;
         }catch(Exception e){
-          reconnect();
+          reconnect(e);
           // System.err.println("Retry!");
         }
   
@@ -184,7 +186,7 @@ public class RedisClient extends DB {
           values = jedis.hmget(key, fieldArray);
           break;
         }catch(Exception e){
-          reconnect();
+          reconnect(e);
           // System.err.println("Retry!");
         }
   
@@ -215,7 +217,7 @@ public class RedisClient extends DB {
           return Status.OK;
         }
       }catch(Exception e){
-        reconnect();
+        reconnect(e);
         // System.err.println("Retry!");
       }
 
@@ -231,7 +233,7 @@ public class RedisClient extends DB {
         return jedis.del(key) == 0 && jedis.zrem(INDEX_KEY, key) == 0 ? Status.ERROR
         : Status.OK;
       }catch(Exception e){
-        reconnect();
+        reconnect(e);
         // System.err.println("Retry!");
       }
 
@@ -250,7 +252,7 @@ public class RedisClient extends DB {
             return jedis.hmset(key, materializedValues)
         .equals("OK") ? Status.OK : Status.ERROR;
           }catch(Exception e){
-            reconnect();
+            reconnect(e);
             // System.err.println("Retry!");
           }
     
@@ -274,7 +276,7 @@ public class RedisClient extends DB {
           read(table, key, fields, values);
           break;
         }catch(Exception e){
-          reconnect();
+          reconnect(e);
           // System.err.println("Retry!");
         }
   

@@ -1,3 +1,4 @@
+#include "common/sb-stage-commit.h"
 /* Real PS snapshots, conservative soft-dirty invalidation and a local fault
  * cache. Sampling ranks candidates; only this final validator authorizes reuse.
  * No custom kernel/PTE manipulation is used for the correctness decision. */
@@ -410,6 +411,7 @@ static void *source_validate_worker(void *argument)
                 return NULL;
             }
             tick = precopy_now_ns();
+            struct sb_stage_commit_batch valid_batch = { .base = context->valid };
             for (size_t i = begin; i < end; i++) {
                 uint64_t entry = entries[(pages[i].address - first) / SB_PAGE];
                 struct map *old_map, *new_map;
@@ -437,9 +439,10 @@ static void *source_validate_worker(void *argument)
                     continue;
                 }
                 /* Adjacent process/job ranges can share a bitmap byte. */
-                __atomic_fetch_or(&context->valid[i / 8], (unsigned char)(1U << (i % 8)), __ATOMIC_RELAXED);
+                sb_stage_commit_add(&valid_batch, i);
                 worker->accepted++;
             }
+            sb_stage_commit_flush(&valid_batch);
             worker->scan_ns += precopy_now_ns() - tick;
             worker->scanned += end - begin;
             begin = end;
@@ -601,11 +604,13 @@ int sb_precopy_prune(int image_dir_fd)
     return result;
 }
 
-struct cached_page { pid_t pid; unsigned state; uint64_t address, index; };
+struct cached_page { unsigned group, state; uint64_t address, index; };
 struct cached_group { uint32_t source; pid_t destination; uint64_t begin, end; };
 static struct cache_header *cache;
 static struct cached_page *cached_pages;
 static struct cached_group *cached_groups;
+static pid_t *cached_destinations;
+static unsigned char *client_valid;
 static struct sb_precopy_view client_view;
 static uint64_t client_length;
 static size_t cached_group_count;
@@ -618,12 +623,6 @@ static sb_precopy_adopted_fn already_adopted;
 
 void sb_precopy_set_adopted(sb_precopy_adopted_fn callback) { already_adopted = callback; }
 
-static int cached_compare(const void *left, const void *right)
-{
-    const struct cached_page *a = left, *b = right;
-    if (a->pid != b->pid) return a->pid < b->pid ? -1 : 1;
-    return a->address < b->address ? -1 : a->address != b->address;
-}
 
 int sb_precopy_view(void *buffer, uint64_t length, struct sb_precopy_view *view)
 {
@@ -648,6 +647,9 @@ int sb_precopy_view(void *buffer, uint64_t length, struct sb_precopy_view *view)
     return 0;
 }
 
+#include "sb-validity-index.h"
+static struct sb_validity_index validity_index;
+
 static int read_validity(const struct sb_precopy_view *view, int image_dir_fd, const char *name,
                          struct sb_precopy_pid **out_pids, size_t *count, unsigned char **out_bitmap)
 {
@@ -669,9 +671,8 @@ static int read_validity(const struct sb_precopy_view *view, int image_dir_fd, c
         for (size_t j = 0; j < i; j++)
             if (pids[j].source == pids[i].source || pids[j].destination == pids[i].destination) goto fail;
     }
-    for (uint64_t i = 0; i < view->count; i++)
-        if ((bitmap[i / 8] & (1U << (i % 8))) &&
-            (!view->pages[i].copied || !destination_pid(pids, valid.pids, view->pages[i].pid))) goto fail;
+    if (sb_validity_index_prepare(&validity_index, view) ||
+        sb_validity_index_check(&validity_index, pids, valid.pids, bitmap)) goto fail;
     close(fd);
     *out_pids = pids; *count = valid.pids; *out_bitmap = bitmap;
     return 0;
@@ -705,12 +706,13 @@ int sb_precopy_client_prepare(void *buffer, uint64_t length)
         view.count > SIZE_MAX / sizeof(*cached_pages)) return -1;
     for (uint64_t i = 0; i < view.count; i++)
         if (!i || view.pages[i].pid != view.pages[i - 1].pid) groups++;
-    if (groups > 4096) return -1;
+    if (groups > 4096 || sb_validity_index_prepare(&validity_index, &view)) return -1;
     cached_pages = calloc(view.count ? view.count : 1, sizeof(*cached_pages));
     cached_groups = calloc(groups ? groups : 1, sizeof(*cached_groups));
-    if (!cached_pages || !cached_groups) {
-        free(cached_pages); free(cached_groups);
-        cached_pages = NULL; cached_groups = NULL;
+    cached_destinations = calloc(groups ? groups : 1, sizeof(*cached_destinations));
+    if (!cached_pages || !cached_groups || !cached_destinations) {
+        free(cached_pages); free(cached_groups); free(cached_destinations);
+        cached_pages = NULL; cached_groups = NULL; cached_destinations = NULL;
         return -1;
     }
     for (uint64_t i = 0; i < view.count; i++) {
@@ -721,7 +723,8 @@ int sb_precopy_client_prepare(void *buffer, uint64_t length)
         }
         /* Touch the actual index storage during PS, before suspension. No
          * entry is searchable until the final manifest has been accepted. */
-        cached_pages[i] = (struct cached_page){ .address = view.pages[i].address, .index = i };
+        cached_pages[i] = (struct cached_page){ .group = cached_group_count - 1,
+            .address = view.pages[i].address, .index = i };
     }
     cache = buffer;
     client_length = length;
@@ -748,21 +751,18 @@ int sb_precopy_client_init(void *buffer, uint64_t length, int image_dir_fd,
     cached_count = 0;
     if (!install || sb_precopy_client_prepare(buffer, length) ||
         sb_precopy_validity(&client_view, image_dir_fd, &pids, &pid_count, &bitmap)) goto out;
-    /* The snapshot is already strictly sorted by source PID/address. A
-     * final one-to-one PID map can reorder whole groups, never their pages.
-     * Sort only the (few) process groups and filter them in one linear pass. */
-    for (size_t g = 0; g < cached_group_count; g++)
-        cached_groups[g].destination = destination_pid(pids, pid_count, cached_groups[g].source);
-    qsort(cached_groups, cached_group_count, sizeof(*cached_groups), group_compare);
+    /* Keep the page index constructed during PS. Translate only the small
+     * process table and retain the final bitmap. No O(pages) index rewrite or
+     * descriptor reread delays the first rseq/TLS fault in the restorer. */
     for (size_t g = 0; g < cached_group_count; g++) {
-        const struct cached_group *group = &cached_groups[g];
-        if (group->destination <= 0) continue; /* read_validity rejects any accepted page here. */
-        for (uint64_t i = group->begin; i < group->end; i++) {
-            if (!(bitmap[i / 8] & (1U << (i % 8)))) continue;
-            cached_pages[cached_count++] = (struct cached_page){
-                .pid = group->destination, .address = client_view.pages[i].address, .index = i };
-        }
+        cached_groups[g].destination = destination_pid(pids, pid_count, cached_groups[g].source);
+        cached_destinations[g] = cached_groups[g].destination;
     }
+    qsort(cached_groups, cached_group_count, sizeof(*cached_groups), group_compare);
+    for (uint64_t i = 0; i < (client_view.count + 7) / 8; i++)
+        cached_count += __builtin_popcount((unsigned)bitmap[i]);
+    client_valid = bitmap;
+    bitmap = NULL;
     install_page = install;
     result = 0;
     pr_info("SB_PRECOPY client valid=%zu total=%llu\n", cached_count, (unsigned long long)cache->pages);
@@ -779,18 +779,19 @@ static void install_cached(struct cached_page *page)
 {
     unsigned expected = 0;
     int rc;
+    pid_t pid = cached_destinations[page->group];
     /* 0=available, 1=owned by one copier, 2=committed. No stale page can
      * overwrite an application's new write: UFFDIO_COPY also rejects EEXIST. */
     if (!__atomic_compare_exchange_n(&page->state, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
-    rc = already_adopted ? already_adopted(page->pid, page->index) : 0;
+    rc = already_adopted ? already_adopted(pid, page->index) : 0;
     if (rc > 0) {
         __atomic_fetch_add(&adopted_pages, 1, __ATOMIC_RELAXED);
         rc = 0;
     } else if (!rc) {
-        rc = install_page(page->pid, page->address, (char *)cache + cache->data_offset + page->index * SB_PAGE);
+        rc = install_page(pid, page->address, (char *)cache + cache->data_offset + page->index * SB_PAGE);
     }
     if (rc && rc != EEXIST && rc != ENODATA) {
-        pr_err("Pre-copy install failed pid=%d address=%llx rc=%d\n", page->pid,
+        pr_err("Pre-copy install failed pid=%d address=%llx rc=%d\n", pid,
                (unsigned long long)page->address, rc);
         exit(EXIT_FAILURE);
     }
@@ -798,17 +799,36 @@ static void install_cached(struct cached_page *page)
     __atomic_fetch_add(rc == ENODATA ? &discarded_pages : &installed, 1, __ATOMIC_RELAXED);
 }
 
+static struct cached_page *find_cached_page(pid_t pid, uint64_t address)
+{
+    size_t lo = 0, hi = cached_group_count;
+    if (!install_page) return NULL;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (cached_groups[mid].destination < pid) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo == cached_group_count || cached_groups[lo].destination != pid) return NULL;
+    const struct cached_group *group = &cached_groups[lo];
+    uint64_t first = group->begin, last = group->end;
+    while (first < last) {
+        uint64_t mid = first + (last - first) / 2;
+        if (cached_pages[mid].address < address) first = mid + 1;
+        else last = mid;
+    }
+    if (first == group->end || cached_pages[first].address != address ||
+        !(client_valid[first / 8] & (1U << (first % 8)))) return NULL;
+    return &cached_pages[first];
+}
+
 int sb_precopy_client_has_page(pid_t pid, uint64_t address)
 {
-    struct cached_page key={ .pid=pid, .address=address };
-    return install_page && bsearch(&key,cached_pages,cached_count,sizeof(*cached_pages),cached_compare)!=NULL;
+    return find_cached_page(pid, address) != NULL;
 }
 
 int sb_precopy_client_fault(pid_t pid, uint64_t address)
 {
-    struct cached_page key = { .pid = pid, .address = address }, *page;
-    if (!install_page) return 0;
-    page = bsearch(&key, cached_pages, cached_count, sizeof(*cached_pages), cached_compare);
+    struct cached_page *page = find_cached_page(pid, address);
     if (!page) return 0;
     __atomic_fetch_add(&demand_active, 1, __ATOMIC_ACQ_REL);
     install_cached(page);
@@ -821,7 +841,8 @@ static void *client_copy_worker(void *unused)
 {
     size_t next;
     (void)unused;
-    while ((next = __atomic_fetch_add(&client_next, 1, __ATOMIC_RELAXED)) < cached_count) {
+    while ((next = __atomic_fetch_add(&client_next, 1, __ATOMIC_RELAXED)) < client_view.count) {
+        if (!(client_valid[next / 8] & (1U << (next % 8)))) continue;
         while (__atomic_load_n(&demand_active, __ATOMIC_ACQUIRE)) __asm__ volatile("pause" ::: "memory");
         install_cached(&cached_pages[next]);
     }
@@ -843,7 +864,8 @@ int sb_precopy_client_wait(void)
     if (!install_page) return 0;
     for (unsigned i = 0; i < client_threads; i++) pthread_join(client_workers[i], NULL);
     client_threads = 0;
-    for (size_t i = 0; i < cached_count; i++) {
+    for (size_t i = 0; i < client_view.count; i++) {
+        if (!(client_valid[i / 8] & (1U << (i % 8)))) continue;
         while (__atomic_load_n(&cached_pages[i].state, __ATOMIC_ACQUIRE) == 1) __asm__ volatile("pause" ::: "memory");
         if (__atomic_load_n(&cached_pages[i].state, __ATOMIC_ACQUIRE) != 2) return -1;
     }

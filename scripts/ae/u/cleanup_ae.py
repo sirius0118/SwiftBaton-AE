@@ -22,7 +22,7 @@ def run(host, argv, timeout=30):
 
 # Stop armed cutover helpers first: otherwise one could insert the NAT rule
 # immediately after cleanup removed it.
-for host, key in [('knode1', 'cutover_listener'), ('knode2', 'cutover_trigger')]:
+for host, key in [('knode1', 'cutover_listener'), ('knode2', 'cutover_trigger'), ('knode3', 'cutover_resume')]:
     pid = s.get(key + '_pid')
     if not pid:
         continue
@@ -35,6 +35,14 @@ if p.exists():
   except ProcessLookupError:pass
 '''
     run(host, ['sudo', '-n', 'python3', '-c', script])
+
+if s.get('parameters', {}).get('buffered_cutover'):
+    result = run('knode1', ['sudo', '-n', 'python3', str(Path(__file__).with_name('packet_gate.py')), 'cleanup', name])
+    if result.returncode: raise SystemExit('Could not remove owned packet gate/NAT table')
+    for host,side in [('knode1','client'),('knode3','target')]:
+        args=['sudo','-n','python3',str(Path(__file__).with_name('nat_bindings.py')),'cleanup',str(state_path.parent/('cutover-nat-'+side+'.json')),name,side,str(s['port'])]
+        if run(host,args).returncode:raise SystemExit('Could not remove exact experiment NAT bindings')
+
 
 if s.get('nat_rule'):
     rule = ['sudo', '-n', 'iptables', '-w', '10', '-t', 'nat', '-D', 'OUTPUT'] + s['nat_rule']

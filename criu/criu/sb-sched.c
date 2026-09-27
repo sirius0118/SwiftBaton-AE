@@ -128,6 +128,28 @@ int sb_sched_seed(struct sb_sched *s, uint64_t page)
     return 0;
 }
 
+int sb_sched_seed_bitmap(struct sb_sched *s, uint64_t first, uint64_t pages,
+                         const volatile unsigned long *bitmap, uint64_t *seeded)
+{
+    const unsigned bits = 8 * sizeof(unsigned long);
+    uint64_t n = 0;
+    if (!s || !bitmap || !seeded || first > s->pages || pages > s->pages - first) return -EINVAL;
+    for (uint64_t base = 0; base < pages; base += bits) {
+        unsigned long word = bitmap[base / bits];
+        if (pages - base < bits) word &= (1UL << (pages - base)) - 1;
+        while (word) {
+            unsigned bit = __builtin_ctzl(word);
+            uint64_t *state = page_state(s, first + base + bit);
+            if (*state) return -EALREADY;
+            *state = SB_PAGE_PRECOPY_PENDING;
+            n++;
+            word &= word - 1;
+        }
+    }
+    *seeded = n;
+    return 0;
+}
+
 int sb_sched_seed_commit(struct sb_sched *s, uint64_t page)
 {
     uint64_t expected = SB_PAGE_PRECOPY_PENDING;

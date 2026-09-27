@@ -1838,6 +1838,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
          * absent in the child's source mm. Drop all lazy anonymous contents
          * before arming sparse data ranges; omitted holes then demand-zero.
          * The restorer code/stack/args are outside these final application VMAs. */
+        pr_info("SB_PIE_SETUP lazy_reset_begin regions=%u\n", args->sbk_regions_nr);
         for (i = 0; i < args->vmas_n; i++) {
             vma_entry = args->vmas + i;
             if (vma_entry_can_be_lazy(vma_entry) &&
@@ -1846,10 +1847,12 @@ __visible long __export_restore_task(struct task_restore_args *args)
                 goto core_restore_end;
             }
         }
+		pr_info("SB_PIE_SETUP lazy_reset_done arm_begin\n");
 		if (sbk_pie_arm(args->sbk_regions, args->sbk_regions_nr)) {
 			pr_err("SwiftBaton-K anonymous range installation failed\n");
 			goto core_restore_end;
 		}
+		pr_info("SB_PIE_SETUP arm_done\n");
 		if (sbk_pie_ready(args->sbk_ready_fd)) {
 			pr_err("SwiftBaton-K readiness notification failed\n");
 			goto core_restore_end;
