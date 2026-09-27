@@ -50,12 +50,16 @@ struct sbk_hot_snapshot {
   int pid;
   uint64_t *addresses;
   size_t count;
+  struct sbk_hot_run *runs;
+  size_t run_count;
 };
 static struct sbk_hot_snapshot *hot_snapshots;
 static unsigned hot_snapshot_count;
 static void release_hot_snapshots(void) {
-  for (unsigned i = 0; i < hot_snapshot_count; i++)
+  for (unsigned i = 0; i < hot_snapshot_count; i++) {
     free(hot_snapshots[i].addresses);
+    free(hot_snapshots[i].runs);
+  }
   free(hot_snapshots);
   hot_snapshots = NULL;
   hot_snapshot_count = 0;
@@ -85,7 +89,10 @@ static int prepare_hot_snapshots(void) {
         }
         h->addresses[h->count++] = node->addr;
       }
-    pr_info("SB_KERNEL hot_ps pid=%d pages=%zu\n", h->pid, h->count);
+    int ret = sbk_hot_runs_prepare(h->addresses, h->count, &h->runs, &h->run_count);
+    if (ret) { release_hot_snapshots(); return ret; }
+    pr_info("SB_KERNEL hot_ps pid=%d pages=%zu runs=%zu strategy=%s\n",
+            h->pid, h->count, h->run_count, h->run_count ? "merge" : "binary");
   }
   return 0;
 }
@@ -338,10 +345,9 @@ int sb_kernel_register_final(struct parasite_ctl *ctl, int pid, int vpid,
     for (unsigned p = 0; p < hot_snapshot_count; p++) {
       const struct sbk_hot_snapshot *h = &hot_snapshots[p];
       if (h->pid != pid) continue;
-      for (size_t j = 0; j < h->count; j++) {
-        ret = sbk_hot_index_append(hot_index, count, h->addresses[j]);
-        if (ret) goto out;
-      }
+      ret = sbk_hot_index_append_runs(hot_index, count, h->addresses, h->count,
+                                      h->runs, h->run_count);
+      if (ret) goto out;
     }
   }
   hot_ns = kernel_now_ns() - stage;
