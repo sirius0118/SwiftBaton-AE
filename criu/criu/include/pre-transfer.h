@@ -93,6 +93,9 @@ extern void *page_client_load_page(void *args);
 extern void *page_client_load_page_V2(void *args);
 extern int rdma_prepare_pretransfer(struct resources *res, struct data_buffer *pre_mr, int type);
 extern int rdma_read_pretransfer(struct resources *res, struct data_buffer *pre_mr, int type);
+/* Second PCLive round: read the updated page catalog, then only pages whose
+ * payload changed into the existing resident receive memfd. */
+extern int rdma_read_pclive_delta(struct resources *res, struct data_buffer *pre_mr);
 
 extern void update_pid_array(uint64_t *pids, int size);
 

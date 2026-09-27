@@ -2397,7 +2397,7 @@ int cr_lazy_pages(bool daemon)
 		if (opts.sb_pclive_refresh) {
 			int marker;
 			sb_trace("pclive.rdma_refresh_begin");
-			if (rdma_read_pretransfer(&PT_res, pre_mr, 1)) return -1;
+			if (rdma_read_pclive_delta(&PT_res, pre_mr)) return -1;
 			__sync_synchronize();
 			marker = openat(get_service_fd(IMG_FD_OFF), SB_PCLIVE_READY,
 			                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);

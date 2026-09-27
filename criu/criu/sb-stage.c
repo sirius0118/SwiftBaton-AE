@@ -48,6 +48,7 @@ static int stage_numa_node = -1;
 static int stage_snapshot_fd = -1;
 static void *stage_snapshot;
 static uint64_t stage_snapshot_length, stage_identity_hash;
+static bool stage_refresh_only_changed;
 
 static uint64_t stage_identity(const struct sb_precopy_view *view)
 {
@@ -100,7 +101,9 @@ static void *copy_stage_pages(void *unused)
         for (uint64_t i = begin; i < end; i++) {
             const struct sb_precopy_page *page = &stage_view.pages[i];
             while (i >= regions[low].first + regions[low].count) low++;
-            if (!regions[low].mapping || !page->copied || !(selected[i / 8] & (1U << (i % 8)))) continue;
+            if (!regions[low].mapping || !page->copied ||
+                (stage_refresh_only_changed && page->copied != 2) ||
+                !(selected[i / 8] & (1U << (i % 8)))) continue;
             memcpy((char *)regions[low].mapping + page->address - regions[low].start,
                    (const char *)stage_view.data + i * PAGE_BYTES, PAGE_BYTES);
             copied++;
@@ -310,15 +313,18 @@ int sb_stage_refresh(int image_dir_fd, unsigned workers)
         if (payload == MAP_FAILED) return -1;
         stage_view.data = payload;
         __atomic_store_n(&copy_next, 0, __ATOMIC_RELAXED);
+        stage_refresh_only_changed = true;
         for (unsigned i = 0; i < workers; i++) {
             if (pthread_create(&threads[i], NULL, copy_stage_pages, NULL)) {
                 for (unsigned j = 0; j < i; j++) pthread_join(threads[j], NULL);
+                stage_refresh_only_changed = false;
                 munmap(payload, updated.count * PAGE_BYTES);
                 stage_view.data = NULL;
                 return -1;
             }
         }
         for (unsigned i = 0; i < workers; i++) pthread_join(threads[i], NULL);
+        stage_refresh_only_changed = false;
         if (munmap(payload, updated.count * PAGE_BYTES)) return -1;
         stage_view.data = NULL;
     }

@@ -18,6 +18,9 @@ typedef int (*sb_precopy_adopted_fn)(pid_t pid, uint64_t index);
 /* Diagnostic counters only; never changes the page-validity decision. */
 void sb_precopy_trace_reasons(int enabled);
 
+/* Parse just the fixed header before the receiver fetches the remaining
+ * metadata. The full page-index validation still happens in view(). */
+int sb_precopy_metadata_length(const void *buffer, uint64_t length, uint64_t *offset);
 int sb_precopy_view(void *buffer, uint64_t length, struct sb_precopy_view *view);
 int sb_precopy_validity(const struct sb_precopy_view *view, int dirfd,
                        struct sb_precopy_pid **pids, size_t *count, unsigned char **bitmap);
@@ -29,7 +32,8 @@ void sb_precopy_set_adopted(sb_precopy_adopted_fn callback);
 
 int sb_precopy_build(struct sb_precopy_page *candidates, size_t count,
                      uint64_t limit_bytes, unsigned workers, void **buffer, uint64_t *length);
-/* PS-only PCLive round: re-arm soft-dirty before re-copying every candidate.
+/* PS-only PCLive round: re-arm soft-dirty, re-read every candidate locally,
+ * and mark only changed payload pages (copied==2) for second-round RDMA.
  * The page identity, MR address, snapshot length and nonce stay unchanged. */
 int sb_precopy_refresh_all(unsigned workers);
 /* Call with original application threads stopped. eligible() also reserves

@@ -26,7 +26,7 @@ Current verification:
 | Baseline | Implementation | Verified |
 | --- | --- | --- |
 | Native CRIU | Unmodified upstream v3.18 and rsocket image transfer | Standalone process, Redis container, 100k and 500k Redis/YCSB with full key/canary verification |
-| PCLive prototype | Two PS snapshots: second snapshot RDMA-reads into the same target memfd and refreshes anonymous resident staging in place; final validity and `mremap` adoption | 100k and 500k Redis/YCSB with full key/canary validation |
+| PCLive prototype | Two PS snapshots: source re-reads all pages locally but RDMA-reads only changed payloads into the same target memfd, refreshes anonymous resident staging, then validates and adopts with `mremap` | 100k and 500k Redis/YCSB with full key-length/canary validation |
 | Optimized post-copy prototype | PS payload disabled; independent demand and address-order BG lanes | 100k smoke and 500k Redis/YCSB, PF=73,581, BG=1,663,096, FT=PS=0 in full run |
 | Hybrid-copy prototype | PS staging plus independent demand/BG; address-order BG | 100k smoke and 500k Redis/YCSB, PS=756,179, PF=32,758, BG=947,740 in full run |
 | Remote-fork prototype | Kernel demand-only during service; target exit retires unused markers before source MR revocation | 100k smoke and 500k Redis/YCSB, PF=1,545,059, FT=BG=PS=0, 17,422 retired unused in full run |
@@ -40,12 +40,14 @@ uses 100k x 1 KiB, while `--profile redis` uses 500k x 10 KiB.
 large-load trials; for example, `--profile redis --threads 16 --duration 300
 --warmup 20 --execute`.
 
-The PCLive second round re-copies all candidates to avoid the soft-dirty epoch
-handoff race; dirty-only deltas and more than two rounds are not implemented.
-Its 500k x 10 KiB trial (`sb_ae_20260928_065735`) refreshed 1,534,213
-resident pages, verified every indexed key and the 8 MiB canary, and observed
-a 362.427 ms client-wide success gap. The stable target reference was 44.3k
-ops/s, with TTR90 starting 31.92 s after service resumed. The hybrid profile
+The PCLive second round re-reads all candidates locally to avoid the
+soft-dirty epoch handoff race, but transfers only changed payloads over RDMA.
+Its 500k x 10 KiB trial (`sb_ae_20260928_074945`) refreshed 267,631
+resident pages and read 1.170 GB over RDMA including metadata. Every indexed
+key length and the 8 MiB canary passed; the client success gap was 328.775 ms,
+stable target reference 44.8k ops/s, and TTR90 started 3.520 s after service
+resumed. More than two rounds and source-side dirty-only reads are not yet
+implemented. The hybrid profile
 uses a page index and bounded queues, not a pipe per missing run. Its
 checkerboard stress test committed 1,048,576 pages with 524,288 isolated
 pre-copy fragments and four file descriptors before and after. Native CRIU's

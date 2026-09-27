@@ -170,6 +170,11 @@ try:
     command+=['--reference-event','sentinel_verified']
    q=subprocess.run(command,stdout=log,stderr=subprocess.STDOUT)
   result['analysis'][name]=q.returncode
+ if a.baseline=='pclive':
+  with (out/'verify_delta.py.log').open('w') as log:
+   q=subprocess.run([sys.executable,str(R/'baseline/pclive/verify_delta.py'),str(state.parent)],
+                    stdout=log,stderr=subprocess.STDOUT)
+  result['analysis']['verify_delta.py']=q.returncode
  failed=[name for name,code in result['analysis'].items() if code]
  if failed:raise RuntimeError('Validation failed: '+', '.join(failed))
  result['success']=True

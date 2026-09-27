@@ -52,6 +52,7 @@ static struct cache_header *source;
 static size_t source_next;
 static unsigned char *source_allowed;
 static bool trace_reasons;
+static bool source_delta_mode, source_copy_error;
 
 void sb_precopy_trace_reasons(int enabled) { trace_reasons = !!enabled; }
 
@@ -192,8 +193,13 @@ fail:
 static void *source_copy_worker(void *unused)
 {
     struct sb_precopy_page *pages = (void *)(source + 1);
+    unsigned char *scratch = source_delta_mode ? malloc(SB_COPY_BATCH * SB_PAGE) : NULL;
     size_t begin;
     (void)unused;
+    if (source_delta_mode && !scratch) {
+        __atomic_store_n(&source_copy_error, true, __ATOMIC_RELAXED);
+        return NULL;
+    }
     while ((begin = __atomic_fetch_add(&source_next, SB_COPY_BATCH, __ATOMIC_RELAXED)) < source->pages) {
         size_t end = begin + SB_COPY_BATCH;
         if (end > source->pages) end = source->pages;
@@ -205,7 +211,8 @@ static void *source_copy_worker(void *unused)
             int pagemap;
             char path[64];
             while (begin + count < end && pages[begin + count].pid == (uint32_t)pid) {
-                local[count].iov_base = (char *)source + source->data_offset + (begin + count) * SB_PAGE;
+                local[count].iov_base = source_delta_mode ? (char *)scratch + count * SB_PAGE :
+                    (char *)source + source->data_offset + (begin + count) * SB_PAGE;
                 remote[count].iov_base = (void *)pages[begin + count].address;
                 local[count].iov_len = remote[count].iov_len = SB_PAGE;
                 count++;
@@ -234,11 +241,19 @@ static void *source_copy_worker(void *unused)
             do { bytes = process_vm_readv(pid, local, count, remote, count, 0); }
             while (bytes < 0 && errno == EINTR);
             if (bytes > 0)
-                for (size_t j = 0; j < (size_t)bytes / SB_PAGE; j++) pages[begin + j].copied = 1;
+                for (size_t j = 0; j < (size_t)bytes / SB_PAGE; j++) {
+                    unsigned char *resident = (unsigned char *)source + source->data_offset +
+                                               (begin + j) * SB_PAGE;
+                    if (source_delta_mode && memcmp(resident, scratch + j * SB_PAGE, SB_PAGE)) {
+                        memcpy(resident, scratch + j * SB_PAGE, SB_PAGE);
+                        pages[begin + j].copied = 2; /* Second-round payload changed. */
+                    } else pages[begin + j].copied = 1;
+                }
             /* Partial/unreadable pages are invalid, never silently reused. */
             begin += count;
         }
     }
+    free(scratch);
     return NULL;
 }
 
@@ -295,11 +310,11 @@ int sb_precopy_refresh_all(unsigned workers)
 {
     pthread_t threads[SB_MAX_WORKERS];
     struct sb_precopy_page *pages;
-    size_t copied = 0;
+    size_t copied = 0, changed = 0;
     if (!source || !workers || workers > SB_MAX_WORKERS) return -1;
-    /* Every candidate is re-copied, so no write in the gap between rounds
-     * can be lost when changing the soft-dirty epoch. Dirty-only recopy would
-     * need an atomic write-protect handoff. This baseline favors correctness. */
+    /* Re-read every candidate after re-arming soft-dirty, then compare bytes
+     * with the first snapshot. Network transfer is sparse, but local reads
+     * cover writes in the old epoch without an unsafe dirty-bit handoff. */
     for (struct process *p = processes; p; p = p->next) {
         char path[64];
         int fd;
@@ -316,18 +331,26 @@ int sb_precopy_refresh_all(unsigned workers)
         pages[i].pfn = 0;
     }
     __atomic_store_n(&source_next, 0, __ATOMIC_RELAXED);
+    source_delta_mode = true;
+    source_copy_error = false;
     if (!source->pages) workers = 0;
     for (unsigned i = 0; i < workers; i++) {
         if (pthread_create(&threads[i], NULL, source_copy_worker, NULL)) {
             for (unsigned j = 0; j < i; j++) pthread_join(threads[j], NULL);
+            source_delta_mode = false;
             return -1;
         }
     }
     for (unsigned i = 0; i < workers; i++) pthread_join(threads[i], NULL);
-    for (size_t i = 0; i < source->pages; i++) copied += pages[i].copied;
-    pr_info("SB_PCLIVE refresh_round pages=%llu copied=%zu bytes=%llu workers=%u\n",
-            (unsigned long long)source->pages, copied,
-            (unsigned long long)source->bytes, workers);
+    source_delta_mode = false;
+    if (source_copy_error) return -1;
+    for (size_t i = 0; i < source->pages; i++) {
+        copied += !!pages[i].copied;
+        changed += pages[i].copied == 2;
+    }
+    pr_info("SB_PCLIVE refresh_round pages=%llu copied=%zu changed=%zu rdma_payload_bytes=%llu workers=%u\n",
+            (unsigned long long)source->pages, copied, changed,
+            (unsigned long long)(changed * SB_PAGE), workers);
     return 0;
 }
 
@@ -664,17 +687,27 @@ static sb_precopy_adopted_fn already_adopted;
 void sb_precopy_set_adopted(sb_precopy_adopted_fn callback) { already_adopted = callback; }
 
 
-int sb_precopy_view(void *buffer, uint64_t length, struct sb_precopy_view *view)
+int sb_precopy_metadata_length(const void *buffer, uint64_t length, uint64_t *offset)
 {
-    struct cache_header *header = buffer;
+    const struct cache_header *header = buffer;
     const struct sb_precopy_page *pages;
-    if (!buffer || !view || length < sizeof(*header) || header->magic != SB_MAGIC ||
+    if (!buffer || !offset || length < sizeof(*header) || header->magic != SB_MAGIC ||
         header->version != SB_VERSION || header->bytes != length ||
         header->pages > (length - sizeof(*header)) / sizeof(*pages) ||
         header->data_offset < sizeof(*header) + header->pages * sizeof(*pages) ||
         header->data_offset > length || (header->data_offset & (SB_PAGE - 1)) ||
         header->pages != (length - header->data_offset) / SB_PAGE ||
         (length - header->data_offset) % SB_PAGE) return -1;
+    *offset = header->data_offset;
+    return 0;
+}
+
+int sb_precopy_view(void *buffer, uint64_t length, struct sb_precopy_view *view)
+{
+    struct cache_header *header = buffer;
+    const struct sb_precopy_page *pages;
+    uint64_t offset;
+    if (!view || sb_precopy_metadata_length(buffer, length, &offset)) return -1;
     pages = (const void *)(header + 1);
     for (uint64_t i = 0; i < header->pages; i++) {
         if (!pages[i].pid || pages[i].region_end <= pages[i].region_start ||

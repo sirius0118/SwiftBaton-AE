@@ -721,6 +721,104 @@ cleanup:
 	return result;
 }
 
+#define PCLIVE_WR_BATCH 64
+struct pclive_read_batch {
+    struct ibv_send_wr wr[PCLIVE_WR_BATCH];
+    struct ibv_sge sge[PCLIVE_WR_BATCH];
+    unsigned count;
+    uint64_t bytes, completions;
+};
+
+static int pclive_flush(struct resources *res, struct pclive_read_batch *batch)
+{
+    struct ibv_send_wr *bad;
+    struct ibv_wc wc;
+    uint64_t started;
+    int ret;
+    if (!batch->count) return 0;
+    batch->wr[batch->count - 1].next = NULL;
+    batch->wr[batch->count - 1].send_flags = IBV_SEND_SIGNALED;
+    ret = ibv_post_send(res->qp, batch->wr, &bad);
+    if (ret) { errno = ret; pr_perror("PCLive delta RDMA post"); return -1; }
+    started = pretransfer_now_ns();
+    for (;;) {
+        ret = ibv_poll_cq(res->cq, 1, &wc);
+        if (ret > 0) break;
+        if (ret < 0 || pretransfer_now_ns() - started > UINT64_C(15000000000)) {
+            pr_err("PCLive delta RDMA completion timed out\n");
+            return -1;
+        }
+    }
+    if (wc.status != IBV_WC_SUCCESS) {
+        pr_err("PCLive delta RDMA completion status=%u vendor=%u\n", wc.status, wc.vendor_err);
+        return -1;
+    }
+    batch->completions++;
+    batch->count = 0;
+    return 0;
+}
+
+static int pclive_add(struct resources *res, struct pretransfer_rx *rx,
+                      struct data_buffer *descriptor, struct pclive_read_batch *batch,
+                      uint64_t offset, uint64_t length)
+{
+    if (offset > rx->length || length > rx->length - offset) return -1;
+    while (length) {
+        unsigned n;
+        uint64_t chunk = length > MAX_BLOCK_SIZE ? MAX_BLOCK_SIZE : length;
+        if (batch->count == PCLIVE_WR_BATCH && pclive_flush(res, batch)) return -1;
+        n = batch->count++;
+        batch->sge[n] = (struct ibv_sge){
+            .addr = (uintptr_t)rx->buffer + offset,
+            .length = chunk,
+            .lkey = rx->mr->lkey,
+        };
+        batch->wr[n] = (struct ibv_send_wr){
+            .sg_list = &batch->sge[n], .num_sge = 1, .opcode = IBV_WR_RDMA_READ,
+            .wr.rdma = { .remote_addr = descriptor->r_addr + offset,
+                         .rkey = descriptor->mr.rkey },
+        };
+        if (n) batch->wr[n - 1].next = &batch->wr[n];
+        batch->bytes += chunk;
+        offset += chunk;
+        length -= chunk;
+    }
+    return 0;
+}
+
+int rdma_read_pclive_delta(struct resources *res, struct data_buffer *pre_mr)
+{
+    struct pretransfer_rx *rx = prepare_pretransfer_rx(res, pre_mr, 1);
+    struct pclive_read_batch batch = {0};
+    struct sb_precopy_view view;
+    uint64_t metadata, changed = 0, runs = 0;
+    if (!rx || rx->length < 4096) return -1;
+    if (pclive_add(res, rx, pre_mr, &batch, 0, 4096) || pclive_flush(res, &batch) ||
+        sb_precopy_metadata_length(rx->buffer, rx->length, &metadata)) return -1;
+    if (metadata > 4096 &&
+        (pclive_add(res, rx, pre_mr, &batch, 4096, metadata - 4096) ||
+         pclive_flush(res, &batch))) return -1;
+    if (sb_precopy_view(rx->buffer, rx->length, &view)) return -1;
+    for (uint64_t i = 0; i < view.count;) {
+        uint64_t first;
+        if (view.pages[i].copied > 2) return -1;
+        if (view.pages[i].copied != 2) { i++; continue; }
+        first = i++;
+        while (i < view.count && view.pages[i].copied == 2) i++;
+        if (pclive_add(res, rx, pre_mr, &batch, metadata + first * 4096,
+                       (i - first) * 4096)) return -1;
+        changed += i - first;
+        runs++;
+    }
+    if (pclive_flush(res, &batch) || ibv_dereg_mr(rx->mr)) return -1;
+    rx->mr = NULL;
+    pr_info("SB_PCLIVE rdma_delta metadata_bytes=%llu payload_bytes=%llu changed_pages=%llu runs=%llu completions=%llu total_bytes=%llu\n",
+            (unsigned long long)metadata, (unsigned long long)(changed * 4096),
+            (unsigned long long)changed, (unsigned long long)runs,
+            (unsigned long long)batch.completions, (unsigned long long)batch.bytes);
+    return 0;
+}
+
 // dumper, page server
 static void update_read_pid_data_list(void *mem)
 {
