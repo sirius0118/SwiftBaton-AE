@@ -88,6 +88,9 @@ struct sbk_context {
 static struct workqueue_struct *reap_wq;
 static const struct vm_operations_struct sbk_vm_ops;
 static const struct file_operations sbk_fops;
+static bool arm_timing;
+module_param(arm_timing, bool, 0444);
+MODULE_PARM_DESC(arm_timing, "Log anonymous ARM phase durations; disabled by default");
 static bool early_prefetch = true;
 module_param(early_prefetch, bool, 0444);
 MODULE_PARM_DESC(early_prefetch, "Queue neighbors after demand WR post, before completion; false retains late-trigger ablation");
@@ -561,15 +564,18 @@ static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 	struct sbk_anon_arm a;
 	unsigned long i;
 	int ret;
+	u64 begin = 0, allocated = 0, bound = 0, bridged = 0;
 	if (!c->configured || c->mapped || c->tokens_created ||
 	    (c->pretransferred && !c->sealed) || atomic_read(&c->stopping))
 		return -EINVAL;
 	if (copy_from_user(&a, user, sizeof(a)))
 		return -EFAULT;
+	if (arm_timing) begin = ktime_get_ns();
 	atomic64_set(&c->retired_tokens, 0);
 	c->token_ids = kvcalloc(c->cfg.pages, sizeof(*c->token_ids), GFP_KERNEL);
 	if (!c->token_ids)
 		return -ENOMEM;
+	if (arm_timing) allocated = ktime_get_ns();
 	c->tokens_created = sbk_token_pool_take(c->token_pool, c->entries,
 			sizeof(*c->entries), c->cfg.pages, c->token_ids, sbk_token_retain);
 	for (i = c->tokens_created; i < c->cfg.pages; i++) {
@@ -582,11 +588,13 @@ static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 		c->tokens_created++;
 		sbk_token_pool_fallback(c->token_pool);
 	}
+	if (arm_timing) bound = ktime_get_ns();
 	c->base = a.address;
 	c->mm = current->mm;
 	mmgrab(c->mm);
 	c->anonymous = c->mapped = true;
 	ret = sbk_pte_arm(c->mm, c->base, c->cfg.pages, c->token_ids);
+	if (arm_timing) bridged = ktime_get_ns();
 	if (!ret) {
 		c->sealed = true;
 		atomic_set_release(&c->armed, 1);
@@ -596,6 +604,10 @@ static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 			sbk_pte_token_put(c->token_ids[i]);
 		c->tokens_created = 0;
 		sbk_maybe_drain(c);
+		if (arm_timing)
+			pr_info("SBK_ARM pages=%llu alloc_ns=%llu bind_ns=%llu bridge_ns=%llu drop_ns=%llu total_ns=%llu\n",
+				c->cfg.pages, allocated - begin, bound - allocated,
+				bridged - bound, ktime_get_ns() - bridged, ktime_get_ns() - begin);
 		return 0;
 	}
 	c->anonymous = c->mapped = false;

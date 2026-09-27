@@ -1,0 +1,107 @@
+--- a/mm/swiftbaton_pte.c
++++ b/mm/swiftbaton_pte.c
+@@ -171,8 +171,9 @@
+ 		return -EEXIST;
+ 	t->anchor = arm->anchor;
+ 	t->offset = linear_page_index(arm->vma, addr);
+-	kref_get(&arm->anchor->refs);
+-	kref_get(&t->refs);
++	/* Transfer this lookup reference to the PTE. Account the shared anchor
++	 * in one batch before rollback or releasing mmap_write_lock. */
++	arm->tokens[(addr - arm->start) >> PAGE_SHIFT] = NULL;
+ 	set_pte_at(arm->mm, addr, pte, swp_entry_to_pte(swp_entry(SWP_SWIFTBATON, t->id)));
+ 	arm->installed++;
+ 	return 0;
+@@ -191,13 +192,25 @@
+ 	arm.tokens = kvcalloc(count, sizeof(*arm.tokens), GFP_KERNEL);
+ 	if (!arm.tokens)
+ 		return -ENOMEM;
+-	for (i = 0; i < count; i++) {
+-		arm.tokens[i] = sbk_token_lookup(ids[i]);
+-		if (!arm.tokens[i]) {
+-			ret = -ENOENT;
++	/* Keep lock hold bounded even for a million-page region. Creator refs
++	 * are still owned by the caller; each successful lookup acquires its
++	 * own ref, later transferred to exactly one PTE or released on error. */
++	for (i = 0; i < count;) {
++		unsigned long last = min(i + 64, count);
++		xa_lock(&sbk_tokens);
++		for (; i < last; i++) {
++			struct sbk_pte_token *t = xa_load(&sbk_tokens, ids[i]);
++			if (!t || !kref_get_unless_zero(&t->refs)) {
++				ret = -ENOENT;
++				break;
++			}
++			arm.tokens[i] = t;
++			refs++;
++		}
++		xa_unlock(&sbk_tokens);
++		if (ret)
+ 			goto out;
+-		}
+-		refs++;
++		cond_resched();
+ 	}
+ 	mmap_write_lock(mm);
+ 	vma = find_vma(mm, start);
+@@ -220,25 +233,38 @@
+ 	arm.anchor->anon_vma = vma->anon_vma;
+ 	get_anon_vma(vma->anon_vma);
+ 	arm.vma = vma;
+-	for (i = 0; i < count; i++) {
+-		unsigned long addr = start + (i << PAGE_SHIFT);
+-		pmd_t *pmd = sbk_find_pmd(mm, addr);
++	/* Inspect each PTE page under one lock, instead of repeating the upper
++	 * table walk and lock/unlock for every 4 KiB. Huge/special entries are
++	 * rejected before apply_to_page_range; no existing PTE is overwritten. */
++	for (i = start; i < end;) {
++		unsigned long next = pmd_addr_end(i, end), addr;
++		pmd_t *pmd = sbk_find_pmd(mm, i);
+ 		spinlock_t *ptl;
+-		pte_t *pte;
++		pte_t *pte, *base;
+ 		if (IS_ERR(pmd)) {
+ 			ret = PTR_ERR(pmd);
+ 			goto unlock;
+ 		}
+-		if (!pmd)
+-			continue;
+-		pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
+-		if (!pte_none(*pte))
+-			ret = -EEXIST;
+-		pte_unmap_unlock(pte, ptl);
+-		if (ret)
+-			goto unlock;
++		if (pmd) {
++			base = pte = pte_offset_map_lock(mm, pmd, i, &ptl);
++			for (addr = i; addr < next; addr += PAGE_SIZE, pte++)
++				if (!pte_none(*pte)) {
++					ret = -EEXIST;
++					break;
++				}
++			pte_unmap_unlock(base, ptl);
++			if (ret)
++				goto unlock;
++		}
++		i = next;
++		cond_resched();
+ 	}
+ 	ret = apply_to_page_range(mm, start, len, sbk_arm_one, &arm);
++	/* mmap_write_lock prevents faults, fork and unmap while the PTEs are
++	 * being published. Add anchor ownership before any path can retire a
++	 * marker, including our own partial-install rollback. */
++	if (arm.installed)
++		refcount_add(arm.installed, &arm.anchor->refs.refcount);
+ 	/* Page-table allocation can fail halfway; roll back only our installed prefix. */
+ 	if (ret && arm.installed)
+ 		zap_page_range(vma, start, arm.installed << PAGE_SHIFT);
+@@ -248,7 +274,8 @@
+ 		kref_put(&arm.anchor->refs, sbk_anchor_release);
+ out:
+ 	for (i = 0; i < refs; i++)
+-		kref_put(&arm.tokens[i]->refs, sbk_token_release);
++		if (arm.tokens[i])
++			kref_put(&arm.tokens[i]->refs, sbk_token_release);
+ 	kvfree(arm.tokens);
+ 	return ret;
+ }

@@ -1,0 +1,247 @@
+{
+  "virtual_machine_only": true,
+  "production_downtime_claim": false,
+  "all_kernel_export_crcs_identical": true,
+  "export_count": 11981,
+  "config_identical": true,
+  "summary": [
+    {
+      "pages": 16384,
+      "baseline_ms": [
+        2.359755,
+        2.237069,
+        2.187655,
+        2.25145,
+        2.189377,
+        2.216262
+      ],
+      "batch_ms": [
+        1.396806,
+        1.391931,
+        1.35802,
+        1.493906,
+        1.397001,
+        1.369859
+      ],
+      "baseline_median_ms": 2.2266655,
+      "batch_median_ms": 1.3943685000000001,
+      "reduction_percent": 37.37862736904128
+    },
+    {
+      "pages": 262144,
+      "baseline_ms": [
+        87.715608,
+        76.993775,
+        71.911679,
+        87.297067,
+        88.111445,
+        76.4917
+      ],
+      "batch_ms": [
+        41.550035,
+        45.314018,
+        43.438192,
+        39.360777,
+        43.750606,
+        40.066554
+      ],
+      "baseline_median_ms": 82.145421,
+      "batch_median_ms": 42.4941135,
+      "reduction_percent": 48.26965035580012
+    }
+  ],
+  "runs": [
+    {
+      "tag": "base-a",
+      "repeat": 0,
+      "pages": 16384,
+      "config_ns": 1300355,
+      "reserve_ns": 2186780,
+      "arm_ns": 2359755
+    },
+    {
+      "tag": "base-a",
+      "repeat": 1,
+      "pages": 16384,
+      "config_ns": 1506720,
+      "reserve_ns": 2089285,
+      "arm_ns": 2237069
+    },
+    {
+      "tag": "base-a",
+      "repeat": 2,
+      "pages": 16384,
+      "config_ns": 1255805,
+      "reserve_ns": 2013769,
+      "arm_ns": 2187655
+    },
+    {
+      "tag": "base-a",
+      "repeat": 0,
+      "pages": 262144,
+      "config_ns": 50097099,
+      "reserve_ns": 81384329,
+      "arm_ns": 87715608
+    },
+    {
+      "tag": "base-a",
+      "repeat": 1,
+      "pages": 262144,
+      "config_ns": 25659330,
+      "reserve_ns": 38253681,
+      "arm_ns": 76993775
+    },
+    {
+      "tag": "base-a",
+      "repeat": 2,
+      "pages": 262144,
+      "config_ns": 25526322,
+      "reserve_ns": 42969041,
+      "arm_ns": 71911679
+    },
+    {
+      "tag": "batch-a",
+      "repeat": 0,
+      "pages": 16384,
+      "config_ns": 1509269,
+      "reserve_ns": 2222085,
+      "arm_ns": 1396806
+    },
+    {
+      "tag": "batch-a",
+      "repeat": 1,
+      "pages": 16384,
+      "config_ns": 1293681,
+      "reserve_ns": 2068499,
+      "arm_ns": 1391931
+    },
+    {
+      "tag": "batch-a",
+      "repeat": 2,
+      "pages": 16384,
+      "config_ns": 1235020,
+      "reserve_ns": 1959777,
+      "arm_ns": 1358020
+    },
+    {
+      "tag": "batch-a",
+      "repeat": 0,
+      "pages": 262144,
+      "config_ns": 32428326,
+      "reserve_ns": 39987260,
+      "arm_ns": 41550035
+    },
+    {
+      "tag": "batch-a",
+      "repeat": 1,
+      "pages": 262144,
+      "config_ns": 23217886,
+      "reserve_ns": 37549153,
+      "arm_ns": 45314018
+    },
+    {
+      "tag": "batch-a",
+      "repeat": 2,
+      "pages": 262144,
+      "config_ns": 23559468,
+      "reserve_ns": 37943437,
+      "arm_ns": 43438192
+    },
+    {
+      "tag": "batch-b",
+      "repeat": 0,
+      "pages": 16384,
+      "config_ns": 1289629,
+      "reserve_ns": 2166012,
+      "arm_ns": 1493906
+    },
+    {
+      "tag": "batch-b",
+      "repeat": 1,
+      "pages": 16384,
+      "config_ns": 1190653,
+      "reserve_ns": 2136993,
+      "arm_ns": 1397001
+    },
+    {
+      "tag": "batch-b",
+      "repeat": 2,
+      "pages": 16384,
+      "config_ns": 1068392,
+      "reserve_ns": 2013718,
+      "arm_ns": 1369859
+    },
+    {
+      "tag": "batch-b",
+      "repeat": 0,
+      "pages": 262144,
+      "config_ns": 34212158,
+      "reserve_ns": 39448191,
+      "arm_ns": 39360777
+    },
+    {
+      "tag": "batch-b",
+      "repeat": 1,
+      "pages": 262144,
+      "config_ns": 21598563,
+      "reserve_ns": 36890791,
+      "arm_ns": 43750606
+    },
+    {
+      "tag": "batch-b",
+      "repeat": 2,
+      "pages": 262144,
+      "config_ns": 23964340,
+      "reserve_ns": 38296109,
+      "arm_ns": 40066554
+    },
+    {
+      "tag": "base-b",
+      "repeat": 0,
+      "pages": 16384,
+      "config_ns": 1485808,
+      "reserve_ns": 2161101,
+      "arm_ns": 2251450
+    },
+    {
+      "tag": "base-b",
+      "repeat": 1,
+      "pages": 16384,
+      "config_ns": 1258160,
+      "reserve_ns": 2013526,
+      "arm_ns": 2189377
+    },
+    {
+      "tag": "base-b",
+      "repeat": 2,
+      "pages": 16384,
+      "config_ns": 1263969,
+      "reserve_ns": 1999613,
+      "arm_ns": 2216262
+    },
+    {
+      "tag": "base-b",
+      "repeat": 0,
+      "pages": 262144,
+      "config_ns": 47212010,
+      "reserve_ns": 80881017,
+      "arm_ns": 87297067
+    },
+    {
+      "tag": "base-b",
+      "repeat": 1,
+      "pages": 262144,
+      "config_ns": 24794078,
+      "reserve_ns": 47819014,
+      "arm_ns": 88111445
+    },
+    {
+      "tag": "base-b",
+      "repeat": 2,
+      "pages": 262144,
+      "config_ns": 26065087,
+      "reserve_ns": 42615702,
+      "arm_ns": 76491700
+    }
+  ]
+}
