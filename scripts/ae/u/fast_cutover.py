@@ -31,7 +31,10 @@ def command(argv, accepted=(0,)):
     p = subprocess.run(argv, capture_output=True, text=True, timeout=12)
     if p.returncode not in accepted:
         raise RuntimeError(f'{argv[0]} exited {p.returncode}: {p.stderr}')
-    if p.returncode == 1 and '0 flow entries have been deleted' not in p.stderr:
+    # conntrack-tools versions report an empty selection with either message.
+    if p.returncode == 1 and not any(marker in p.stderr for marker in
+                                      ('0 flow entries have been deleted',
+                                       "Operation failed: such conntrack doesn't exist")):
         raise RuntimeError(f'{argv[0]} did not confirm an empty conntrack selection: {p.stderr}')
     return dict(returncode=p.returncode, stderr=p.stderr.strip())
 
@@ -108,7 +111,7 @@ def trigger(config, out):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('role', choices=['listen', 'trigger'])
+    parser.add_argument('role', choices=['listen', 'trigger', 'resume'])
     parser.add_argument('config', type=Path)
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
@@ -118,7 +121,13 @@ if __name__ == '__main__':
         raise SystemExit('Invalid experiment port')
     out = args.config.parent
     try:
-        (listen if args.role == 'listen' else trigger)(config, out)
+        if config.get('buffered'):
+            import buffered_cutover
+            if args.role=='listen':buffered_cutover.listen(config,out)
+            else:buffered_cutover.peer(config,out,'source' if args.role=='trigger' else 'target')
+        else:
+            if args.role=='resume':raise ValueError('Resume peer requires buffered cutover')
+            (listen if args.role == 'listen' else trigger)(config, out)
     except Exception as error:
         write_json(out / ('cutover-' + args.role + '-error.json'), dict(error=str(error)))
         raise

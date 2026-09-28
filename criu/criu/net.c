@@ -3174,7 +3174,23 @@ int network_lock_internal(void)
 	return ret;
 }
 
-static inline int nftables_network_unlock(void)
+#if defined(CONFIG_HAS_NFTABLES_LIB_API_0) || defined(CONFIG_HAS_NFTABLES_LIB_API_1)
+static struct nft_ctx *restore_unlock_ctx;
+#endif
+
+void network_unlock_cleanup(void)
+{
+#if defined(CONFIG_HAS_NFTABLES_LIB_API_0) || defined(CONFIG_HAS_NFTABLES_LIB_API_1)
+	if (restore_unlock_ctx) {
+		sb_trace("network.unlock_cleanup_begin");
+		nft_ctx_free(restore_unlock_ctx);
+		restore_unlock_ctx = NULL;
+		sb_trace("network.unlock_cleanup_done");
+	}
+#endif
+}
+
+static inline int nftables_network_unlock(bool defer_cleanup)
 {
 #if defined(CONFIG_HAS_NFTABLES_LIB_API_0) || defined(CONFIG_HAS_NFTABLES_LIB_API_1)
 	int ret = 0;
@@ -3182,6 +3198,8 @@ static inline int nftables_network_unlock(void)
 	char table[32];
 	char buf[128];
 
+	if (defer_cleanup && restore_unlock_ctx)
+		return -1;
 	if (nftables_get_table(table, sizeof(table)))
 		return -1;
 
@@ -3193,7 +3211,14 @@ static inline int nftables_network_unlock(void)
 	if (NFT_RUN_CMD(nft, buf))
 		ret = -1;
 
-	nft_ctx_free(nft);
+	/* The delete has been ACKed: packet isolation is already removed.
+	 * Closing the netlink context can wait for a kernel grace period, so
+	 * restore defers only that resource release until after PTRACE_DETACH.
+	 * Errors clean up immediately and must never resume the application. */
+	if (!ret && defer_cleanup)
+		restore_unlock_ctx = nft;
+	else
+		nft_ctx_free(nft);
 	return ret;
 #else
 	pr_err("CRIU was built without libnftables support\n");
@@ -3252,7 +3277,7 @@ static int iptables_network_unlock_internal(void)
 	return ret;
 }
 
-static int network_unlock_internal(void)
+static int network_unlock_internal(bool defer_cleanup)
 {
 	int ret = 0, nsret;
 
@@ -3265,7 +3290,7 @@ static int network_unlock_internal(void)
 	if (opts.network_lock_method == NETWORK_LOCK_IPTABLES)
 		ret = iptables_network_unlock_internal();
 	else if (opts.network_lock_method == NETWORK_LOCK_NFTABLES)
-		ret = nftables_network_unlock();
+		ret = nftables_network_unlock(defer_cleanup);
 
 	if (restore_ns(nsret, &net_ns_desc))
 		ret = -1;
@@ -3291,20 +3316,36 @@ int network_lock(void)
 	return network_lock_internal();
 }
 
-void network_unlock(void)
+static int network_unlock_common(bool defer_cleanup)
 {
+	int ret = 0;
 	pr_info("Unlock network\n");
-
 	cpt_unlock_tcp_connections();
 	rst_unlock_tcp_connections();
-
 	if (root_ns_mask & CLONE_NEWNET) {
-		/* coverity[check_return] */
-		run_scripts(ACT_NET_UNLOCK);
-		network_unlock_internal();
+		sb_trace("network.unlock_rpc_begin");
+		ret = run_scripts(ACT_NET_UNLOCK);
+		sb_trace("network.unlock_rpc_done");
+		if (!ret) {
+			sb_trace("network.unlock_rules_begin");
+			ret = network_unlock_internal(defer_cleanup);
+			sb_trace("network.unlock_rules_done");
+		}
 	} else if (opts.network_lock_method == NETWORK_LOCK_NFTABLES) {
-		nftables_network_unlock();
+		ret = nftables_network_unlock(defer_cleanup);
 	}
+	return ret;
+}
+
+void network_unlock(void)
+{
+	/* Dump/rollback retains synchronous cleanup. */
+	network_unlock_common(false);
+}
+
+int network_unlock_restore(void)
+{
+	return network_unlock_common(true);
 }
 
 int veth_pair_add(char *in, char *out)

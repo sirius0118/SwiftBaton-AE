@@ -16,9 +16,12 @@ The repository contains source and instructions. It does not contain precompiled
 | `YCSB/` | Modified Java client; millisecond throughput sampling and Redis reconnect/retry behavior |
 | `scripts/ae/u/`, `scripts/ae/k/` | Mode-specific migration drivers, cutover, data checks, and scoped cleanup |
 | `scripts/` | Build, deployment, execution, and analysis entry points |
+| `experiments/` | One-command paper workloads, robustness/breakdown cases, and plotter |
+| `baseline/` | Native CRIU and four algorithm-profile baselines |
+| `tests/`, `kernel/tests/` | Source-level correctness and safety checks |
 | `configs/` | Accepted profiles and the prepared-cluster topology |
-| `dependencies/` | Existing custom Docker and runtime source trees |
-| `Fluid/` | Original management-plane source; not needed for this SSH-based AE entry point |
+| `dependencies/` | Custom Docker and runtime source trees required for new-host provisioning |
+| `Fluid/` | Original management-plane source; the AE runner uses SSH instead |
 
 The two CRIU trees intentionally remain separate: the U implementation stays unchanged while K adds its own coordinator and MM integration. Do not mix binaries from different trees or builds between hosts. See [implementation details](docs/IMPLEMENTATION.md), [kernel setup](docs/KERNEL.md), and [component licenses](THIRD_PARTY.md).
 
@@ -72,7 +75,7 @@ bash scripts/build.sh fixture
 
 These commands compile in separate copies under `build/`. They do not install system programs, load modules, start containers, or reboot. `SB_BUILD_JOBS` controls compiler parallelism (default 12). Maven needs access to its dependencies on the first build. The client classpath includes `core/target/classes`, `redis/target/classes`, and the dependency JAR directories produced by Maven. Do not substitute upstream YCSB.
 
-Kernel/module builds are documented separately in [docs/KERNEL.md](docs/KERNEL.md). They are unnecessary for a reviewer using the already-provisioned K hosts.
+Kernel/module builds, including the optional prepared-ARM and batch-accounting patch series, are documented separately in [docs/KERNEL.md](docs/KERNEL.md). They are unnecessary for a reviewer using the already-provisioned K hosts; the module source in this checkout also supports the existing host ABI.
 
 ## 4. Stage and inspect
 
@@ -156,7 +159,31 @@ These retain each implementation's accepted configuration and favor lower fault 
 
 To change a profile, edit `configs/profiles.json`, stage again, and retain that configuration alongside the generated results. Individual driver options are listed by `python3 scripts/ae/u/run_ae.py --help` and the corresponding K command. The main wrapper provides locking, binary selection, validation and cleanup; invoking a driver directly bypasses that wrapper.
 
-## 7. RDMA bandwidth limit
+## 7. Paper workload and baseline entry points
+
+After both U and K smoke runs pass, reproduce the real-world workload,
+robustness, and breakdown cases from [experiments/README.md](experiments/README.md).
+For example, preview and then run a Redis case:
+
+```bash
+experiments/real_world/redis/run.sh --dry-run
+experiments/real_world/redis/run.sh --mode u --smoke --trials 1
+experiments/real_world/redis/run.sh --mode k --smoke --trials 1
+experiments/real_world/redis/run.sh --mode both --trials 5
+python3 experiments/plot_all.py
+```
+
+Each case's `case.json` sets the paper-scale parameters; `--smoke` is a
+smaller functional check. Missing service images are built from the included
+Dockerfiles and copied to knode3. The scripts use CRIU built from **this
+checkout**; VoltDB/MySQL build an isolated variant from the same source for
+their file-lock and VMA requirements. Results and figures go to
+`/home/k8s/SwiftBaton-AE-benchmark-results/` by default, never inside Git.
+The case runner records its source revision, options, hashes, and validations.
+Run one case at a time. The [baseline guide](baseline/README.md) describes
+native CRIU, PCLive, post-copy, hybrid-copy, and remote-fork profiles.
+
+## 8. RDMA bandwidth limit
 
 The prepared cluster uses a 25 Gbps hardware transmit cap on both hosts. An administrator can inspect or change it with:
 
@@ -167,7 +194,7 @@ sudo mlnx_qos -i ens4f1 --prio_tc=1,1,1,1,1,1,1,1 --ratelimit=0,25,0,0,0,0,0,0
 
 Apply the configuration on both migration hosts. The physical link remains 100 Gbps. All priorities share TC1, including ordinary Ethernet traffic on this interface. This is **not** hardware prioritization of demand faults; CPU scheduling and independent QPs are separate mechanisms. The commands do not configure persistence across reboot. Coordinate changes with the cluster owner.
 
-## 8. Results and metric definitions
+## 9. Results and metric definitions
 
 The wrapper runs the analyzers automatically. To reanalyze a saved run:
 
@@ -190,7 +217,7 @@ Use the exact run directory printed by the runner. Generated files include throu
 
 No historical measurements are bundled or substituted for new runs.
 
-## 9. Failure recovery
+## 10. Failure recovery
 
 The wrapper attempts scoped cleanup and restoration even when analysis fails. Inspect its `result.json` and `cleanup.log`. If a run is interrupted before that cleanup finishes, use only its exact state path:
 
@@ -203,8 +230,8 @@ These commands execute cleanup; they do not merely preview it. They check record
 
 If `restored` reports an error, inspect `/usr/bin/criu` on both hosts and compare it with `previous` in the wrapper's result. Restore the previous link only after the exact experiment has been cleaned and no active CRIU remains. A concurrently changed link is deliberately not overwritten. Do not restart shared daemons or reboot to solve a routine path mismatch.
 
-## 10. Current scope
+## 11. Current scope
 
-The implementation includes all four page-transfer paths and host K migration. It does not yet provide NIC hardware demand priority, K adjacent prefetch across MR boundaries, arbitrary FD semantics (including the documented EFD_SEMAPHORE/queued UDP/timerfd restrictions), or automatic source recovery after a fatal migration-controller failure. The K source-retirement protections prevent unsafe reuse of exposed source pages; a fatal controller failure may terminate the source process.
+The implementation includes all four page-transfer paths and host K migration. The source also includes PS source-MR reuse, batched catalog/ARM work, rsocket proxy transport for a remote-fork baseline, and optional prepared-ARM kernel patches. The prepared reviewer cluster uses its installed kernel/module; building and booting the optional kernel series is a separate administrator path. It does not yet provide NIC hardware demand priority, K adjacent prefetch across MR boundaries, arbitrary FD semantics (including the documented EFD_SEMAPHORE/queued UDP/timerfd restrictions), or automatic source recovery after a fatal migration-controller failure. The K source-retirement protections prevent unsafe reuse of exposed source pages; a fatal controller failure may terminate the source process.
 
 This workflow reproduces the implementation and collects the required metrics. It does not promise every paper figure, a fixed downtime threshold, or a theoretical minimum fault latency. Use the private AE discussion for access or support; provide the failing command and the generated state/result files privately rather than committing them to the repository.

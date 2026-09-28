@@ -1,3 +1,4 @@
+#include "sb-cutover.h"
 #include "sb-proc.h"
 #include "sb-transfer.h"
 #include "sb-images.h"
@@ -23,6 +24,8 @@
 
 #include <sched.h>
 #include <sys/resource.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
 
 #include "types.h"
 #include "protobuf.h"
@@ -127,6 +130,7 @@ int enter_multi_process = 0;
 #include "common/shregion.h"
 #include "transfer.h"
 #include "pre-transfer.h"
+#include "sb-rsocket-snapshot.h"
 
 struct resources PF_res;
 struct resources TS_res;
@@ -2583,8 +2587,59 @@ static int precopy_reserve_source_page(pid_t pid, uint64_t address)
 	return 1;
 }
 
+/* Only start after every task dump has published its final lazy-page catalog.
+ * Source tasks stay seized throughout this job. Image publication and all
+ * failure cleanup must join it before touching the catalog or source tasks. */
+struct precopy_final_job {
+    struct sb_precopy_pid pids[MAX_PROCESS];
+    size_t count;
+    int directory, result;
+    unsigned workers;
+    bool prepared, running;
+    pthread_t thread;
+};
+static void *precopy_final_work(void *arg)
+{
+    struct precopy_final_job *job = arg;
+    sb_trace("precopy.validate_begin");
+    precopy_reserve_reset();
+    job->result = sb_precopy_finalize_workers(job->pids, job->count,
+        job->directory, precopy_reserve_source_page, job->workers);
+    close(job->directory);
+    job->directory = -1;
+    sb_trace("precopy.validate_done");
+    return NULL;
+}
+static int precopy_final_start(struct precopy_final_job *job)
+{
+    if (item_num < 0 || item_num > MAX_PROCESS) return -1;
+    job->count = item_num;
+    for (int i = 0; i < item_num; i++)
+        job->pids[i] = (struct sb_precopy_pid){ .source = pidset[i], .destination = vpidset[i] };
+    job->directory = fcntl(get_service_fd(IMG_FD_OFF), F_DUPFD_CLOEXEC, 0);
+    if (job->directory < 0) return -1;
+    job->workers = opts.sb_validation_workers ? opts.sb_validation_workers : 1;
+    job->prepared = true;
+    if (pthread_create(&job->thread, NULL, precopy_final_work, job)) {
+        /* Resource pressure retains the existing synchronous path. */
+        precopy_final_work(job);
+        return job->result;
+    }
+    job->running = true;
+    return 0;
+}
+static int precopy_final_finish(struct precopy_final_job *job)
+{
+    if (job->running) {
+        pthread_join(job->thread, NULL);
+        job->running = false;
+    }
+    return job->prepared ? job->result : 0;
+}
+
 int cr_dump_tasks(pid_t pid)
 {
+	struct precopy_final_job final_validation = { .directory = -1 };
 	InventoryEntry he = INVENTORY_ENTRY__INIT;
 	InventoryEntry *parent_ie = NULL;
 	struct pstree_item *item;
@@ -2632,7 +2687,7 @@ int cr_dump_tasks(pid_t pid)
         pr_err("Legacy custom-kernel sampling is disabled; use --u-precopy with --image-rdma\n");
         return -1;
     }
-	log_set_loglevel(5);
+	log_set_loglevel(LOG_INFO);
 	if (log_init("/var/lib/criu/dump.log") == -1) {
 		pr_perror("Can't initiate log");
 		goto err;
@@ -2988,13 +3043,34 @@ int cr_dump_tasks(pid_t pid)
         sb_vma_cache_start(watched_pids, list_length);
 		if (!opts.sb_parent_stage) sb_vma_cache_refresh();
 	}
-	if (opts.sb_parent_stage) {
+	if (opts.sb_parent_stage && !opts.sb_pclive_refresh) {
 		sb_trace("precopy.ps_prune_begin");
 		if (sb_precopy_prune(get_service_fd(IMG_FD_OFF))) goto err;
 		sb_trace("precopy.ps_prune_done");
 	}
+	/* A live rsocket listener adds a thread. Start it only after CRIU has
+	 * finished entering and dumping mount namespaces: setns(mnt) rejects a
+	 * process that still shares its fs_struct with another thread. */
+	if (opts.sb_pclive_refresh || opts.sb_rsocket_as) {
+		struct sockaddr_in local = {0};
+		socklen_t local_length = sizeof(local);
+		char bind_ip[INET_ADDRSTRLEN];
+		/* sync_addr is the coordinator's peer IP. Derive the source NIC IP
+		 * from the accepted page-client control connection. */
+		if (getsockname(sync_fd_PC, (struct sockaddr *)&local, &local_length) ||
+		    local.sin_family != AF_INET ||
+		    !inet_ntop(AF_INET, &local.sin_addr, bind_ip, sizeof(bind_ip)) ||
+		    sb_rsocket_snapshot_serve((const void *)mem, mem_size,
+		                              bind_ip, opts.port + 8)) {
+			pr_perror("Start PCLive rsocket snapshot server");
+			goto err;
+		}
+		pr_info("SB_PCLIVE rsocket_bind ip=%s port=%d bytes=%llu\n",
+		        bind_ip, opts.port + 8, (unsigned long long)mem_size);
+	}
 	if (sb_images_publish(sync_pretransfer, DUMP_NAMESPACE_DONE))
 		goto err;
+	sb_parallel_prepare_traces(1, 0);
 	sb_trace("dump.ps_namespaces_ready");
 	update_state(sync_fd, DUMP_NAMESPACE_DONE);
 	if (opts.sb_parent_stage) {
@@ -3002,7 +3078,9 @@ int cr_dump_tasks(pid_t pid)
 		 * application remains running until the receiver applies the delta. */
 		wait_state(sync_fd, PS_PAGES_REFRESH_REQUEST);
 		sb_trace("precopy.ps_refresh_begin");
-		if (sb_precopy_prune(get_service_fd(IMG_FD_OFF)) ||
+		if ((opts.sb_pclive_refresh &&
+		     sb_precopy_refresh_all(opts.sb_precopy_workers ? opts.sb_precopy_workers : 4)) ||
+		    sb_precopy_prune(get_service_fd(IMG_FD_OFF)) ||
 		    sb_images_publish(sync_pretransfer, PS_PAGES_REFRESH_DONE)) goto err;
 		update_state(sync_fd, PS_PAGES_REFRESH_DONE);
 		wait_state(sync_fd, PS_PAGES_REFRESH_APPLIED);
@@ -3015,6 +3093,11 @@ int cr_dump_tasks(pid_t pid)
 	}
 	// DOCKERTODO: 接受restrer中的信息，知道要开始停机收取每个进程了
 	wait_state(sync_fd, START_PROCESS_DUMP);
+	if (opts.sb_buffered_cutover) {
+		sb_trace("dump.gate_request_begin");
+		if (!opts.sb_image_rdma || sb_cutover_wait_closed(get_service_fd(IMG_FD_OFF))) goto err;
+		sb_trace("dump.gate_request_done");
+	}
 	sb_trace("dump.is_enter");
 
 	// ---- 容器正式开始停机 ----
@@ -3185,6 +3268,7 @@ int cr_dump_tasks(pid_t pid)
 	}
 
 	futex_wait_until(&barriers->num_process, item_num);
+	if (opts.sb_u_precopy && precopy_final_start(&final_validation)) goto err;
 	sb_trace("dump.tasks_dumped");
 	sb_vma_cache_close();
 #else
@@ -3346,19 +3430,12 @@ int cr_dump_tasks(pid_t pid)
 	// close(sync_fd_PC);
 	close_cr_imgset(&glob_imgset);
 	if (opts.sb_u_precopy) {
-		struct sb_precopy_pid pids[MAX_PROCESS];
-		if (item_num > MAX_PROCESS) goto err;
-		for (int i = 0; i < item_num; i++)
-			pids[i] = (struct sb_precopy_pid){ .source = pidset[i], .destination = vpidset[i] };
-		sb_trace("precopy.validate_begin");
-		precopy_reserve_reset();
-		if (sb_precopy_finalize_workers(pids, item_num, get_service_fd(IMG_FD_OFF), precopy_reserve_source_page,
-					       opts.sb_validation_workers ? opts.sb_validation_workers : 1)) {
-			ret = -1;
-			goto err;
-		}
-		sb_trace("precopy.validate_done");
-	}
+        if ((!final_validation.prepared && precopy_final_start(&final_validation)) ||
+            precopy_final_finish(&final_validation)) {
+            ret = -1;
+            goto err;
+        }
+    }
 
 	if (bfd_flush_images()) {
 		ret = -1;
@@ -3373,6 +3450,7 @@ int cr_dump_tasks(pid_t pid)
 #endif
 
 err:
+	if (precopy_final_finish(&final_validation)) ret = -1;
 	if (parent_ie)
 		inventory_entry__free_unpacked(parent_ie, NULL);
 

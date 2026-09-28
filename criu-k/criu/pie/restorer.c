@@ -627,10 +627,10 @@ static int restore_thread_common(struct thread_restore_args *args)
 		return -1;
 
 	restore_tls(&args->tls);
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	if (restore_rseq(&args->rseq))
 		return -1;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	return 0;
 }
 
@@ -1838,6 +1838,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
          * absent in the child's source mm. Drop all lazy anonymous contents
          * before arming sparse data ranges; omitted holes then demand-zero.
          * The restorer code/stack/args are outside these final application VMAs. */
+        pr_info("SB_PIE_SETUP lazy_reset_begin regions=%u\n", args->sbk_regions_nr);
         for (i = 0; i < args->vmas_n; i++) {
             vma_entry = args->vmas + i;
             if (vma_entry_can_be_lazy(vma_entry) &&
@@ -1846,10 +1847,12 @@ __visible long __export_restore_task(struct task_restore_args *args)
                 goto core_restore_end;
             }
         }
+		pr_info("SB_PIE_SETUP lazy_reset_done arm_begin\n");
 		if (sbk_pie_arm(args->sbk_regions, args->sbk_regions_nr)) {
 			pr_err("SwiftBaton-K anonymous range installation failed\n");
 			goto core_restore_end;
 		}
+		pr_info("SB_PIE_SETUP arm_done\n");
 		if (sbk_pie_ready(args->sbk_ready_fd)) {
 			pr_err("SwiftBaton-K readiness notification failed\n");
 			goto core_restore_end;
@@ -2123,7 +2126,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	 */
 	rt_sigframe = (void *)&args->t->mz->rt_sigframe;
 	// sys_nanosleep((struct timespec[]){{0, 1000000000}}, NULL);
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	// usleep(1000000000);
 	// sys_nanosleep((struct timespec[]){{0, 1000000000}}, NULL);
 	if (restore_thread_common(args->t))
@@ -2146,7 +2149,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	 * | thread restore proc | thread1 stack | thread1 rt_sigframe |
 	 * +--------------------------------------------------------------------------+
 	 */
-	pr_warn("执行到这: nr_threads:%d\n", args->nr_threads);
+	(void)0; /* Remove legacy hot-path probe. */
 	if (args->nr_threads > 1) {
 		struct thread_restore_args *thread_args = args->thread_args;
 		long clone_flags = CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_FS;
@@ -2154,7 +2157,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 		pid_t thread_pid;
 		long parent_tid;
 		int i, fd = -1;
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		if (!args->has_clone3_set_tid) {
 			/* One level pid ns hierarhy */
 			fd = sys_openat(args->proc_fd, LAST_PID_PATH, O_RDWR, 0);
@@ -2164,16 +2167,16 @@ __visible long __export_restore_task(struct task_restore_args *args)
 			}
 		}
 		mutex_lock(&task_entries_local->last_pid_mutex);
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		for (i = 0; i < args->nr_threads; i++) {
 			char last_pid_buf[16], *s;
-			pr_warn("执行到这\n");
+			(void)0; /* Remove legacy hot-path probe. */
 			/* skip self */
 			if (thread_args[i].pid == args->t->pid)
 				continue;
-			pr_warn("执行到这\n");
+			(void)0; /* Remove legacy hot-path probe. */
 			new_sp = restorer_stack(thread_args[i].mz);
-			pr_warn("执行到这\n");
+			(void)0; /* Remove legacy hot-path probe. */
 			if (args->has_clone3_set_tid) {
 				struct _clone_args c_args = {};
 				thread_pid = thread_args[i].pid;

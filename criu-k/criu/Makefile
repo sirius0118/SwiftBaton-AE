@@ -44,6 +44,7 @@ include $(__nmk_dir)msg.mk
 #
 # Needed libraries checks
 include criu/Makefile.packages
+LIBS += -lrdmacm
 
 #
 # Architecture dependent part.

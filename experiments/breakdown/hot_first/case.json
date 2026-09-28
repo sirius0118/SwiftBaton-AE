@@ -1,0 +1,194 @@
+{
+  "name": "breakdown-hot-first",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "z0p5-5g-on",
+      "parameters": {
+        "zipf_zeta": 0.5
+      },
+      "options": {
+        "qos_gbps": 5,
+        "no_hot_first": false
+      }
+    },
+    {
+      "name": "z0p5-5g-off",
+      "parameters": {
+        "zipf_zeta": 0.5
+      },
+      "options": {
+        "qos_gbps": 5,
+        "no_hot_first": true
+      }
+    },
+    {
+      "name": "z0p5-25g-on",
+      "parameters": {
+        "zipf_zeta": 0.5
+      },
+      "options": {
+        "qos_gbps": 25,
+        "no_hot_first": false
+      }
+    },
+    {
+      "name": "z0p5-25g-off",
+      "parameters": {
+        "zipf_zeta": 0.5
+      },
+      "options": {
+        "qos_gbps": 25,
+        "no_hot_first": true
+      }
+    },
+    {
+      "name": "z0p5-100g-on",
+      "parameters": {
+        "zipf_zeta": 0.5
+      },
+      "options": {
+        "qos_gbps": 100,
+        "no_hot_first": false
+      }
+    },
+    {
+      "name": "z0p5-100g-off",
+      "parameters": {
+        "zipf_zeta": 0.5
+      },
+      "options": {
+        "qos_gbps": 100,
+        "no_hot_first": true
+      }
+    },
+    {
+      "name": "z0p99-5g-on",
+      "parameters": {
+        "zipf_zeta": 0.99
+      },
+      "options": {
+        "qos_gbps": 5,
+        "no_hot_first": false
+      }
+    },
+    {
+      "name": "z0p99-5g-off",
+      "parameters": {
+        "zipf_zeta": 0.99
+      },
+      "options": {
+        "qos_gbps": 5,
+        "no_hot_first": true
+      }
+    },
+    {
+      "name": "z0p99-25g-on",
+      "parameters": {
+        "zipf_zeta": 0.99
+      },
+      "options": {
+        "qos_gbps": 25,
+        "no_hot_first": false
+      }
+    },
+    {
+      "name": "z0p99-25g-off",
+      "parameters": {
+        "zipf_zeta": 0.99
+      },
+      "options": {
+        "qos_gbps": 25,
+        "no_hot_first": true
+      }
+    },
+    {
+      "name": "z0p99-100g-on",
+      "parameters": {
+        "zipf_zeta": 0.99
+      },
+      "options": {
+        "qos_gbps": 100,
+        "no_hot_first": false
+      }
+    },
+    {
+      "name": "z0p99-100g-off",
+      "parameters": {
+        "zipf_zeta": 0.99
+      },
+      "options": {
+        "qos_gbps": 100,
+        "no_hot_first": true
+      }
+    },
+    {
+      "name": "z1p22-5g-on",
+      "parameters": {
+        "zipf_zeta": 1.22
+      },
+      "options": {
+        "qos_gbps": 5,
+        "no_hot_first": false
+      }
+    },
+    {
+      "name": "z1p22-5g-off",
+      "parameters": {
+        "zipf_zeta": 1.22
+      },
+      "options": {
+        "qos_gbps": 5,
+        "no_hot_first": true
+      }
+    },
+    {
+      "name": "z1p22-25g-on",
+      "parameters": {
+        "zipf_zeta": 1.22
+      },
+      "options": {
+        "qos_gbps": 25,
+        "no_hot_first": false
+      }
+    },
+    {
+      "name": "z1p22-25g-off",
+      "parameters": {
+        "zipf_zeta": 1.22
+      },
+      "options": {
+        "qos_gbps": 25,
+        "no_hot_first": true
+      }
+    },
+    {
+      "name": "z1p22-100g-on",
+      "parameters": {
+        "zipf_zeta": 1.22
+      },
+      "options": {
+        "qos_gbps": 100,
+        "no_hot_first": false
+      }
+    },
+    {
+      "name": "z1p22-100g-off",
+      "parameters": {
+        "zipf_zeta": 1.22
+      },
+      "options": {
+        "qos_gbps": 100,
+        "no_hot_first": true
+      }
+    }
+  ],
+  "note": "Paper Fig.13: hot-first vs address order across skew and 5/25/100Gbps; QoS state restored after each trial."
+}

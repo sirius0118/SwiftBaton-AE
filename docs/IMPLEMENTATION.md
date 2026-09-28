@@ -21,6 +21,29 @@ The main entry points are `scripts/run.py`, the two mode-specific `run_ae.py` dr
 
 NUMA affinity and bounded BG4 are retained to favor demand latency. Increasing background workers is configurable, but may trade higher bandwidth for worse demand latency.
 
+## Current source paths and optional acceleration
+
+The latest U/K drivers use `scripts/ae/{u,k}/buffered_cutover.py`,
+`packet_gate.py`, `conntrack_gate.py`, and `nat_bindings.py` to coordinate
+client traffic while changing the destination. The network lock is selected
+by the run profile; reviewers can inspect a case's exact options with
+`--dry-run`. These helpers do not require Fluid.
+
+K's `sbk_rdma.c` supports PS-time source MR preparation, bounded region
+cataloguing, and invalidation checks before reusing an export. The
+`sbk_token_pool.c` source and optional prepared-ARM/batch kernel patches
+reduce marker setup work. The module compiles against either the base PTE
+patch or the optional prepared-ARM series; see [kernel setup](KERNEL.md) for
+the patch order and build-tree matching rules. `sbk_core.c` also exposes
+an rsocket page-proxy backend used by the demand-only remote-fork baseline.
+It is separate from the default direct-RDMA K fault path.
+
+The U tree includes rsocket image/snapshot and AS transport implementations
+for the baseline profiles. `baseline/` contains their build/runner source,
+while `experiments/` contains the workload, ablation, and plotting source.
+The default U/K quickstart remains `scripts/run.py`; the full case map is in
+[experiments/README.md](../experiments/README.md).
+
 ## State preparation and boundaries
 
 The CRIU trees contain namespace preparation and the current state-image transport. K additionally retains expanded FD object preparation, identity/alias validation, deferred epoll references, and absolute timerfd fixes. Support is not universal: the tested 5.15 interface cannot recover every EFD_SEMAPHORE or queued-UDP case, and unsupported timerfd cancellation/injected-tick states are rejected rather than silently approximated. Arbitrary shared state and every paper workload are not covered by the Redis quickstart.

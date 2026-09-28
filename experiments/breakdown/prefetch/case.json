@@ -1,0 +1,54 @@
+{
+  "name": "breakdown-prefetch",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "1024B-on",
+      "parameters": {
+        "field_length": 1024,
+        "records": 1048576
+      },
+      "options": {
+        "no_prefetch": false
+      }
+    },
+    {
+      "name": "1024B-off",
+      "parameters": {
+        "field_length": 1024,
+        "records": 1048576
+      },
+      "options": {
+        "no_prefetch": true
+      }
+    },
+    {
+      "name": "16384B-on",
+      "parameters": {
+        "field_length": 16384,
+        "records": 65536
+      },
+      "options": {
+        "no_prefetch": false
+      }
+    },
+    {
+      "name": "16384B-off",
+      "parameters": {
+        "field_length": 16384,
+        "records": 65536
+      },
+      "options": {
+        "no_prefetch": true
+      }
+    }
+  ],
+  "note": "Paper Fig.14: prefetch on/off, 1KiB vs 16KiB values with same value payload."
+}

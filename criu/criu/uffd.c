@@ -2359,6 +2359,7 @@ int cr_lazy_pages(bool daemon)
 	if (!pre_mr || sync_transfer(sync_pretransfer, pre_mr,
 				    sizeof(struct data_buffer) * item_num, false))
 		return -1;
+	sb_parallel_prepare_traces(0, item_num);
 	pre_mr->length2 = (uint64_t)ONE_AREA_SIZE * item_num;
 	item_num = 0;
 
@@ -2369,6 +2370,10 @@ int cr_lazy_pages(bool daemon)
 	// pre_mr->length1 = 4 * 1024 * 1024;
 	pr_warn("执行到这 length1:%ld\n", pre_mr->length1);
 	wait_state(sync_pretransfer, END_PAGE_PRTRANSFER);
+	/* The PCLive rsocket listener starts after source namespace dumping. Read
+	 * the matching image barrier before opening the first snapshot session. */
+	if ((opts.sb_pclive_refresh || opts.sb_rsocket_as) &&
+	    sb_images_receive(sync_pretransfer, DUMP_NAMESPACE_DONE)) return -1;
 	if (rdma_read_pretransfer(&PT_res, pre_mr, 1))
 		return -1;
 	if (opts.sb_parent_stage && (!opts.sb_u_precopy ||
@@ -2389,10 +2394,24 @@ int cr_lazy_pages(bool daemon)
 	// ret = poll_completion(&PT_res);
 	pr_warn("RDMA读取数据成功, vma_num:%d off:%lx, pid:%ld\n", *(int *)(pre_mr->l_addr1 + 16), *(u_int64_t *)(pre_mr->l_addr1 + 8), *(u_int64_t *)(pre_mr->l_addr1));
 	// close(sync_fd_PC);
-	if (sb_images_receive(sync_pretransfer, DUMP_NAMESPACE_DONE))
+	if (!(opts.sb_pclive_refresh || opts.sb_rsocket_as) &&
+	    sb_images_receive(sync_pretransfer, DUMP_NAMESPACE_DONE))
 		return -1;
-	if (opts.sb_parent_stage && sb_images_receive(sync_pretransfer, PS_PAGES_REFRESH_DONE))
-		return -1;
+	if (opts.sb_parent_stage) {
+		if (sb_images_receive(sync_pretransfer, PS_PAGES_REFRESH_DONE)) return -1;
+		if (opts.sb_pclive_refresh) {
+			int marker;
+			sb_trace("pclive.rdma_refresh_begin");
+			if (rdma_read_pclive_delta(&PT_res, pre_mr)) return -1;
+			__sync_synchronize();
+			marker = openat(get_service_fd(IMG_FD_OFF), SB_PCLIVE_READY,
+			                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+			if (marker < 0) return -1;
+			if (write(marker, "ready\n", 6) != 6) { close(marker); return -1; }
+			if (close(marker)) return -1;
+			sb_trace("pclive.rdma_refresh_done");
+		}
+	}
 	if (sb_images_receive(sync_pretransfer, END_PROCESS_DUMP))
 		return -1;
 	wait_state(sync_pretransfer, END_PROCESS_DUMP);

@@ -6,7 +6,15 @@ The prepared destination already boots `5.15.167-swiftbaton-k1`. A reviewer usin
 
 `kernel/patches/linux-5.15.167-sbk-pte.patch` applies to Linux **5.15.167**. It adds `CONFIG_SWIFTBATON_PTE`, `include/linux/swiftbaton_pte.h`, and `mm/swiftbaton_pte.c`; integrates the marker with swap-entry classification, faults, fork/zap, mincore and khugepaged; and exports the provider interface to the module. The marker uses a dedicated non-present swap-entry type with token IDs, rather than a bit that already has present-PTE semantics.
 
-The module is in `kernel/module/`; `kernel/include/sbk_uapi.h` defines the CRIU/module ABI. Its source side exposes frozen application pages through registered RDMA memory regions. Its destination side owns PS cache pages, independent demand/FT/BG QP/CQ pools, the session scheduler, and final anonymous-page installation. The MM bridge preserves page permissions, anonymous rmap, memcg/LRU and COW behavior. Marker references track fork and moved aliases; the source cannot retire merely because every unique page was fetched.
+Two additional patches build on that base, in order:
+`linux-5.15.167-sbk-prepared-arm.patch` adds a prepared PTE plan for
+pre-stop work, and `linux-5.15.167-sbk-arm-batch.patch` batches token
+reference accounting while installing markers. They are **optional** for the
+prepared-cluster quickstart. The module detects the plan API at compile time;
+it can also run with the base patch. The base and optimized kernel variants
+have distinct local versions to avoid loading a module against the wrong ABI.
+
+The module is in `kernel/module/`; `kernel/include/sbk_uapi.h` defines the CRIU/module ABI. Its source side exposes frozen application pages through registered RDMA memory regions, with optional PS pre-registration and invalidation checks. The source also includes an optional DMA-key path and an rsocket page proxy for the remote-fork baseline. Its destination side owns PS cache pages, independent demand/FT/BG QP/CQ pools, the session scheduler, and final anonymous-page installation. The MM bridge preserves page permissions, anonymous rmap, memcg/LRU and COW behavior. Marker references track fork and moved aliases; the source cannot retire merely because every unique page was fetched.
 
 The **destination needs the patched kernel**. The source can use stock 5.15.167 because it does not install remote PTE markers, but its module still must be compiled for that source kernel and its RDMA driver ABI. Source and target `.ko` files are not interchangeable.
 
@@ -17,6 +25,18 @@ Obtain the upstream Linux 5.15.167 source from [kernel.org](https://cdn.kernel.o
 ```bash
 python3 kernel/build.py /path/to/linux-5.15.167 --jobs 8
 ```
+
+To build the optional prepared-ARM kernel source instead, run:
+
+```bash
+python3 kernel/build.py /path/to/linux-5.15.167 --arm-optimizations --jobs 8
+```
+
+This applies the base, prepared-ARM, then ARM-batch patches in order and
+builds under `build/linux-5.15.167-swiftbaton-k1-arm-batch/` with release
+`5.15.167-swiftbaton-k1-arm-batch`. Build its SwiftBaton module against
+that exact configured tree and matching OFED source; do not use the prepared
+cluster's existing module file for this alternate kernel.
 
 The helper first checks the version and performs a patch dry run. It creates `build/linux-5.15.167-swiftbaton-k1/`, applies the patch and `kernel/config-5.15.167-swiftbaton-k1`, then builds `bzImage` and modules. It neither alters the input source nor writes `/boot` or `/lib/modules`.
 

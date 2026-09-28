@@ -1,0 +1,34 @@
+#!/bin/busybox sh
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+echo SBK_VM_BOOT_OK
+uname -a
+sh /load-modules.sh || { echo SBK_VM_DEPENDENCY_FAIL; poweroff -f; }
+/usr/sbin/ip link set lo up
+/usr/sbin/ip link set dummy0 up
+/usr/sbin/ip addr add 192.168.234.1/24 dev dummy0
+/usr/bin/rdma link add rxe0 type rxe netdev dummy0 || { echo SBK_RXE_FAIL; poweroff -f; }
+for i in 0 1 2; do f=/sys/class/infiniband/rxe0/ports/1/gids/$i; echo "$f $(cat "$f")"; done
+insmod /swiftbaton_k.ko rdma_debug=1 || { echo SBK_MODULE_LOAD_FAIL; poweroff -f; }
+if grep -q sbk_anon=1 /proc/cmdline; then
+    SBK_TEST_ANON=1 SBK_TEST_RDMA=1 SBK_TEST_TOKEN_POOL=1 /sbk_test
+else
+    SBK_TEST_RDMA=1 /sbk_test
+fi
+rc=$?
+echo SBK_TEST_EXIT=$rc
+if grep -q sbk_compel=1 /proc/cmdline; then
+    if grep -q sbk_drop_memlock=1 /proc/cmdline; then export SBK_DROP_MEMLOCK=1; fi
+    /sbk_compel_test
+    echo SBK_COMPEL_EXIT=$?
+fi
+for i in $(seq 1 50); do
+    rmmod swiftbaton_k && break
+    sleep 0.1
+done
+cat /proc/modules
+echo SBK_TAINT=$(cat /proc/sys/kernel/tainted)
+echo SBK_VM_DONE
+poweroff -f

@@ -139,6 +139,7 @@ struct cr_options {
 	char *sync_addr;
 	bool sb_image_rdma;
 	bool sb_kernel_transfer;
+	bool sb_kernel_rsocket_proxy;
 	bool sb_kernel_dense;
 	char *sb_kernel_device;
 	unsigned sb_kernel_gid;
@@ -149,6 +150,8 @@ struct cr_options {
 	bool sb_fd_placeholder;
 	bool sb_vma_cache;
 	bool sb_parent_stage;
+	bool sb_buffered_cutover;
+	unsigned int sb_stage_max_mb; /* zero retains unlimited parent staging */
 	bool sb_parallel_transfer;
 	bool sb_no_prefetch, sb_no_hot_first, sb_no_pretransfer;
 	bool sb_serial_precopy_ack; /* Diagnostic ablation: retain old demand-lane ACK scan. */
@@ -178,6 +181,11 @@ struct cr_options {
 	bool sb_defer_fault_credits; /* Accept demand before TX credit; coalesce consumed-ring acknowledgements. */
 	unsigned sb_precopy_workers;
 	unsigned sb_validation_workers;
+	unsigned sb_kernel_catalog_workers;
+	bool sb_kernel_dma_mr;
+	bool sb_kernel_ps_arm;
+	bool sb_kernel_ps_mr;
+	bool sb_kernel_ps_mr_all; /* Permit prearm of copied PS ranges; may invalidate them. */
 	unsigned sb_precopy_limit_mb;
 	int sync_port;
 #endif

@@ -15,6 +15,11 @@ PARALLEL_PS = 2
 PS_SLICE = 4
 PARALLEL_EXPORT = 8
 SESSION_DISPATCH = 16
+DMA_MR = 64
+PREPARED_ARM = 128
+UNBOUND_REGION = 256
+REMOTE_PREARM = 512
+RSOCKET_PROXY = 1024
 
 
 @dataclass(frozen=True)
@@ -33,6 +38,13 @@ class KernelSettings:
     ps_chunk_mb: int = 64
     export_workers: int = 1
     export_chunk_mb: int = 0
+    validation_workers: int = 1
+    catalog_workers: int = 1
+    dma_mr: bool = False
+    ps_arm: bool = False
+    ps_mr: bool = False
+    ps_mr_all: bool = False
+    rsocket_proxy: bool = False
 
     def values(self):
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,31}', self.device):
@@ -47,14 +59,34 @@ class KernelSettings:
             raise ValueError('PS chunk span must be 0..4096 MiB; zero retains legacy spans')
         if not 1 <= self.export_workers <= 32 or not 0 <= self.export_chunk_mb <= 4096:
             raise ValueError('Final MR workers must be 1..32 and span 0..4096 MiB')
+        if not 1 <= self.validation_workers <= 32 or not 1 <= self.catalog_workers <= 32:
+            raise ValueError('Validation/catalog worker count must be 1..32')
         values = {'image-rdma': True, 'u-precopy': True, 'kernel-transfer': True,
                   'kernel-device': self.device, 'kernel-gid': self.gid,
                   'kernel-timeout-ms': self.timeout_ms, 'fault-workers': self.fault_workers,
                   'prefetch-workers': self.prefetch_workers, 'install-workers': self.install_workers,
                   'precopy-workers': self.precopy_workers,
+                  'validation-workers': self.validation_workers,
+                  'kernel-catalog-workers': self.catalog_workers,
                   'kernel-ps-chunk-mb': self.ps_chunk_mb,
                   'kernel-export-workers': self.export_workers,
                   'kernel-export-chunk-mb': self.export_chunk_mb}
+        if self.ps_arm:
+            values['kernel-ps-arm'] = True
+        if self.ps_mr_all and not self.ps_mr:
+            raise ValueError("All-range PS MR requires source PS MR")
+        if self.ps_mr:
+            if not self.ps_arm or self.dma_mr or self.dense:
+                raise ValueError('Source PS MR requires PS ARM, sparse planning and ordinary MR')
+            values['kernel-ps-mr'] = True
+            if self.ps_mr_all:
+                values['kernel-ps-mr-all'] = True
+        if self.dma_mr:
+            values['kernel-dma-mr'] = True
+        if self.rsocket_proxy:
+            if not self.no_pretransfer or not self.no_prefetch or self.ps_arm or self.ps_mr or self.dma_mr:
+                raise ValueError('K rsocket proxy requires demand-only faults without PS/DMA')
+            values['kernel-rsocket-proxy'] = True
         for option in ('no_pretransfer', 'no_prefetch', 'no_hot_first', 'dense'):
             if getattr(self, option):
                 values['kernel-dense' if option == 'dense' else option.replace('_', '-')] = True
@@ -130,7 +162,8 @@ def host_probe(binary, device, gid):
     return result
 
 
-def validate_preflight(hosts, export_workers=1):
+def validate_preflight(hosts, export_workers=1, dma_mr=False, ps_arm=False,
+                       ps_mr=False, rsocket_proxy=False):
     errors = []
     reference = hosts.get('knode2', {}).get('binary_sha256')
     for host in ('knode2', 'knode3'):
@@ -148,16 +181,50 @@ def validate_preflight(hosts, export_workers=1):
         features = caps.get('features', 0)
         if caps.get('version') != ABI_VERSION or (features & (PARALLEL_PS | PS_SLICE)) != (PARALLEL_PS | PS_SLICE):
             errors.append(host + ': incompatible K ABI/PS capabilities')
+        if dma_mr and not features & DMA_MR:
+            errors.append(host + ': DMA MR transport unavailable')
         if host == 'knode2' and export_workers > 1 and not features & PARALLEL_EXPORT:
             errors.append(host + ': parallel final MR export unavailable')
+        if host == 'knode2' and ps_mr and not features & REMOTE_PREARM:
+            errors.append(host + ': source PS MR pre-registration unavailable')
+        if host == 'knode3' and ps_arm and features & (PREPARED_ARM | UNBOUND_REGION) != PREPARED_ARM | UNBOUND_REGION:
+            errors.append(host + ': PS ARM preparation unavailable')
         if host == 'knode3' and not features & ANONYMOUS_PTE:
             errors.append(host + ': anonymous PTE bridge unavailable')
+        if host == 'knode3' and rsocket_proxy and not features & RSOCKET_PROXY:
+            errors.append(host + ': rsocket proxy bridge unavailable')
         if row.get('rdma_state') != '4: ACTIVE':
             errors.append(host + ': RDMA port is not ACTIVE')
         gid = row.get('rdma_gid', '')
         if not gid or not gid.replace(':', '').strip('0'):
             errors.append(host + ': GID is missing or zero')
     return errors
+
+
+def validate_dma_config(dump_log, pageclient_log, enabled):
+    result = {}
+    for role, text in [('source', dump_log), ('destination', pageclient_log)]:
+        connections = re.findall(r'SB_KERNEL connected role=' + role + r' [^\r\n]* dma_mr=(\d+)', text)
+        if connections != [str(int(enabled))]:
+            raise ValueError(role + ': executing DMA mode differs from requested mode')
+        maps = re.findall(r'SB_KERNEL dma_maps phase=(ps|final) role=' + role +
+            r' regions=(\d+) pages=(\d+) bytes=(\d+) elapsed_us=(\d+)', text)
+        if not enabled:
+            if maps: raise ValueError(role + ': DMA maps present in ordinary MR mode')
+            continue
+        if sorted(x[0] for x in maps) != ['final', 'ps']:
+            raise ValueError(role + ': missing or repeated DMA address exchange evidence')
+        result[role] = {phase:dict(regions=int(regions), pages=int(pages), bytes=int(size), elapsed_us=int(us))
+                       for phase, regions, pages, size, us in maps}
+        for phase, row in result[role].items():
+            if row['bytes'] != row['pages'] * 8 or (phase == 'final' and not row['regions']):
+                raise ValueError(role + ': invalid DMA address accounting')
+    if enabled:
+        for phase in ('ps', 'final'):
+            for key in ('regions', 'pages', 'bytes'):
+                if result['source'][phase][key] != result['destination'][phase][key]:
+                    raise ValueError('DMA address vectors differ between peers')
+    return {'enabled': enabled, 'phases': result}
 
 
 def validate_container(info, expected_id, running):
@@ -201,13 +268,17 @@ def completion_stats(pageclient_log):
     if len(lines) != 1:
         raise ValueError('Require exactly one K completion record')
     values = {k: int(v) for k, v in re.findall(r'(\w+)=(\d+)', lines[0])}
-    needed = ('regions', 'pages', 'PF', 'FT', 'BG', 'PS', 'invalid', 'errors', 'faults', 'hits', 'fault_ns', 'fault_max_ns')
+    needed = ('regions', 'pages', 'PF', 'FT', 'BG', 'PS', 'invalid', 'errors', 'faults', 'hits', 'fault_ns', 'fault_max_ns', 'retired_unfetched')
     if any(k not in values for k in needed):
         raise ValueError('Incomplete K page/fault statistics')
     if values['errors'] or values['invalid'] > values['PS'] or values['pages'] <= 0 or values['regions'] <= 0:
         raise ValueError('K migration failed or has invalid accounting')
-    if values['PS'] - values['invalid'] + sum(values[k] for k in ('PF', 'FT', 'BG')) != values['pages']:
+    if values['PS'] - values['invalid'] + sum(values[k] for k in ('PF', 'FT', 'BG')) + values['retired_unfetched'] != values['pages']:
         raise ValueError('K page ownership accounting mismatch')
+    if values['retired_unfetched']:
+        audits = re.findall(r'SB_KERNEL deficit_audit result=(-?\d+) completed=(\d+) pages=(\d+) retired_unfetched=(\d+)', pageclient_log)
+        if len(audits) != 1 or tuple(map(int, audits[0])) != (0, values['pages'] - values['retired_unfetched'], values['pages'], values['retired_unfetched']):
+            raise ValueError('K retired pages lack a successful per-page audit')
     values['valid_PS'] = values['PS'] - values['invalid']
     return values
 
@@ -233,10 +304,15 @@ def validate_export_config(dump_log, workers, chunk_mb):
     rows = re.findall(r'SB_KERNEL final_export pid=(\d+) workers=(\d+) chunk_mb=(\d+) effective_pages=(\d+) peak=(\d+) regions=(\d+) result=(-?\d+)', dump_log)
     if not rows:
         raise ValueError('Missing final export runtime evidence')
+    prearm_rows = re.findall(r'SB_KERNEL final_prearm pid=(\d+) enabled=(\d+) reused=(\d+) '
+                             r'fallback=(\d+) invalid=(\d+) result=(-?\d+)', dump_log)
+    fallback_by_pid = {int(pid): int(fallback) for pid, _, _, fallback, _, status in prearm_rows
+                       if int(status) == 0}
     result = []
     for raw in rows:
         pid, actual_workers, actual_chunk, span, peak, count, status = map(int, raw)
-        if status or actual_workers != workers or actual_chunk != chunk_mb or not 1 <= peak <= min(workers, count):
+        expected_peak = peak == 0 and fallback_by_pid.get(pid) == 0
+        if status or actual_workers != workers or actual_chunk != chunk_mb or not (expected_peak or 1 <= peak <= min(workers, count)):
             raise ValueError('Failed or mismatched final export configuration')
         if not (chunk_mb or 4096)*256 <= span <= 1 << 20:
             raise ValueError('Invalid adaptive final export span')
@@ -263,3 +339,82 @@ def validate_dispatch(pageclient_log, enabled, prefetch_workers, background_work
     if set(lanes) != {1,2}:
         raise ValueError('Missing FT/BG session dispatcher evidence')
     return {'enabled': True, 'lanes': lanes}
+
+
+def validate_catalog_config(pageclient_log, workers):
+    """Check the executing target, so a dropped config option fails the run."""
+    matches = re.findall(r'SB_KERNEL final_catalog regions=(\d+) workers=(\d+) '
+        r'validation_us=(\d+) prepare_us=(\d+) seal_us=(\d+) result=(-?\d+)', pageclient_log)
+    if len(matches) != 1:
+        raise ValueError('Missing/duplicate final catalog timing evidence')
+    regions, actual, validation, prepare, seal, result = map(int, matches[0])
+    if not regions or actual != workers or result:
+        raise ValueError('Executing final catalog settings/result mismatch')
+    return dict(regions=regions, workers=actual, validation_us=validation,
+                prepare_us=prepare, seal_us=seal, result=result)
+
+
+def validate_ps_arm_config(dump_log, pageclient_log, enabled):
+    """Require executing PS preparation and final reuse accounting, including fallback."""
+    layouts = {}
+    for role, text in [('source', dump_log), ('destination', pageclient_log)]:
+        modes = re.findall(r'SB_KERNEL ps_arm_mode role=' + role + r' enabled=(\d+)', text)
+        if modes != [str(int(enabled))]:
+            raise ValueError(role + ': executing PS ARM mode differs from requested mode')
+        rows = re.findall(r'SB_KERNEL ps_layout role=' + role + r' regions=(\d+) pages=(\d+)', text)
+        if not enabled:
+            if rows: raise ValueError(role + ': unexpected PS ARM layout preparation')
+        else:
+            if len(rows) != 1: raise ValueError(role + ': missing/duplicate PS ARM layout')
+            layouts[role] = tuple(map(int, rows[0]))
+            count, pages = layouts[role]
+            if not 0 <= count <= 4096 or not count <= pages <= 4194304 or (not count and pages):
+                raise ValueError(role + ': invalid prepared resource bounds')
+    matches = re.findall(r'SB_KERNEL ps_arm_reuse prepared=(\d+) prepared_pages=(\d+) reused=(\d+) reused_pages=(\d+) discarded=(\d+) discarded_pages=(\d+) final=(\d+) result=(-?\d+)', pageclient_log)
+    if not enabled:
+        if matches: raise ValueError('Unexpected PS ARM reuse report')
+        return {'enabled': False}
+    if layouts['source'] != layouts['destination'] or len(matches) != 1:
+        raise ValueError('PS ARM layout differs between peers or missing reuse report')
+    values = dict(zip(('prepared','prepared_pages','reused','reused_pages','discarded','discarded_pages','final','result'), map(int,matches[0])))
+    v = values
+    if (v['result'] or not v['final'] or v['reused'] > v['final'] or
+        (v['prepared'],v['prepared_pages']) != layouts['source'] or
+        v['reused']+v['discarded'] != v['prepared'] or
+        v['reused_pages']+v['discarded_pages'] != v['prepared_pages'] or
+        v['reused_pages'] < v['reused'] or v['discarded_pages'] < v['discarded'] or
+        (not v['reused'] and v['reused_pages']) or (not v['discarded'] and v['discarded_pages'])):
+        raise ValueError('Inconsistent PS ARM final resource accounting')
+    return dict(enabled=True, **values)
+
+
+def validate_source_prearm(dump_log, enabled, all_ranges=False):
+    """Reject a Docker service config that silently drops the source option."""
+    modes = re.findall(r'SB_KERNEL ps_mr_mode role=source enabled=(\d+)', dump_log)
+    if modes != [str(int(enabled))]:
+        raise ValueError('Executing source PS MR mode differs from requested mode')
+    all_modes = re.findall(r'SB_KERNEL ps_mr_all_mode role=source enabled=(\d+)', dump_log)
+    if all_modes != [str(int(all_ranges))]:
+        raise ValueError('Executing all-range PS MR mode differs from requested mode')
+    summaries = re.findall(r'SB_KERNEL source_prearm_ps layout=(\d+) eligible=(\d+) '
+        r'registered=(\d+) valid=(\d+) skipped_ps=(\d+) elapsed_us=(\d+)', dump_log)
+    rows = re.findall(r'SB_KERNEL final_prearm pid=(\d+) enabled=(\d+) reused=(\d+) '
+        r'fallback=(\d+) invalid=(\d+) result=(-?\d+)', dump_log)
+    if not rows or any(int(row[1]) != int(enabled) or int(row[5]) for row in rows):
+        raise ValueError('Missing or inconsistent final source PS MR accounting')
+    if not enabled:
+        if summaries or any(int(row[2]) for row in rows):
+            raise ValueError('Source PS MR ran when disabled')
+        return {'enabled': False}
+    if len(summaries) != 1:
+        raise ValueError('Missing or duplicate source PS MR registration summary')
+    layout, eligible, registered, valid, skipped, elapsed = map(int, summaries[0])
+    if not (0 <= valid <= registered <= eligible <= layout and skipped <= layout and elapsed > 0):
+        raise ValueError('Invalid source PS MR registration accounting')
+    reused = sum(int(row[2]) for row in rows)
+    fallback = sum(int(row[3]) for row in rows)
+    if reused > valid or not reused + fallback:
+        raise ValueError('Invalid final source PS MR reuse accounting')
+    return dict(enabled=True, layout=layout, eligible=eligible, registered=registered,
+                valid=valid, skipped_ps=skipped, elapsed_us=elapsed,
+                reused=reused, fallback=fallback)

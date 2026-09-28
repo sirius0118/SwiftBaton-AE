@@ -893,8 +893,10 @@ pr_warn("执行到这\n");
 				opts.sb_image_rdma = strstr(buf + 11, "yes") != NULL;
 			}else if (!strncmp(buf, "kernel-dense=", 13)) {
                 opts.sb_kernel_dense = !strncmp(buf + 13, "yes", 3);
-            }else if (!strncmp(buf, "kernel-transfer=", 16)) {
+			}else if (!strncmp(buf, "kernel-transfer=", 16)) {
                 opts.sb_kernel_transfer = !strncmp(buf + 16, "yes", 3);
+			}else if (!strncmp(buf, "kernel-rsocket-proxy=", 21)) {
+				opts.sb_kernel_rsocket_proxy = !strncmp(buf + 21, "yes", 3);
             }else if (!strncmp(buf, "kernel-device=", 14)) {
                 char device[64];
                 if (sscanf(buf + 14, "%63s", device) != 1) return -1;
@@ -998,14 +1000,42 @@ pr_warn("执行到这\n");
 			}else if (!strncmp(buf, "batch-pages=", 12)) {
 				opts.sb_batch_pages = atoi(buf + 12);
 				if (!opts.sb_batch_pages || opts.sb_batch_pages > 256) goto exit;
+			}else if (!strncmp(buf, "buffered-cutover=", 17)) {
+				opts.sb_buffered_cutover = strstr(buf + 17, "yes") != NULL;
+			}else if (!strncmp(buf, "stage-max-mb=", 13)) {
+				opts.sb_stage_max_mb = strtoul(buf + 13, NULL, 10);
+				if (opts.sb_stage_max_mb > 65536) goto exit;
 			}else if (!strncmp(buf, "parent-stage=", 13)) {
 				opts.sb_parent_stage = strstr(buf + 13, "yes") != NULL;
-			}else if (!strncmp(buf, "vma-cache=", 10)) {
+			}else if (!strncmp(buf, "network-lock=", 13)) {
+                char *method = buf + 13;
+                method[strcspn(method, "\r\n")] = '\0';
+                if (!strcmp(method, "iptables"))
+                    opts.network_lock_method = NETWORK_LOCK_IPTABLES;
+                else if (!strcmp(method, "nftables"))
+                    opts.network_lock_method = NETWORK_LOCK_NFTABLES;
+                else {
+                    pr_err("AE network-lock requires iptables or nftables; external skip fencing is not configured\n");
+                    goto exit;
+                }
+                pr_info("SB_NETWORK method=%s\n", method);
+            }else if (!strncmp(buf, "vma-cache=", 10)) {
 				opts.sb_vma_cache = !strncmp(buf + 10, "yes", 3);
 			}else if (!strncmp(buf, "fd-placeholder=", 15)) {
 				opts.sb_fd_placeholder = strstr(buf + 15, "yes") != NULL;
 			}else if (!strncmp(buf, "u-precopy=", 10)) {
 				opts.sb_u_precopy = strstr(buf + 10, "yes") != NULL;
+			}else if (!strncmp(buf, "kernel-ps-arm=", 14)) {
+				opts.sb_kernel_ps_arm = !strncmp(buf + 14, "yes", 3);
+			}else if (!strncmp(buf, "kernel-ps-mr=", 13)) {
+				opts.sb_kernel_ps_mr = !strncmp(buf + 13, "yes", 3);
+			}else if (!strncmp(buf, "kernel-ps-mr-all=", 17)) {
+				opts.sb_kernel_ps_mr_all = !strncmp(buf + 17, "yes", 3);
+			}else if (!strncmp(buf, "kernel-dma-mr=", 14)) {
+				opts.sb_kernel_dma_mr = !strncmp(buf + 14, "yes", 3);
+			}else if (!strncmp(buf, "kernel-catalog-workers=", 23)) {
+				opts.sb_kernel_catalog_workers = atoi(buf + 23);
+				if (!opts.sb_kernel_catalog_workers || opts.sb_kernel_catalog_workers > 32) goto exit;
 			}else if (!strncmp(buf, "validation-workers=", 19)) {
 				opts.sb_validation_workers = atoi(buf + 19);
 				if (!opts.sb_validation_workers || opts.sb_validation_workers > 32) goto exit;
@@ -1101,8 +1131,10 @@ static int restore_using_req(int sk, CriuOpts *req)
 				opts.sb_image_rdma = strstr(buf + 11, "yes") != NULL;
 			}else if (!strncmp(buf, "kernel-dense=", 13)) {
                 opts.sb_kernel_dense = !strncmp(buf + 13, "yes", 3);
-            }else if (!strncmp(buf, "kernel-transfer=", 16)) {
+			}else if (!strncmp(buf, "kernel-transfer=", 16)) {
                 opts.sb_kernel_transfer = !strncmp(buf + 16, "yes", 3);
+			}else if (!strncmp(buf, "kernel-rsocket-proxy=", 21)) {
+				opts.sb_kernel_rsocket_proxy = !strncmp(buf + 21, "yes", 3);
             }else if (!strncmp(buf, "kernel-device=", 14)) {
                 char device[64];
                 if (sscanf(buf + 14, "%63s", device) != 1) return -1;
@@ -1206,14 +1238,42 @@ static int restore_using_req(int sk, CriuOpts *req)
 			}else if (!strncmp(buf, "batch-pages=", 12)) {
 				opts.sb_batch_pages = atoi(buf + 12);
 				if (!opts.sb_batch_pages || opts.sb_batch_pages > 256) goto exit;
+			}else if (!strncmp(buf, "buffered-cutover=", 17)) {
+				opts.sb_buffered_cutover = strstr(buf + 17, "yes") != NULL;
+			}else if (!strncmp(buf, "stage-max-mb=", 13)) {
+				opts.sb_stage_max_mb = strtoul(buf + 13, NULL, 10);
+				if (opts.sb_stage_max_mb > 65536) goto exit;
 			}else if (!strncmp(buf, "parent-stage=", 13)) {
 				opts.sb_parent_stage = strstr(buf + 13, "yes") != NULL;
-			}else if (!strncmp(buf, "vma-cache=", 10)) {
+			}else if (!strncmp(buf, "network-lock=", 13)) {
+                char *method = buf + 13;
+                method[strcspn(method, "\r\n")] = '\0';
+                if (!strcmp(method, "iptables"))
+                    opts.network_lock_method = NETWORK_LOCK_IPTABLES;
+                else if (!strcmp(method, "nftables"))
+                    opts.network_lock_method = NETWORK_LOCK_NFTABLES;
+                else {
+                    pr_err("AE network-lock requires iptables or nftables; external skip fencing is not configured\n");
+                    goto exit;
+                }
+                pr_info("SB_NETWORK method=%s\n", method);
+            }else if (!strncmp(buf, "vma-cache=", 10)) {
 				opts.sb_vma_cache = !strncmp(buf + 10, "yes", 3);
 			}else if (!strncmp(buf, "fd-placeholder=", 15)) {
 				opts.sb_fd_placeholder = strstr(buf + 15, "yes") != NULL;
 			}else if (!strncmp(buf, "u-precopy=", 10)) {
 				opts.sb_u_precopy = strstr(buf + 10, "yes") != NULL;
+			}else if (!strncmp(buf, "kernel-ps-arm=", 14)) {
+				opts.sb_kernel_ps_arm = !strncmp(buf + 14, "yes", 3);
+			}else if (!strncmp(buf, "kernel-ps-mr=", 13)) {
+				opts.sb_kernel_ps_mr = !strncmp(buf + 13, "yes", 3);
+			}else if (!strncmp(buf, "kernel-ps-mr-all=", 17)) {
+				opts.sb_kernel_ps_mr_all = !strncmp(buf + 17, "yes", 3);
+			}else if (!strncmp(buf, "kernel-dma-mr=", 14)) {
+				opts.sb_kernel_dma_mr = !strncmp(buf + 14, "yes", 3);
+			}else if (!strncmp(buf, "kernel-catalog-workers=", 23)) {
+				opts.sb_kernel_catalog_workers = atoi(buf + 23);
+				if (!opts.sb_kernel_catalog_workers || opts.sb_kernel_catalog_workers > 32) goto exit;
 			}else if (!strncmp(buf, "validation-workers=", 19)) {
 				opts.sb_validation_workers = atoi(buf + 19);
 				if (!opts.sb_validation_workers || opts.sb_validation_workers > 32) goto exit;

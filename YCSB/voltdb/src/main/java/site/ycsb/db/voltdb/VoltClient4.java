@@ -53,6 +53,10 @@ import site.ycsb.db.voltdb.sortedvolttable.VoltDBTableSortedMergeWrangler;
 public class VoltClient4 extends DB {
 
   private Client mclient;
+  private String reconnectServers;
+  private String reconnectUser;
+  private String reconnectPassword;
+  private int reconnectRateLimit;
   private byte[] mworkingData;
   private ByteBuffer mwriteBuf;
   private boolean useScanAll = false;
@@ -76,6 +80,10 @@ public class VoltClient4 extends DB {
     }
 
     int ratelimit = strLimit != null ? Integer.parseInt(strLimit) : Integer.MAX_VALUE;
+    reconnectServers = servers;
+    reconnectUser = user;
+    reconnectPassword = password;
+    reconnectRateLimit = ratelimit;
     try {
       mclient = ConnectionHelper.createConnection(servers, user, password, ratelimit);
       
@@ -101,6 +109,26 @@ public class VoltClient4 extends DB {
 
     return false;
 
+  }
+
+  /** A migration drops the old TCP session; the next operation reconnects. */
+  private void reconnectAfterFailure() {
+    Client old = mclient;
+    mclient = null;
+    if (old != null) {
+      try {
+        old.close();
+      } catch (Exception ignored) {
+        // The old socket is already broken at cutover.
+      }
+    }
+    try {
+      mclient = ConnectionHelper.createConnection(
+          reconnectServers, reconnectUser, reconnectPassword, reconnectRateLimit);
+      logger.info("Reconnected to VoltDB after connection loss");
+    } catch (Exception e) {
+      logger.error("Could not reconnect to VoltDB", e);
+    }
   }
 
   @Override
@@ -131,6 +159,7 @@ public class VoltClient4 extends DB {
       return response.getStatus() == ClientResponse.SUCCESS ? Status.OK : Status.ERROR;
     } catch (Exception e) {
       logger.error("Error while deleting row", e);
+      reconnectAfterFailure();
       return Status.ERROR;
     }
   }
@@ -154,6 +183,7 @@ public class VoltClient4 extends DB {
       return Status.OK;
     } catch (Exception e) {
       logger.error("Error while GETing row", e);
+      reconnectAfterFailure();
       return Status.ERROR;
     }
   }
@@ -209,6 +239,7 @@ public class VoltClient4 extends DB {
       return Status.OK;
     } catch (Exception e) {
       logger.error("Error while calling SCAN", e);
+      reconnectAfterFailure();
       return Status.ERROR;
     }
   }
@@ -220,6 +251,7 @@ public class VoltClient4 extends DB {
       return response.getStatus() == ClientResponse.SUCCESS ? Status.OK : Status.ERROR;
     } catch (Exception e) {
       logger.error("Error while calling Update", e);
+      reconnectAfterFailure();
       return Status.ERROR;
     }
   }

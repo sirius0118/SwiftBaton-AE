@@ -1,0 +1,19 @@
+{
+  "name": "real-world-redis",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "ycsb-a",
+      "parameters": {},
+      "options": {}
+    }
+  ],
+  "note": "Paper \u00a75.1: 1M \u00d7 1KiB, ~2GiB RSS, YCSB-A 32 clients."
+}

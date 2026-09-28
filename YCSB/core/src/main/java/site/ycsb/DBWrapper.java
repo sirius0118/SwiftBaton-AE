@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class DBWrapper extends DB {
   private final DB db;
+  private SuccessGapJournal successGaps;
   private final Measurements measurements;
   private final Tracer tracer;
 
@@ -88,6 +89,10 @@ public class DBWrapper extends DB {
   public void init() throws DBException {
     try (final TraceScope span = tracer.newScope(scopeStringInit)) {
       db.init();
+      String gapDirectory = getProperties().getProperty("swiftbaton.success.gaps.dir");
+      if (gapDirectory != null && !gapDirectory.isEmpty()) {
+        successGaps = new SuccessGapJournal(gapDirectory);
+      }
 
       this.reportLatencyForEachError = Boolean.parseBoolean(getProperties().
           getProperty(REPORT_LATENCY_FOR_EACH_ERROR_PROPERTY,
@@ -117,6 +122,10 @@ public class DBWrapper extends DB {
     try (final TraceScope span = tracer.newScope(scopeStringCleanup)) {
       long ist = measurements.getIntendedStartTimeNs();
       long st = System.nanoTime();
+      if (successGaps != null) {
+        try { successGaps.close(); }
+        catch (java.io.IOException e) { throw new DBException("Completion gap output failed", e); }
+      }
       db.cleanup();
       long en = System.nanoTime();
       measure("CLEANUP", Status.OK, ist, st, en);
@@ -172,6 +181,9 @@ public class DBWrapper extends DB {
 
   private void measure(String op, Status result, long intendedStartTimeNanos,
                        long startTimeNanos, long endTimeNanos) {
+    if (successGaps != null && !"CLEANUP".equals(op) && result != null && result.isOk()) {
+      successGaps.record(endTimeNanos);
+    }
     String measurementName = op;
     if (result == null || !result.isOk()) {
       if (this.reportLatencyForEachError ||

@@ -41,14 +41,14 @@ size_t sb_sched_size(uint64_t pages, unsigned capacity)
     return header + queues + (size_t)pages * sizeof(uint64_t);
 }
 
-struct sb_sched *sb_sched_init(void *memory, size_t length, uint64_t pages, unsigned capacity)
+static struct sb_sched *init(void *memory, size_t length, uint64_t pages, unsigned capacity, int zeroed)
 {
     struct sb_sched *s = memory;
     size_t bytes = sb_sched_size(pages, capacity), offset = align64(sizeof(*s));
     unsigned lane, i;
     if (!memory || ((uintptr_t)memory & (CACHELINE - 1)) || !bytes || length < bytes ||
         !__atomic_always_lock_free(sizeof(uint64_t), 0)) return NULL;
-    memset(memory, 0, bytes);
+    if (!zeroed) memset(memory, 0, bytes);
     s->length = bytes; s->pages = pages; s->capacity = capacity; s->version = 1;
     s->stats.pages = pages;
     for (lane = 0; lane < SB_LANES; lane++) {
@@ -60,6 +60,12 @@ struct sb_sched *sb_sched_init(void *memory, size_t length, uint64_t pages, unsi
     __atomic_store_n(&s->magic, SB_SCHED_MAGIC, __ATOMIC_RELEASE);
     return s;
 }
+
+struct sb_sched *sb_sched_init(void *memory, size_t length, uint64_t pages, unsigned capacity)
+{ return init(memory, length, pages, capacity, 0); }
+
+struct sb_sched *sb_sched_init_zeroed(void *memory, size_t length, uint64_t pages, unsigned capacity)
+{ return init(memory, length, pages, capacity, 1); }
 
 struct sb_sched *sb_sched_attach(void *memory, size_t length)
 {
@@ -125,6 +131,28 @@ int sb_sched_seed(struct sb_sched *s, uint64_t page)
     if (page >= s->pages) return -EINVAL;
     if (!__atomic_compare_exchange_n(page_state(s, page), &expected, SB_PAGE_PRECOPY_PENDING,
                                      0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) return -EALREADY;
+    return 0;
+}
+
+int sb_sched_seed_bitmap(struct sb_sched *s, uint64_t first, uint64_t pages,
+                         const volatile unsigned long *bitmap, uint64_t *seeded)
+{
+    const unsigned bits = 8 * sizeof(unsigned long);
+    uint64_t n = 0;
+    if (!s || !bitmap || !seeded || first > s->pages || pages > s->pages - first) return -EINVAL;
+    for (uint64_t base = 0; base < pages; base += bits) {
+        unsigned long word = bitmap[base / bits];
+        if (pages - base < bits) word &= (1UL << (pages - base)) - 1;
+        while (word) {
+            unsigned bit = __builtin_ctzl(word);
+            uint64_t *state = page_state(s, first + base + bit);
+            if (*state) return -EALREADY;
+            *state = SB_PAGE_PRECOPY_PENDING;
+            n++;
+            word &= word - 1;
+        }
+    }
+    *seeded = n;
     return 0;
 }
 

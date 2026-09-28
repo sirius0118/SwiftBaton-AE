@@ -1,3 +1,4 @@
+#include "sb-cutover.h"
 #include "sb-kernel-transfer.h"
 #include "sb-images.h"
 
@@ -2026,14 +2027,20 @@ static int finalize_restore_detach(void)
 				continue;
 			}
 
+			/* Bracket the actual per-thread release. The later aggregate
+			 * tasks_resumed message is not an application service timestamp. */
+			sb_trace_task("restore.thread_regs_begin", pid);
 			if (arch_set_thread_regs_nosigrt(&item->threads[i])) {
 				pr_perror("Restoring regs for %d failed", pid);
 				return -1;
 			}
+			sb_trace_task("restore.thread_regs_done", pid);
+			sb_trace_task("restore.thread_detach_begin", pid);
 			if (ptrace(PTRACE_DETACH, pid, NULL, 0)) {
 				pr_perror("Unable to detach %d", pid);
 				return -1;
 			}
+			sb_trace_task("restore.thread_detach_done", pid);
 		}
 	}
 	return 0;
@@ -2323,8 +2330,14 @@ skip_ns_bouncing:
 		goto out_kill;
 
 #ifdef DOCKER
+	/* Source isolation permits NAT preparation in parallel with final dump.
+	 * Its exact bindings must exist before restored sockets leave repair. */
+	if (opts.sb_buffered_cutover &&
+	    sb_cutover_wait_named(get_service_fd(IMG_FD_OFF), "sb-nat-ready"))
+		goto out_kill;
 	/* Unlock network before disabling repair mode on sockets */
-	network_unlock();
+	if (network_unlock_restore())
+		goto out_kill_network_unlocked;
 #endif
 	/*
 	 * Stop getting sigchld, after we resume the tasks they
@@ -2338,7 +2351,10 @@ skip_ns_bouncing:
 	 * or a connection.
 	 */
 	// 这里会attach到目标进程
-	attach_to_tasks(root_seized);
+	sb_trace("restore.attach_begin");
+	if (attach_to_tasks(root_seized))
+		goto out_kill_network_unlocked;
+	sb_trace("restore.attach_done");
 
 	if (restore_switch_stage(CR_STATE_RESTORE_CREDS))
 		goto out_kill_network_unlocked;
@@ -2404,6 +2420,9 @@ skip_ns_bouncing:
 		goto out_kill_network_unlocked;
 
 	sb_trace("restore.tasks_resumed");
+	if (opts.sb_buffered_cutover && sb_cutover_marker(get_service_fd(IMG_FD_OFF), "sb-tasks-resumed"))
+		goto out_kill_network_unlocked;
+	network_unlock_cleanup();
 	pr_info("Restore finished successfully. Tasks resumed.\n");
 	write_stats(RESTORE_STATS);
 
@@ -2445,6 +2464,7 @@ out_kill:
 	}
 
 out:
+	network_unlock_cleanup();
 	depopulate_roots_yard(mnt_ns_fd, true);
 	stop_usernsd();
 	__restore_switch_stage(CR_STATE_FAIL);
@@ -2632,7 +2652,7 @@ int cr_restore_tasks(void)
 	if (fdstore_init())
 		goto err;
 
-	log_set_loglevel(5);
+	log_set_loglevel(LOG_INFO);
 	if (log_init("/var/lib/criu/restore.log") == -1) {
 		pr_perror("Can't initiate log");
 		goto err;
@@ -2655,7 +2675,7 @@ int cr_restore_tasks(void)
 	// ret = run_page_client();
 	pr_warn("unix path:%s\n", unix_addr);
 	page_sync = syncServerInit_unix("sync.sock");
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	if(page_sync <= 0)
 		pr_err("Can not create Page-Client\n");
 	else
@@ -2666,6 +2686,7 @@ int cr_restore_tasks(void)
 		if (!opts.sb_u_precopy || !opts.sb_image_rdma) goto err;
 		sb_trace("restore.stage_ps_begin");
 		sb_stage_set_numa_node(opts.sb_stage_numa_node);
+		sb_stage_set_max_mb(opts.sb_stage_max_mb);
 		if (sb_stage_receive(page_sync, opts.sb_precopy_workers ? opts.sb_precopy_workers : 4)) goto err;
 		sb_trace("restore.stage_ps_done");
 	}
@@ -2713,8 +2734,10 @@ int cr_restore_tasks(void)
 
 #ifndef DOCKER
 	// 这里创建好 pstree
+	sb_trace("restore.prepare_pstree_begin");
 	if (prepare_pstree() < 0)
 		goto err;
+	sb_trace("restore.prepare_pstree_done");
 #else
 	sb_trace("restore.ps_begin");
 	ret = do_mnt_precreate();
@@ -2779,8 +2802,10 @@ int cr_restore_tasks(void)
 	// ret = run_page_client();
 	
 	// TODO:这里需要加入一个判断，判断page-client是否启动完毕。启动完毕之后才能后续操作
+	sb_trace("restore.prepare_pstree_begin");
 	if (prepare_pstree() < 0)
 		goto err;
+	sb_trace("restore.prepare_pstree_done");
 
 	if (crtools_prepare_shared() < 0)
 		goto err;
@@ -2789,18 +2814,20 @@ int cr_restore_tasks(void)
 	if (criu_signals_setup() < 0)
 		goto clean_cgroup;
 
+	sb_trace("restore.lazy_socket_begin");
 	if (prepare_lazy_pages_socket() < 0)
 		goto clean_cgroup;
+	sb_trace("restore.lazy_socket_done");
 
 #ifdef MUL_UFFD
-pr_warn("执行到这\n");
+(void)0; /* Remove legacy hot-path probe. */
 
 	for_each_pstree_item(pi){
 		pidset[item_num++] = pi->pid->ns[0].virt;
 	}
 	// init the global Pid uffd set
 	if (InitPidUffdSet()) goto err;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 #endif
 
 	sb_trace("restore.root_task_begin");
@@ -3739,13 +3766,13 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 		k_rtsigset_t *blkset = NULL;
 
 #endif
-pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
+(void)0; /* Remove legacy hot-path probe. */
 		thread_args[i].pid = current->threads[i].ns[0].virt;
 		thread_args[i].siginfo_n = siginfo_priv_nr[i];
 		thread_args[i].siginfo = task_args->siginfo;
 		thread_args[i].siginfo += siginfo_n;
 		siginfo_n += thread_args[i].siginfo_n;
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		/* skip self */
 		if (thread_args[i].pid == pid) {
 			task_args->t = thread_args + i;
@@ -3767,7 +3794,7 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 #endif
 			}
 		}
-		pr_warn("执行到这 i:%d, pid:%d\n", i, pid);
+		(void)0; /* Remove legacy hot-path probe. */
 		if ((tcore->tc || tcore->ids) && thread_args[i].pid != pid) {
 			pr_err("Thread has optional fields present %d\n", thread_args[i].pid);
 			ret = -1;
@@ -3803,11 +3830,11 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 			pr_err("Pdeath signal is too big\n");
 			goto err;
 		}
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		ret = prep_sched_info(&thread_args[i].sp, tcore->thread_core);
 		if (ret)
 			goto err;
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		seccomp_rst_reloc(&thread_args[i]);
 		thread_args[i].seccomp_force_tsync = rsti(current)->has_old_seccomp_filter;
 
@@ -3820,7 +3847,7 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 		if (construct_sigframe(sigframe, sigframe, blkset, tcore))
 #endif
 			goto err;
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		if (tcore->thread_core->comm)
 			strncpy(thread_args[i].comm, tcore->thread_core->comm, TASK_COMM_LEN - 1);
 		else
@@ -3829,10 +3856,10 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 
 		if (thread_args[i].pid != pid)
 			core_entry__free_unpacked(tcore, NULL);
-		pr_warn("执行到这\n");
+		(void)0; /* Remove legacy hot-path probe. */
 		pr_info("Thread %4d stack %8p rt_sigframe %8p\n", i, mz[i].stack, mz[i].rt_sigframe);
 	}
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	/*
 	 * Restorer needs own copy of vdso parameters. Runtime
 	 * vdso must be kept non intersecting with anything else,
@@ -3845,13 +3872,13 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 	task_args->vdso_rt_size = vdso_rt_size;
 	task_args->can_map_vdso = kdat.can_map_vdso;
 	task_args->has_clone3_set_tid = kdat.has_clone3_set_tid;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	new_sp = restorer_stack(task_args->t->mz);
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	/* No longer need it */
 	core_entry__free_unpacked(core, NULL);
 	xfree(current->core);
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	/*
 	 * Now prepare run-time data for threads restore.
 	 */
@@ -3866,7 +3893,7 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 	 * Apparmor we can change each thread after they have been created.
 	 */
 	task_args->lsm_type = kdat.lsm;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	/*
 	 * Make root and cwd restore _that_ late not to break any
 	 * attempts to open files by paths above (e.g. /proc).
@@ -3874,7 +3901,7 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 
 	if (restore_fs(current))
 		goto err;
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	sfds_protected = false;
 	close_image_dir();
 	close_proc();
@@ -3886,7 +3913,7 @@ pr_warn("执行到这current->nr_threads:%d, i:%d\n", current->nr_threads, i);
 	sb_fdpool_close();
 	close_service_fd(RPC_SK_OFF);
 	close_service_fd(CGROUPD_SK);
-	pr_warn("执行到这\n");
+	(void)0; /* Remove legacy hot-path probe. */
 	// wait_state(sync_fd)
 	__gcov_flush();
 

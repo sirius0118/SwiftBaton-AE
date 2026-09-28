@@ -1,0 +1,13 @@
+#!/bin/busybox sh
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+echo SBK_PROXY_VM_BOOT
+sh /load-modules.sh || { echo SBK_PROXY_DEPENDENCY_FAIL; poweroff -f; }
+insmod /swiftbaton_k.ko || { echo SBK_PROXY_MODULE_FAIL; poweroff -f; }
+/sbk_proxy_test
+echo SBK_PROXY_EXIT=$?
+rmmod swiftbaton_k || echo SBK_PROXY_UNLOAD_FAIL
+echo SBK_PROXY_VM_DONE
+poweroff -f

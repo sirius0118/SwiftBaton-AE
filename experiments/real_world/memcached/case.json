@@ -1,0 +1,19 @@
+{
+  "name": "real-world-memcached",
+  "workload": "memcached",
+  "parameters": {
+    "records": 5000000,
+    "field_length": 1024,
+    "threads": 1,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "ycsb-a",
+      "parameters": {},
+      "options": {}
+    }
+  ],
+  "note": "Paper \u00a75.1: 5M \u00d7 1KiB, ~5GiB, YCSB-A one client."
+}

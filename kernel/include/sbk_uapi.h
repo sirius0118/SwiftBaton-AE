@@ -7,6 +7,7 @@
 #define SBK_ABI_VERSION 1
 #define SBK_BACKEND_LOOPBACK_TEST 1
 #define SBK_BACKEND_RDMA 2
+#define SBK_BACKEND_RSOCKET_PROXY 3
 #define SBK_LANES 3
 #define SBK_DEMAND 0
 #define SBK_PREFETCH 1
@@ -42,6 +43,15 @@ struct sbk_export_batch {
     __u32 count, workers, completed, peak;
     struct sbk_rdma_region regions[SBK_MAX_BATCH];
 };
+struct sbk_prearm_batch {
+    __s32 pid;
+    __u32 reserved;
+    struct sbk_export_batch batch;
+};
+struct sbk_prearm_status {
+    struct sbk_rdma_region region;
+    __u32 valid, reserved;
+};
 struct sbk_region_bind {
     __s32 session_fd;
     __u32 reserved;
@@ -56,6 +66,17 @@ struct sbk_region_seal {
 #define SBK_FEATURE_PS_SLICE (1U << 2)
 #define SBK_FEATURE_PARALLEL_EXPORT (1U << 3)
 #define SBK_FEATURE_SESSION_DISPATCH (1U << 4)
+#define SBK_FEATURE_TOKEN_POOL (1U << 5)
+#define SBK_FEATURE_DMA_MR (1U << 6)
+#define SBK_FEATURE_PREPARED_ARM (1U << 7)
+#define SBK_FEATURE_UNBOUND_REGION (1U << 8)
+#define SBK_FEATURE_REMOTE_PREARM (1U << 9)
+#define SBK_FEATURE_RSOCKET_PROXY (1U << 10)
+#define SBK_TOKEN_POOL_MAX_PAGES (1U << 22)
+struct sbk_token_pool_stats {
+    __u64 available, prepared, claimed, fallback;
+    __u32 sealed, reserved;
+};
 struct sbk_ps_slice {
     __s32 source_fd;
     __u32 reserved;
@@ -86,6 +107,20 @@ struct sbk_stats {
 struct sbk_page_info {
     __u64 index, started_ns, completed_ns;
     __u32 state, lane;
+};
+
+/* Demand-only userspace transport bridge. The kernel owns PTE installation;
+ * a process holding this region fd supplies one complete page via rsocket.
+ * NEXT may be issued by several workers concurrently. A request expires after
+ * the ordinary SBK_WAIT_TIMEOUT; a late COMPLETE then returns ENOENT. */
+struct sbk_proxy_request {
+    __u64 id, index;
+    __u32 lane, reserved;
+};
+struct sbk_proxy_completion {
+    __u64 id, data; /* data points to exactly PAGE_SIZE bytes on success. */
+    __s32 status;   /* 0 or a negative errno; partial pages are forbidden. */
+    __u32 reserved;
 };
 
 /* Control plane exchanges this over an authenticated channel. No remote writes. */
@@ -144,4 +179,41 @@ struct sbk_rdma_setup {
 #define SBK_IOC_IMPORT_PS _IOW('B', 19, struct sbk_ps_slice)
 #define SBK_IOC_EXPORT_BATCH _IOWR('B', 20, struct sbk_export_batch)
 #define SBK_IOC_DISPATCH_STATS _IOR('B', 21, struct sbk_dispatch_stats)
+/* Reserve unbound tokens in PS. pages is a desired available count, not an
+ * increment. No mapping, remote descriptor or speculative byte is trusted.
+ * First ARM closes reservation admission; shortages use normal allocation.
+ * A failed allocation/copyin never publishes PTEs; partial reservations remain
+ * session-owned and are reclaimed on close. Region fds share the session pool. */
+#define SBK_IOC_TOKEN_RESERVE _IOW('B', 22, __u64)
+#define SBK_IOC_TOKEN_POOL_STATS _IOR('B', 23, struct sbk_token_pool_stats)
+/* Optional catalog transport. Source creates one remote-read-only DMA MR;
+ * destination imports immutable device DMA addresses before binding a region.
+ * These are DMA addresses, never unconditionally CPU physical addresses.
+ * The session retains each source umem until key revocation completes. */
+struct sbk_dma_map {
+    struct sbk_rdma_region region;
+    __u64 addresses; /* userspace array of region.pages u64 DMA addresses */
+};
+#define SBK_IOC_DMA_ENABLE _IO('B', 24)
+#define SBK_IOC_DMA_EXPORT_MAP _IOW('B', 25, struct sbk_dma_map)
+#define SBK_IOC_DMA_IMPORT_MAP _IOW('B', 26, struct sbk_dma_map)
+/* Optional PS preparation at the final target VA; no target mm is needed.
+ * Configured region size is fixed. Reserve the session token pool first.
+ * Later ARM_ANON requires this exact VA and the existing final SEAL rules.
+ * Layout/presence mismatches require a fresh region; this ioctl does not
+ * prove that PS page bytes or source PFNs are still valid. Once preparation
+ * binds tokens, a failure requires closing the fd. Probe feature bit first. */
+#define SBK_IOC_PREPARE_ANON _IOW('B', 27, struct sbk_anon_arm)
+/* Borrow a connected destination catalog without an MR descriptor. CONFIG
+ * fixes the size, PREPARE_ANON may run during PS, and IMPORT_PS can move cached
+ * bytes. Reads/ARM/mmap/generic SEAL remain forbidden until SEAL_REGION
+ * validates the final MR and invalidates the final dirty/PFN set. The view's
+ * cancellation never cancels the shared catalog transport. */
+#define SBK_IOC_BIND_UNBOUND _IOW('B', 28, __s32)
+/* Source PS preregistration is advisory. Recheck status and exact PFNs after
+ * the source is frozen; mapping invalidation forces ordinary final export. */
+#define SBK_IOC_PREARM_BATCH _IOWR('B', 29, struct sbk_prearm_batch)
+#define SBK_IOC_PREARM_STATUS _IOWR('B', 30, struct sbk_prearm_status)
+#define SBK_IOC_PROXY_NEXT _IOR('B', 31, struct sbk_proxy_request)
+#define SBK_IOC_PROXY_COMPLETE _IOW('B', 32, struct sbk_proxy_completion)
 #endif

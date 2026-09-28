@@ -1,0 +1,55 @@
+--- a/criu/pie/parasite.c
++++ b/criu/pie/parasite.c
+@@ -37,6 +37,7 @@
+  * an array of VMAs at this time, so VMAs can be unprotected in any moment
+  */
+ static struct parasite_dump_pages_args *mprotect_args = NULL;
++static unsigned long mprotect_args_size;
+ 
+ #ifndef SPLICE_F_GIFT
+ #define SPLICE_F_GIFT 0x08
+@@ -53,7 +54,29 @@
+ static int mprotect_vmas(struct parasite_dump_pages_args *args)
+ {
+ 	struct parasite_vma_entry *vmas, *vma;
++	struct parasite_dump_pages_args *saved;
++	unsigned int add_prot = args->add_prot;
++	unsigned long bytes;
+ 	int ret = 0, i;
++
++	/* Later RDMA helper RPCs reuse the shared argument buffer. Keep the
++	 * original VMA list until protections are restored or the parasite exits. */
++	if (add_prot && args->nr_vmas) {
++		if (mprotect_args)
++			return -EBUSY;
++		bytes = sizeof(*args) + (unsigned long)args->nr_vmas * sizeof(*vma);
++		saved = (void *)sys_mmap(NULL, bytes, PROT_READ | PROT_WRITE,
++					MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++		if ((long)saved < 0)
++			return -ENOMEM;
++		memcpy(saved, args, bytes);
++		mprotect_args = saved;
++		mprotect_args_size = bytes;
++	} else if (!add_prot && mprotect_args) {
++		args = mprotect_args;
++		args->add_prot = 0;
++	}
++
+ 	pr_debug("执行这mprotect\n");
+ 	vmas = pargs_vmas(args);
+ 	for (i = 0; i < args->nr_vmas; i++) {
+@@ -65,10 +88,11 @@
+ 		}
+ 	}
+ 
+-	if (args->add_prot)
+-		mprotect_args = args;
+-	else
++	if (!add_prot && mprotect_args) {
++		sys_munmap(mprotect_args, mprotect_args_size);
+ 		mprotect_args = NULL;
++		mprotect_args_size = 0;
++	}
+ 
+ 	return ret;
+ }

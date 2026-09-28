@@ -15,11 +15,14 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include "log.h"
 #include "sb-precopy.h"
 #include "sb-stage.h"
 #include "common/sb-numa.h"
+#include "common/sb-stage-commit.h"
+#include "common/sb-stage-align.h"
 
 #define PAGE_BYTES 4096ULL
 #define STAGE_MAGIC 0x5342535441474532ULL
@@ -35,13 +38,52 @@ static struct sb_precopy_view stage_view;
 static struct stage_region *regions;
 static size_t region_count;
 static unsigned char *committed, *valid;
-static unsigned char *retained;
+static unsigned char *retained, *selected;
+static uint64_t stage_page_limit = UINT64_MAX;
+static uint64_t selection_end;
 static uint64_t commit_pages;
 static bool finalized;
 static uint64_t copy_next, copied_pages;
 static int stage_numa_node = -1;
+static int stage_snapshot_fd = -1;
+static void *stage_snapshot;
+static uint64_t stage_snapshot_length, stage_identity_hash;
+static bool stage_refresh_only_changed;
+
+static uint64_t stage_identity(const struct sb_precopy_view *view)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (uint64_t i = 0; i < view->count; i++) {
+        const struct sb_precopy_page *p = &view->pages[i];
+        uint64_t fields[] = {p->pid, p->address, p->region_start,
+                             p->region_end, p->region_flags};
+        for (unsigned field = 0; field < sizeof(fields) / sizeof(fields[0]); field++) {
+            hash ^= fields[field];
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    return hash;
+}
 
 void sb_stage_set_numa_node(int node) { stage_numa_node = node; }
+void sb_stage_set_max_mb(unsigned int mb) { stage_page_limit = mb ? (uint64_t)mb * 256 : UINT64_MAX; }
+
+static void *allocate_stage_mapping(uint64_t begin, uint64_t length, int flags)
+{
+    if (length > SIZE_MAX - SB_STAGE_ALIGNMENT) { errno = EOVERFLOW; return MAP_FAILED; }
+    size_t total = length + SB_STAGE_ALIGNMENT;
+    void *base = mmap(NULL, total, PROT_READ | PROT_WRITE, flags, -1, 0);
+    if (base == MAP_FAILED) return base;
+    size_t prefix = sb_stage_alignment_padding((uintptr_t)base, begin);
+    void *mapping = (char *)base + prefix;
+    if (prefix && munmap(base, prefix)) {
+        munmap(base, total); return MAP_FAILED;
+    }
+    if (munmap((char *)mapping + length, SB_STAGE_ALIGNMENT - prefix)) {
+        munmap(mapping, total - prefix); return MAP_FAILED;
+    }
+    return mapping;
+}
 
 static void *copy_stage_pages(void *unused)
 {
@@ -59,7 +101,9 @@ static void *copy_stage_pages(void *unused)
         for (uint64_t i = begin; i < end; i++) {
             const struct sb_precopy_page *page = &stage_view.pages[i];
             while (i >= regions[low].first + regions[low].count) low++;
-            if (!regions[low].mapping || !page->copied) continue;
+            if (!regions[low].mapping || !page->copied ||
+                (stage_refresh_only_changed && page->copied != 2) ||
+                !(selected[i / 8] & (1U << (i % 8)))) continue;
             memcpy((char *)regions[low].mapping + page->address - regions[low].start,
                    (const char *)stage_view.data + i * PAGE_BYTES, PAGE_BYTES);
             copied++;
@@ -144,7 +188,7 @@ int sb_stage_send(int socket, int snapshot_fd, void *buffer, uint64_t length)
     return rc ? -1 : 0;
 }
 
-int sb_stage_receive(int socket, unsigned workers)
+int sb_stage_receive(int socket, unsigned workers, bool refresh_round)
 {
     struct stage_header header;
     struct stat st;
@@ -176,8 +220,7 @@ int sb_stage_receive(int socket, unsigned workers)
             r = &regions[region_count++];
             *r = (struct stage_region){ .source_pid = page->pid, .start = page->region_start,
                 .end = page->region_end, .first = i, .flags = page->region_flags };
-            r->mapping = mmap(NULL, r->end - r->start, PROT_READ | PROT_WRITE,
-                              r->flags, -1, 0);
+            r->mapping = allocate_stage_mapping(r->start, r->end - r->start, r->flags);
             if (r->mapping == MAP_FAILED) {
                 pr_perror("Anonymous PS stage allocation; use pageclient fallback");
                 r->mapping = NULL;
@@ -190,6 +233,20 @@ int sb_stage_receive(int socket, unsigned workers)
         if (r->flags != (int)page->region_flags) goto fail;
         r->count++;
     }
+    selected = calloc((stage_view.count + 7) / 8 + 1, 1);
+    if (!selected) goto fail;
+    uint64_t selection_count = 0;
+    /* Budget only physically inherited pages. Unselected valid snapshots stay
+     * in the page client's full PS cache and use UFFD demand/AS installation. */
+    for (uint64_t j = 0; j < stage_view.count && selection_count < stage_page_limit; j++)
+        if (stage_view.pages[j].copied) {
+            selected[j / 8] |= 1U << (j % 8);
+            selection_count++;
+            selection_end = j + 1;
+        }
+    pr_info("SB_STAGE budget limit_pages=%llu selected=%llu total=%llu\n",
+            (unsigned long long)stage_page_limit, (unsigned long long)selection_count,
+            (unsigned long long)stage_view.count);
     for (unsigned i = 0; i < workers; i++) {
         if (pthread_create(&threads[i], NULL, copy_stage_pages, NULL)) {
             for (unsigned j = 0; j < i; j++) pthread_join(threads[j], NULL);
@@ -202,7 +259,13 @@ int sb_stage_receive(int socket, unsigned workers)
     if (stage_view.count && munmap((void *)stage_view.data, stage_view.count * PAGE_BYTES)) goto fail;
     stage_view.data = NULL;
     if (sb_stage_inherit(false)) goto fail;
-    close(fds[0]); close(fds[1]);
+    if (refresh_round) {
+        stage_snapshot_fd = fds[0];
+        stage_snapshot = snapshot;
+        stage_snapshot_length = header.length;
+        stage_identity_hash = stage_identity(&stage_view);
+    } else close(fds[0]);
+    close(fds[1]);
     pr_info("SB_STAGE_NUMA node=%d regions=%zu\n", stage_numa_node, region_count);
     pr_info("SB_STAGE parent_ready regions=%zu copied=%llu pid=%d workers=%u\n", region_count,
             (unsigned long long)copied_pages, getpid(), workers);
@@ -212,6 +275,65 @@ fail:
     if (fds[0] >= 0) close(fds[0]);
     if (fds[1] >= 0) close(fds[1]);
     return -1;
+}
+
+int sb_stage_refresh(int image_dir_fd, unsigned workers)
+{
+    struct timespec started, now, pause = {.tv_nsec = 5000000};
+    struct sb_precopy_view updated;
+    pthread_t threads[32];
+    void *payload = MAP_FAILED;
+    uint64_t before = copied_pages;
+    int marker;
+    if (stage_snapshot_fd < 0 || !stage_snapshot || !regions || finalized ||
+        !workers || workers > 32) return -1;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    for (;;) {
+        marker = openat(image_dir_fd, SB_PCLIVE_READY, O_RDONLY | O_CLOEXEC);
+        if (marker >= 0) { close(marker); break; }
+        if (errno != ENOENT) return -1;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec - started.tv_sec > 120) {
+            pr_err("Timed out waiting for PCLive RDMA refresh\n");
+            return -1;
+        }
+        nanosleep(&pause, NULL);
+    }
+    if (sb_precopy_view(stage_snapshot, stage_snapshot_length, &updated) ||
+        updated.count != stage_view.count || updated.nonce != stage_view.nonce ||
+        stage_identity(&updated) != stage_identity_hash) {
+        pr_err("PCLive refresh changed snapshot identity\n");
+        return -1;
+    }
+    stage_view = updated;
+    if (updated.count) {
+        uint64_t offset = stage_snapshot_length - updated.count * PAGE_BYTES;
+        payload = mmap(NULL, updated.count * PAGE_BYTES, PROT_READ, MAP_SHARED,
+                       stage_snapshot_fd, offset);
+        if (payload == MAP_FAILED) return -1;
+        stage_view.data = payload;
+        __atomic_store_n(&copy_next, 0, __ATOMIC_RELAXED);
+        stage_refresh_only_changed = true;
+        for (unsigned i = 0; i < workers; i++) {
+            if (pthread_create(&threads[i], NULL, copy_stage_pages, NULL)) {
+                for (unsigned j = 0; j < i; j++) pthread_join(threads[j], NULL);
+                stage_refresh_only_changed = false;
+                munmap(payload, updated.count * PAGE_BYTES);
+                stage_view.data = NULL;
+                return -1;
+            }
+        }
+        for (unsigned i = 0; i < workers; i++) pthread_join(threads[i], NULL);
+        stage_refresh_only_changed = false;
+        if (munmap(payload, updated.count * PAGE_BYTES)) return -1;
+        stage_view.data = NULL;
+    }
+    close(stage_snapshot_fd);
+    stage_snapshot_fd = -1;
+    pr_info("SB_PCLIVE resident_refresh pages=%llu bytes=%llu workers=%u\n",
+            (unsigned long long)(copied_pages - before),
+            (unsigned long long)((copied_pages - before) * PAGE_BYTES), workers);
+    return 0;
 }
 
 int sb_stage_inherit(bool enable)
@@ -269,15 +391,20 @@ static void discard_invalid(const unsigned char *keep, const char *phase)
     for (size_t i = 0; i < region_count; i++) {
         struct stage_region *r = &regions[i];
         if (!r->mapping) continue;
-        for (uint64_t j = r->first; j < r->first + r->count;) {
+        /* Selection is built in increasing index order in PS. No page beyond
+         * this immutable bound was ever copied into an inherited stage VMA. */
+        uint64_t limit = r->first + r->count;
+        if (limit > selection_end) limit = selection_end;
+        for (uint64_t j = r->first; j < limit;) {
             uint64_t start, end;
-            if ((keep[j / 8] & (1U << (j % 8))) ||
+            if (!(selected[j / 8] & (1U << (j % 8))) ||
+                (keep[j / 8] & (1U << (j % 8))) ||
                 (retained && !(retained[j / 8] & (1U << (j % 8))))) { j++; continue; }
             start = stage_view.pages[j].address;
             do {
                 discarded += !retained || !!(retained[j / 8] & (1U << (j % 8)));
                 j++;
-            } while (j < r->first + r->count && !(keep[j / 8] & (1U << (j % 8))));
+            } while (j < limit && !(keep[j / 8] & (1U << (j % 8))));
             end = stage_view.pages[j - 1].address + PAGE_BYTES;
             calls++;
             if (madvise((char *)r->mapping + start - r->start, end - start, MADV_DONTNEED)) {
@@ -342,6 +469,7 @@ int sb_stage_adopt(pid_t pid, uint64_t begin, uint64_t end, void *target, int fl
         struct stage_region *r = &regions[i];
         void *moved;
         uint64_t adopted = 0;
+        struct sb_stage_commit_batch commit = { .base = committed };
         if (r->pid != pid || r->start != begin || r->end != end || !r->mapping ||
             r->flags != (flags & ~MAP_FIXED)) continue;
         moved = mremap(r->mapping, end - begin, end - begin, MREMAP_MAYMOVE | MREMAP_FIXED, target);
@@ -352,12 +480,13 @@ int sb_stage_adopt(pid_t pid, uint64_t begin, uint64_t end, void *target, int fl
             mprotect(target, end - begin, prot | PROT_WRITE)) return -1;
         for (uint64_t j = r->first; j < r->first + r->count; j++) {
             uint64_t bit = (stage_view.pages[j].address - begin) / PAGE_BYTES;
-            if (!(valid[j / 8] & (1U << (j % 8)))) continue;
+            if (!(valid[j / 8] & selected[j / 8] & (1U << (j % 8)))) continue;
             if (page_bitmap) page_bitmap[bit / 64] |= 1UL << (bit % 64);
             if (parent_bitmap) parent_bitmap[bit / 64] &= ~(1UL << (bit % 64));
-            __atomic_fetch_or(&committed[j / 8], 1U << (j % 8), __ATOMIC_RELEASE);
+            sb_stage_commit_add(&commit, j);
             adopted++;
         }
+        sb_stage_commit_flush(&commit);
         pr_info("SB_STAGE adopted pid=%d begin=%llx end=%llx pages=%llu\n", pid,
                 (unsigned long long)begin, (unsigned long long)end, (unsigned long long)adopted);
         return 1;

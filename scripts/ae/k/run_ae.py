@@ -9,24 +9,40 @@ import shlex
 import subprocess
 import time
 import sys
-from k_mode import KernelSettings, validate_preflight, validate_container, validate_completion, validate_ps_config, validate_export_config, validate_dispatch
+from k_mode import KernelSettings, validate_preflight, validate_container, validate_completion, validate_ps_config, validate_export_config, validate_dispatch, validate_catalog_config, validate_dma_config, validate_ps_arm_config, validate_source_prearm
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(BASE))
+from experiments.common import workload as bench_workload
 RUN_ROOT = Path(os.environ.get('SB_AE_WORK_ROOT', str(BASE.parent / (BASE.name + '-work')))).resolve()
 if BASE == RUN_ROOT or BASE in RUN_ROOT.parents:
     raise SystemExit('SB_AE_WORK_ROOT must be outside the source repository')
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--kernel-transfer', action='store_true', help='Use the already deployed K CRIU and anonymous-PTE module; never installs or loads them')
+parser.add_argument('--kernel-demand-only', action='store_true', help='Remote-fork baseline: use only kernel faults while serving; retire source after target shutdown')
+parser.add_argument('--kernel-rsocket-proxy', action='store_true', help='Experimental remote-fork: carry kernel fault payloads through userspace rsocket')
 parser.add_argument('--kernel-device', default='mlx5_1')
 parser.add_argument('--kernel-gid', type=int, default=3)
 parser.add_argument('--kernel-timeout-ms', type=int, default=2000)
 parser.add_argument('--kernel-dense', action='store_true')
+parser.add_argument('--kernel-dma-mr', action='store_true')
+parser.add_argument('--kernel-ps-arm', action='store_true')
+parser.add_argument('--kernel-ps-mr', action='store_true')
+parser.add_argument('--kernel-ps-mr-all', action='store_true')
 parser.add_argument('--kernel-export-workers', type=int, default=1)
 parser.add_argument('--kernel-export-chunk-mb', type=int, default=0)
 parser.add_argument('--kernel-ps-chunk-mb', type=int, default=64, help='K: independently published PS span in MiB, default 64; 0 retains legacy spans')
 parser.add_argument('--preflight-only', action='store_true', help='K: inspect both hosts without creating containers or changing network/kernel state')
 parser.add_argument('--records', type=int, default=1000000)
+parser.add_argument('--ae-workload', choices=sorted(bench_workload.PORTS), default='redis')
+parser.add_argument('--zipf-zeta', type=float, default=0.99)
+parser.add_argument('--write-ratio', type=float, default=0.5)
+parser.add_argument('--large-mib', type=int, default=4096)
+parser.add_argument('--large-workers', type=int, default=32)
+parser.add_argument('--large-range-kib', type=int, default=16)
+parser.add_argument('--large-sleep-us', type=int, default=10)
+parser.add_argument('--large-thread-iops', type=int, default=100000)
 parser.add_argument('--field-length', type=int, default=1024, help='Bytes per YCSB field0 value; record count is configured separately')
 parser.add_argument('--duration', type=int, default=90)
 parser.add_argument('--warmup', type=int, default=15)
@@ -37,9 +53,12 @@ parser.add_argument('--numa-node', type=int, choices=[0, 1], help='Bind both con
 parser.add_argument('--runtime-snapshot', action='store_true', help='Read owned container CPU/NUMA/page layout before workload and after it; no timed-window sampling')
 parser.add_argument('--poststeady-seconds', type=int, default=0, help='Optional fresh-client target throughput run after the migration workload, 10..120 seconds')
 parser.add_argument('--port', type=int, default=6390)
+parser.add_argument('--network-lock', choices=['iptables','nftables'], default='iptables', help='CRIU network isolation backend; nftables avoids external helper fork/exec')
 parser.add_argument('--image-rdma', action='store_true', help='Keep CRIU images in tmpfs and transfer over RDMA')
+parser.add_argument('--buffered-cutover', action='store_true', help='Hold experiment client packets before conntrack while migrating; release after all tasks resume')
 parser.add_argument('--fast-cutover', action='store_true', help='Arm a direct control connection before checkpoint')
 parser.add_argument('--u-precopy', action='store_true', help='Use real PS snapshots with final soft-dirty/PFN validation')
+parser.add_argument('--stage-max-mb', type=int, default=0, help='Limit inherited anonymous PS stage only; zero is unlimited, remaining valid PS pages install during AS')
 parser.add_argument('--parent-stage', action='store_true', help='Prepare anonymous pages in restore parent during PS, inherit and remap')
 parser.add_argument('--parallel-transfer', action='store_true', help='Use independent demand, adjacent prefetch and background RDMA lanes')
 parser.add_argument('--install-workers', type=int, default=4)
@@ -72,6 +91,7 @@ parser.add_argument('--compact-bg-wire', action='store_true', help='Send only us
 parser.add_argument('--bg-segment-pages', type=int, default=0, help='Experimental background RDMA write limit in pages, 8..256; zero sends each whole batch')
 parser.add_argument('--precopy-workers', type=int, default=4)
 parser.add_argument('--validation-workers', type=int, default=1)
+parser.add_argument('--kernel-catalog-workers', type=int, default=1)
 parser.add_argument('--vma-cache', action='store_true', help='Cache PS smaps with eBPF mutation monitoring and final maps check')
 parser.add_argument('--precopy-limit-mb', type=int, default=2048)
 parser.add_argument('--dynamic-memory', action='store_true', help='Exercise discard, unmap/reuse, remap and fork during target AS')
@@ -84,8 +104,15 @@ parser.add_argument('--child-mib', type=int, default=64)
 parser.add_argument('--child-workers', type=int, default=4)
 parser.add_argument('--canary-mib', type=int, default=0, help='Immutable data for bytewise migration integrity checks')
 opts = parser.parse_args()
+if opts.kernel_demand_only and not (opts.kernel_transfer and opts.no_pretransfer and opts.no_prefetch):
+    parser.error('--kernel-demand-only requires --kernel-transfer --no-pretransfer --no-prefetch')
+if opts.kernel_rsocket_proxy and not opts.kernel_demand_only:
+    parser.error('--kernel-rsocket-proxy requires --kernel-demand-only')
 SCRIPT_ROOT = Path(__file__).resolve().parent
-CRIU_ROOT = BASE / ('build/criu-K' if opts.kernel_transfer else 'build/criu-U')
+CRIU_ROOT = Path(os.environ['SB_AE_CRIU_ROOT']) if os.environ.get('SB_AE_CRIU_ROOT') else (
+    BASE / ('build/criu-K-rsocket' if opts.kernel_rsocket_proxy else
+            'build/criu-K-baseline' if opts.kernel_demand_only else
+            'build/criu-K' if opts.kernel_transfer else 'build/criu-U'))
 if opts.batch_pages is None:
     opts.batch_pages = 32 if opts.kernel_transfer else 64
 kernel_settings = None
@@ -94,7 +121,7 @@ if opts.kernel_transfer:
         parser.error('K requires --image-rdma and --u-precopy')
     if opts.batch_pages != 32:
         parser.error('Current K uses 32-page RDMA batches; --batch-pages must be 32')
-    unsupported = {'parent-stage','parallel-transfer','vma-cache','defer-fault-credits',
+    unsupported = {'parent-stage','parallel-transfer','defer-fault-credits',
         'serial-ps-prepare','dynamic-memory','page-trace','page-probe','kernel-trace',
         'fault-read-batch','fault-install-workers','copy-workers','serial-precopy-ack',
         'sync-fault-transport','rdma-mtu','fault-trace','spin-lifecycle','reader-preferred-lock',
@@ -109,12 +136,15 @@ if opts.kernel_transfer:
         precopy_workers=opts.precopy_workers, no_pretransfer=opts.no_pretransfer,
         no_prefetch=opts.no_prefetch, no_hot_first=opts.no_hot_first, dense=opts.kernel_dense,
         ps_chunk_mb=opts.kernel_ps_chunk_mb, export_workers=opts.kernel_export_workers,
-        export_chunk_mb=opts.kernel_export_chunk_mb)
+        export_chunk_mb=opts.kernel_export_chunk_mb, validation_workers=opts.validation_workers,
+        catalog_workers=opts.kernel_catalog_workers, dma_mr=opts.kernel_dma_mr, ps_arm=opts.kernel_ps_arm,
+        ps_mr=opts.kernel_ps_mr, ps_mr_all=opts.kernel_ps_mr_all,
+        rsocket_proxy=opts.kernel_rsocket_proxy)
     try:
         kernel_settings.values()
     except ValueError as error:
         parser.error(str(error))
-elif opts.preflight_only or opts.kernel_dense or any(a.split('=', 1)[0] in ('--kernel-ps-chunk-mb','--kernel-export-workers','--kernel-export-chunk-mb') for a in sys.argv[1:]):
+elif opts.preflight_only or opts.kernel_dense or opts.kernel_dma_mr or any(a.split('=', 1)[0] in ('--kernel-ps-chunk-mb','--kernel-export-workers','--kernel-export-chunk-mb') for a in sys.argv[1:]):
     parser.error('--preflight-only/--kernel-dense require --kernel-transfer')
 if opts.defer_fault_credits and (not opts.parallel_transfer or opts.sync_fault_transport):
     parser.error('--defer-fault-credits requires asynchronous --parallel-transfer')
@@ -124,6 +154,10 @@ if opts.numa_node is not None and not (opts.runtime_snapshot and (opts.parent_st
     parser.error('--numa-node requires --runtime-snapshot and either K or U --parent-stage')
 if opts.poststeady_seconds and not 10 <= opts.poststeady_seconds <= 120:
     parser.error('poststeady-seconds must be zero or 10..120')
+if not 0 <= opts.write_ratio <= 1 or not 0 < opts.zipf_zeta < 2:
+    parser.error('write-ratio must be 0..1 and zipf-zeta must be between 0 and 2')
+if opts.ae_workload != 'redis' and opts.canary_mib:
+    parser.error('--canary-mib is currently Redis-only')
 if opts.records < 1 or not 1 <= opts.field_length <= 1048576:
     parser.error('records must be positive and field-length must be 1..1048576 bytes')
 if not 0 <= opts.memory_children <= 8 or not 1 <= opts.child_mib <= 1024 or not 1 <= opts.child_workers <= 16:
@@ -132,8 +166,8 @@ if opts.dynamic_memory and not opts.memory_children:
     parser.error('--dynamic-memory requires --memory-children')
 if opts.cow_descendants and not opts.memory_children:
     parser.error('--cow-descendants requires --memory-children')
-if opts.vma_cache and not opts.parent_stage:
-    parser.error('--vma-cache requires --parent-stage')
+if opts.vma_cache and not (opts.parent_stage or opts.kernel_transfer):
+    parser.error('--vma-cache requires --parent-stage or --kernel-transfer')
 if opts.fd_placeholder and not opts.u_precopy:
     parser.error('--fd-placeholder requires --u-precopy')
 if opts.fd_adversarial and not opts.fd_groups:
@@ -167,6 +201,8 @@ if not 1 <= opts.copy_workers <= 32 or not 1 <= opts.install_workers <= 32 or no
     parser.error('copy-workers and install-workers must be 1..32 and batch-pages must be 1..256')
 if opts.parent_stage and not opts.u_precopy:
     parser.error('--parent-stage requires --u-precopy')
+if opts.buffered_cutover and not (opts.fast_cutover and opts.image_rdma):
+    parser.error('--buffered-cutover requires --fast-cutover --image-rdma')
 if (opts.u_precopy or opts.fast_cutover) and not opts.image_rdma:
     parser.error('--u-precopy and --fast-cutover require --image-rdma')
 if not 1 <= opts.precopy_workers <= 32 or not 1 <= opts.precopy_limit_mb <= 65536:
@@ -198,8 +234,13 @@ for option in ['no_prefetch', 'no_hot_first', 'no_pretransfer', 'serial_precopy_
 if kernel_settings:
     # Use exactly the same K options for checkpoint, restore and page-client.
     precopy_config = kernel_settings.config() + f'precopy-limit-mb={opts.precopy_limit_mb}\n'
+    if opts.vma_cache:precopy_config += 'vma-cache=yes\n'
     if opts.fd_placeholder:
         precopy_config += 'fd-placeholder=yes\n'
+if opts.stage_max_mb < 0 or opts.stage_max_mb > 65536 or (opts.stage_max_mb and not opts.parent_stage):
+    parser.error('--stage-max-mb requires --parent-stage and 0..65536 MiB')
+if opts.stage_max_mb:
+    precopy_config += f'stage-max-mb={opts.stage_max_mb}\n'
 NAME = 'sb_ae_' + time.strftime('%Y%m%d_%H%M%S')
 TRACE_TAG = 'sbpf' + NAME[-6:]
 OBSERVER = BASE / 'ae-work/kernel-observation'
@@ -212,7 +253,7 @@ for script_name in ['run_ae.py', 'verify_redis.py', 'k_mode.py']:
     (OUT / script_name).write_bytes(Path(__file__).with_name(script_name).read_bytes())
 if opts.runtime_snapshot:
     (OUT / 'runtime_snapshot.py').write_bytes(Path(__file__).with_name('runtime_snapshot.py').read_bytes())
-IMAGE = os.environ.get('SB_REDIS_IMAGE', 'm.daocloud.io/docker.io/library/redis:latest')
+IMAGE = os.environ.get('SB_REDIS_IMAGE', bench_workload.image(opts.ae_workload)) if opts.ae_workload == 'redis' else bench_workload.image(opts.ae_workload)
 
 def event(kind, event_time_ns=None, **kw):
     row = dict(time_ns=event_time_ns if event_time_ns is not None else time.time_ns(), event=kind, **kw)
@@ -231,6 +272,10 @@ def py(host, script):
     return cmd(host, ['sudo', '-n', 'python3', '-c', script])
 
 def spawn(host, label, args):
+    if label == 'pageclient':
+        # K keeps a device fd and a drain eventfd per VMA. JVM workloads can
+        # exceed the usual 1024 soft limit before the final catalog is sealed.
+        args = ['prlimit', '--nofile=8192:8192', '--'] + args
     if opts.numa_node is not None and label == 'pageclient':
         args = ['numactl', '--cpunodebind=' + str(opts.numa_node), '--membind=' + str(opts.numa_node)] + args
     if opts.kernel_trace and label == 'pageclient':
@@ -397,8 +442,14 @@ def capture_logs():
                 (OUT / name).write_bytes(data)
             except Exception as e:
                 event('collect_log_error', name=name, error=str(e))
+    if opts.buffered_cutover:
+        for name in ['cutover-target.json', 'cutover_resume.log', 'cutover-nat-target.json']:
+            try:
+                (OUT / name).write_text(cmd('knode3', ['sudo', '-n', 'cat', str(OUT / name)]) + '\n')
+            except Exception as e:
+                event('collect_log_error', name=name, error=str(e))
     if opts.fast_cutover:
-        for name in ['cutover-client.json', 'cutover_listener.log']:
+        for name in ['cutover-client.json', 'cutover_listener.log', 'cutover-nat-client.json'] if opts.buffered_cutover else ['cutover-client.json', 'cutover_listener.log']:
             try:
                 (OUT / name).write_text(cmd('knode1', ['sudo', '-n', 'cat', str(OUT / name)]) + '\n')
             except Exception as e:
@@ -418,7 +469,9 @@ try:
         hosts = {host: json.loads(py(host, probe + '\nprint(json.dumps(host_probe(' +
                  repr(str(CRIU_ROOT / 'criu/criu')) + ',' + repr(opts.kernel_device) + ',' + str(opts.kernel_gid) + ')))'))
                  for host in ('knode2','knode3')}
-        errors = validate_preflight(hosts, opts.kernel_export_workers)
+        errors = validate_preflight(hosts, opts.kernel_export_workers, opts.kernel_dma_mr,
+                                    opts.kernel_ps_arm, opts.kernel_ps_mr,
+                                    opts.kernel_rsocket_proxy)
         STATE['kernel_preflight'] = {'hosts': hosts, 'errors': errors, 'passed': not errors}
         (OUT / 'kernel-preflight.json').write_text(json.dumps(STATE['kernel_preflight'], indent=2)+'\n')
         save()
@@ -459,15 +512,15 @@ try:
     for host in ['knode2', 'knode3']:
         if not cmd(host, ['docker', 'network', 'ls', '-q', '--filter', 'name=^sb-ae-net$']):
             cmd(host, ['docker', 'network', 'create', '--subnet', '172.30.52.0/24', 'sb-ae-net'])
+        service_image, command, service_args, service_port = bench_workload.container(opts.ae_workload, opts.port, opts)
         args = ['docker', 'create', '--name', NAME, '--label', 'swiftbaton.ae=true',
                 '--restart=no', '--network', 'sb-ae-net', '--ip', '172.30.52.3',
-                '--security-opt', 'seccomp=unconfined', '-p', str(opts.port) + ':6379']
+                '--security-opt', 'seccomp=unconfined', '-p', str(opts.port) + ':' + str(service_port)] + service_args
         if opts.numa_node is not None:
             cpulist = cmd(host, ['cat', f'/sys/devices/system/node/node{opts.numa_node}/cpulist'])
             if not re.fullmatch(r'[0-9,-]+', cpulist):
                 raise RuntimeError('Unexpected NUMA CPU list: ' + repr(cpulist))
             args += ['--cpuset-cpus', cpulist, '--cpuset-mems', str(opts.numa_node)]
-        command = ['redis-server', '--save', '', '--appendonly', 'no']
         if opts.dynamic_memory or opts.page_probe:
             control = OUT / 'control'
             py(host, f'from pathlib import Path;p=Path({str(control)!r});p.mkdir(parents=True,exist_ok=True)')
@@ -489,46 +542,70 @@ try:
                      '--entrypoint', '/ae-memory-fixture']
             command = ['launch', str(opts.memory_children), str(opts.child_mib),
                        str(opts.child_workers), '0x52ae2026', '--'] + command
-        args += [IMAGE] + command
+        args += [service_image] + command
         STATE[host + '_cid'] = cmd(host, args)
         save()
     cmd('knode2', ['docker', 'start', NAME])
-    time.sleep(1)
-    cmd('knode2', ['redis-cli', '-p', str(opts.port), 'SET', 'ae:sentinel', NAME])
-    endpoint = cmd('knode1', ['timeout', '4', 'redis-cli', '-h', '10.0.0.62', '-p', str(opts.port),
-                             'GET', 'ae:sentinel'])
-    if endpoint != NAME:
-        raise RuntimeError('Client does not reach this source container; check retained experiment NAT rules')
-    config_text = '\n'.join([
-        'workload=site.ycsb.workloads.CoreWorkload', 'recordcount=' + str(opts.records),
-        'operationcount=1000000000', 'fieldcount=1', 'fieldlength=' + str(opts.field_length),
-        'fieldlengthdistribution=constant', 'zeropadding=32',
-        'readproportion=0.5', 'updateproportion=0.5', 'scanproportion=0', 'insertproportion=0',
-        'requestdistribution=zipfian', 'zipfzeta=0.99', 'readallfields=true',
-        'redis.host=10.0.0.62', 'redis.port=' + str(opts.port), 'redis.timeout=100',
-        'threadcount=' + str(opts.threads), 'status.interval=10', 'measurementtype=hdrhistogram',
-        'maxexecutiontime=' + str(opts.duration), ''])
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        if (cmd('knode2', ['redis-cli', '-p', str(opts.port), 'PING'], timeout=5, check=False) == 'PONG'
+                if opts.ae_workload == 'redis' else
+                bench_workload.probe(opts.ae_workload, 'knode2', opts.port, NAME, cmd)):
+            break
+        time.sleep(.4)
+    else:
+        raise TimeoutError(opts.ae_workload + ' did not become ready')
+    if opts.ae_workload == 'redis':
+        cmd('knode2', ['redis-cli', '-p', str(opts.port), 'SET', 'ae:sentinel', NAME])
+        endpoint = cmd('knode1', ['timeout', '4', 'redis-cli', '-h', '10.0.0.62', '-p', str(opts.port),
+                                 'GET', 'ae:sentinel'])
+        if endpoint != NAME:
+            raise RuntimeError('Client does not reach this source container; check retained experiment NAT rules')
+    else:
+        script = f"import socket; s=socket.create_connection(('10.0.0.62',{opts.port}),3);print('READY')"
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            if cmd('knode1', ['python3', '-c', script], timeout=8, check=False) == 'READY':
+                break
+            time.sleep(.5)
+        else:
+            raise RuntimeError('Client cannot reach the source workload')
+    bench_workload.prepare_database(opts.ae_workload, NAME, cmd)
+    config_text = bench_workload.properties(opts.ae_workload, opts)
     (OUT / 'workload.properties').write_text(config_text)
     py('knode1', f'from pathlib import Path;p=Path({str(OUT)!r});p.mkdir(parents=True);(p/"workload.properties").write_text({config_text!r})')
-    base_cmd = ['java', '-Xms1g', '-Xmx4g', '-cp', CP, 'site.ycsb.Client', '-db',
-                'site.ycsb.db.RedisClient', '-s', '-P', str(OUT / 'workload.properties')]
-    job('load', base_cmd + ['-load', '-p', 'status.interval=1000', '-p', 'maxexecutiontime=600'])
-    event('load_started', records=opts.records, field_length=opts.field_length,
-          expected_value_bytes=opts.records * opts.field_length)
-    await_job('load', 650)
+    base_cmd = bench_workload.client_command(BASE, opts.ae_workload, opts, OUT / 'workload.properties')
+    if opts.ae_workload != 'largecontainer':
+        job('load', base_cmd + ['-load', '-p', 'status.interval=1000', '-p', 'maxexecutiontime=3600'])
+        event('load_started', records=opts.records, field_length=opts.field_length,
+              expected_value_bytes=opts.records * opts.field_length)
+        await_job('load', 3700)
+    else:
+        event('load_completed', note='LargeContainer initializes its anonymous memory before opening the service socket')
+    bench_workload.stage_runtime_files(opts.ae_workload, NAME)
+    if opts.ae_workload in ('voltdb', 'mysql'):
+        event('runtime_files_staged', workload=opts.ae_workload, phase='before_timed_workload')
     if opts.canary_mib:
         canary('load')
-    count = int(cmd('knode2', ['redis-cli', '-p', str(opts.port), 'DBSIZE']))
-    if count != opts.records + 2 + bool(opts.canary_mib):
-        raise RuntimeError('Unexpected key count after load: ' + str(count))
-    STATE['source_memory'] = cmd('knode2', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory'])
-    STATE['source_key_count'] = count
+    if opts.ae_workload == 'redis':
+        count = int(cmd('knode2', ['redis-cli', '-p', str(opts.port), 'DBSIZE']))
+        if count != opts.records + 2 + bool(opts.canary_mib):
+            raise RuntimeError('Unexpected key count after load: ' + str(count))
+        STATE['source_memory'] = cmd('knode2', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory'])
+        STATE['source_key_count'] = count
+    else:
+        STATE['source_memory'] = cmd('knode2', ['docker', 'stats', '--no-stream', '--format', '{{.MemUsage}}', NAME])
+        STATE['source_validation'] = bench_workload.verify(opts.ae_workload, 'knode2', opts.port, NAME, opts.records, cmd)
     save()
     runtime_snapshot('knode2', 'source-before-workload')
-    job('run', base_cmd + ['-t'])
+    if opts.ae_workload == 'largecontainer':
+        py('knode1', f'from pathlib import Path;Path({str(OUT / "success-gaps")!r}).mkdir(parents=True,exist_ok=True)')
+        job('run', base_cmd)
+    else:
+        job('run', base_cmd + ['-t', '-p', 'swiftbaton.success.gaps.dir=' + str(OUT / 'success-gaps')])
     event('workload_started')
     time.sleep(opts.warmup)
-    STATE['source_memory_before_migration'] = cmd('knode2', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory'])
+    STATE['source_memory_before_migration'] = (cmd('knode2', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory']) if opts.ae_workload == 'redis' else cmd('knode2', ['docker', 'stats', '--no-stream', '--format', '{{.MemUsage}}', NAME]))
     pid = int(cmd('knode2', ['docker', 'inspect', '-f', '{{.State.Pid}}', NAME]))
     STATE['source_pid'] = pid
     mig = f'/var/lib/criu/migrate_{pid}'
@@ -540,13 +617,16 @@ try:
     save()
     config = '[criu]\nlazy-pages=yes\naddress=0.0.0.0\nport=12346\nsync_addr=10.0.0.63\nsync_port=4568\n'
     config += precopy_config
+    config += f'network-lock={opts.network_lock}\n'
+    if opts.ae_workload in ('mysql', 'voltdb'): config += 'file-locks=yes\n'
+    if opts.buffered_cutover: config += 'buffered-cutover=yes\n'
     if opts.image_rdma:
         config += 'image-rdma=yes\n'
     py('knode2', f'from pathlib import Path;p=Path({mig!r});p.mkdir();(p/"imgs_dir").mkdir();(p/"work_dir").mkdir();(p/"config_ck.cfg").write_text({config!r})')
     if opts.fast_cutover:
         if not opts.image_rdma:
             raise RuntimeError('--fast-cutover currently requires --image-rdma')
-        cutover = dict(name=NAME, token=secrets.token_hex(24), port=opts.port, nat_rule=rule,
+        cutover = dict(name=NAME, token=secrets.token_hex(24), port=opts.port, nat_rule=rule, buffered=opts.buffered_cutover,
                        stop_file=f'/dev/shm/swiftbaton-images-{pid}/stop')
         path = str(OUT / 'cutover-config.json')
         py('knode1', f'from pathlib import Path;p=Path({path!r});p.write_text({json.dumps(cutover)!r});p.chmod(0o600)')
@@ -594,14 +674,22 @@ try:
         cmd('knode3', ['sudo', '-n', 'cp', '-a', mig + '/imgs_dir', checkpoint_dir])
     config = f'[criu]\nlazy-pages=yes\naddress=10.0.0.62\nport=12346\nsync_addr=10.0.0.62\nsync_port=4568\nimgs_dir={mig}/imgs_dir\n'
     config += precopy_config
+    config += f'network-lock={opts.network_lock}\n'
+    if opts.ae_workload in ('mysql', 'voltdb'): config += 'file-locks=yes\n'
+    if opts.buffered_cutover: config += 'buffered-cutover=yes\n'
     if opts.image_rdma:
         config += 'image-rdma=yes\n'
     py('knode3', f'from pathlib import Path;Path({mig + "/config_res.cfg"!r}).write_text({config!r})')
+    if opts.buffered_cutover:
+        path = str(OUT / 'cutover-config.json')
+        py('knode3', f'from pathlib import Path;p=Path({path!r});p.parent.mkdir(parents=True,exist_ok=True);p.write_text({json.dumps(cutover)!r});p.chmod(0o600)')
+        spawn('knode3', 'cutover_resume', ['python3', str(Path(__file__).with_name('fast_cutover.py')), 'resume', path])
+        wait_for('knode3', str(OUT / 'cutover.target-connected'), 10)
     spawn('knode3', 'restore', ['docker', 'start', '--checkpoint', 'migrate_dir', NAME])
     work = '/run/containerd/io.containerd.runtime.v2.task/moby/' + STATE['knode3_cid'] + '/work'
     wait_for('knode3', work + '/sync.sock')
     if opts.kernel_transfer:
-        spawn('knode3', 'pageclient', ['/usr/bin/criu', 'lazy-pages', '-D', mig + '/imgs_dir', '-W', work,
+        spawn('knode3', 'pageclient', (['env', 'SBK_DEMAND_ONLY=1'] if opts.kernel_demand_only else []) + ['/usr/bin/criu', 'lazy-pages', '-D', mig + '/imgs_dir', '-W', work,
               '--page-server', '--address', '10.0.0.62', '--port', '12346', '-v4'] +
               kernel_settings.argv() + ['--precopy-limit-mb', str(opts.precopy_limit_mb)])
     else:
@@ -640,16 +728,16 @@ try:
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         check_migration_jobs()
-        result = cmd('knode3', ['timeout', '2', 'redis-cli', '-p', str(opts.port), 'GET', 'ae:sentinel'], timeout=5, check=False)
-        if result == NAME:
-            event('sentinel_verified', value=result)
+        result = bench_workload.probe(opts.ae_workload, 'knode3', opts.port, NAME, cmd)
+        if result:
+            event('sentinel_verified', workload=opts.ae_workload)
             STATE['restore_verified'] = True
             save()
             break
         time.sleep(.5)
     else:
         raise TimeoutError('Restored Redis did not return the source sentinel')
-    if opts.kernel_transfer:
+    if opts.kernel_transfer and not opts.kernel_demand_only:
         # K returns only after marker retirement/workqueue drain and source ACK.
         # It never creates U's pages.complete, and owns source process termination.
         deadline = time.monotonic() + 120
@@ -674,6 +762,14 @@ try:
                 mode == 'Y', opts.prefetch_workers, opts.install_workers)
         STATE['kernel_export_settings'] = validate_export_config((OUT/'dump.log').read_text(errors='replace'),
             opts.kernel_export_workers, opts.kernel_export_chunk_mb)
+        STATE['kernel_catalog_settings'] = validate_catalog_config((OUT/'pageclient.log').read_text(errors='replace'),
+            opts.kernel_catalog_workers)
+        STATE['kernel_dma_settings'] = validate_dma_config((OUT/'dump.log').read_text(errors='replace'),
+            (OUT/'pageclient.log').read_text(errors='replace'), opts.kernel_dma_mr)
+        STATE['kernel_ps_arm_settings'] = validate_ps_arm_config((OUT/'dump.log').read_text(errors='replace'),
+            (OUT/'pageclient.log').read_text(errors='replace'), opts.kernel_ps_arm)
+        STATE['kernel_ps_mr_settings'] = validate_source_prearm((OUT/'dump.log').read_text(errors='replace'),
+            opts.kernel_ps_mr, opts.kernel_ps_mr_all)
         STATE['kernel_ps_settings'] = validate_ps_config((OUT/'dump.log').read_text(errors='replace'),
             opts.kernel_ps_chunk_mb, opts.no_pretransfer)
         completions = {label: json.loads(py(host, f'from pathlib import Path;print((Path({str(OUT)!r})/{label + ".completion.json"!r}).read_text())'))
@@ -686,7 +782,7 @@ try:
         # observation. It is a conservative marker after final ACK/MR revocation.
         event('all_pages_copied', event_time_ns=completions['checkpoint']['time_ns'], kernel_stats=stats,
               marker='source checkpoint command returned successfully after K drain/ACK')
-    else:
+    elif not opts.kernel_transfer:
         wait_for('knode3', work + '/pages.complete', 90)
         event('all_pages_copied')
         current_pid = int(cmd('knode2', ['docker', 'inspect', '-f', '{{.State.Pid}}', NAME]))
@@ -703,44 +799,88 @@ for p in Path('/proc').iterdir():
   try:os.kill(int(p.name),signal.SIGKILL)
   except ProcessLookupError:pass
 ''')
-    STATE['source_retired'] = True
-    save()
-    event('source_retired', event_time_ns=completions['checkpoint']['time_ns'] if opts.kernel_transfer else None)
+    if not opts.kernel_demand_only:
+        STATE['source_retired'] = True
+        save()
+        event('source_retired', event_time_ns=completions['checkpoint']['time_ns'] if opts.kernel_transfer else None)
     await_job('run', opts.duration + 60)
+    subprocess.run(['rsync', '-az', 'knode1:' + str(OUT / 'success-gaps') + '/', str(OUT / 'success-gaps') + '/'], check=True, timeout=30)
     runtime_snapshot('knode3', 'target-after-workload')
     if opts.poststeady_seconds:
         # A separate JVM and log preserve the original recovery measurement.
-        job('poststeady', base_cmd + ['-t', '-p', 'maxexecutiontime=' + str(opts.poststeady_seconds)])
+        post_cmd = (base_cmd[:base_cmd.index('--seconds') + 1] + [str(opts.poststeady_seconds)] + base_cmd[base_cmd.index('--seconds') + 2:]
+                    if opts.ae_workload == 'largecontainer' else base_cmd + ['-t', '-p', 'maxexecutiontime=' + str(opts.poststeady_seconds)])
+        job('poststeady', post_cmd)
         event('poststeady_started', duration=opts.poststeady_seconds)
         await_job('poststeady', opts.poststeady_seconds + 60)
         runtime_snapshot('knode3', 'target-after-poststeady')
-    STATE['destination_key_count'] = int(cmd('knode3', ['redis-cli', '-p', str(opts.port), 'DBSIZE']))
-    STATE['destination_memory'] = cmd('knode3', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory'])
-    if STATE['destination_key_count'] != opts.records + 2 + bool(opts.canary_mib):
-        raise RuntimeError('Key count changed across migration')
-    event('key_count_verified', count=STATE['destination_key_count'])
-    # Exercise the same address that the YCSB client used after the cutover.
-    actual = cmd('knode1', ['timeout', '5', 'redis-cli', '-h', '10.0.0.62', '-p', str(opts.port),
-                          'GET', 'ae:sentinel'])
-    if actual != NAME:
-        raise RuntimeError('Client endpoint does not reach the migrated Redis')
-    event('client_endpoint_verified')
-    if opts.canary_mib:
-        canary('verify')
-    verifier = Path(__file__).with_name('verify_redis.py').read_text()
-    verify_args = ['python3', '-', '--host', '10.0.0.62', '--port', str(opts.port),
-                   '--records', str(opts.records), '--field-length', str(opts.field_length), '--sentinel', NAME,
-                   '--extra-keys', str(int(bool(opts.canary_mib)))]
-    verification = subprocess.run(
-        ['ssh', '-oBatchMode=yes', 'knode1', shlex.join(verify_args)],
-        input=verifier, text=True, capture_output=True, timeout=180)
-    (OUT / 'validation.json').write_text(verification.stdout)
-    (OUT / 'validation.stderr').write_text(verification.stderr)
-    if verification.returncode:
-        raise RuntimeError('Full record validation failed; see validation.json and validation.stderr')
-    STATE['validation'] = json.loads(verification.stdout)
-    event('all_records_verified', checked=STATE['validation']['checked_records'])
+    if opts.ae_workload == 'redis':
+        STATE['destination_key_count'] = int(cmd('knode3', ['redis-cli', '-p', str(opts.port), 'DBSIZE']))
+        STATE['destination_memory'] = cmd('knode3', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory'])
+        if STATE['destination_key_count'] != opts.records + 2 + bool(opts.canary_mib):
+            raise RuntimeError('Key count changed across migration')
+        event('key_count_verified', count=STATE['destination_key_count'])
+        # Exercise the same address that the YCSB client used after the cutover.
+        actual = cmd('knode1', ['timeout', '5', 'redis-cli', '-h', '10.0.0.62', '-p', str(opts.port),
+                              'GET', 'ae:sentinel'])
+        if actual != NAME:
+            raise RuntimeError('Client endpoint does not reach the migrated Redis')
+        event('client_endpoint_verified')
+        if opts.canary_mib:
+            canary('verify')
+        verifier = Path(__file__).with_name('verify_redis.py').read_text()
+        verify_args = ['python3', '-', '--host', '10.0.0.62', '--port', str(opts.port),
+                       '--records', str(opts.records), '--field-length', str(opts.field_length), '--sentinel', NAME,
+                       '--extra-keys', str(int(bool(opts.canary_mib)))]
+        verification = subprocess.run(
+            ['ssh', '-oBatchMode=yes', 'knode1', shlex.join(verify_args)],
+            input=verifier, text=True, capture_output=True, timeout=180)
+        (OUT / 'validation.json').write_text(verification.stdout)
+        (OUT / 'validation.stderr').write_text(verification.stderr)
+        if verification.returncode:
+            raise RuntimeError('Full record validation failed; see validation.json and validation.stderr')
+        STATE['validation'] = json.loads(verification.stdout)
+        event('all_records_verified', checked=STATE['validation']['checked_records'])
+    else:
+        STATE['destination_memory'] = cmd('knode3', ['docker', 'stats', '--no-stream', '--format', '{{.MemUsage}}', NAME])
+        STATE['validation'] = bench_workload.verify(opts.ae_workload, 'knode3', opts.port, NAME, opts.records, cmd)
+        STATE['destination_key_count'] = STATE['validation'].get('records', STATE['validation'].get('items'))
+        event('workload_verified', workload=opts.ae_workload, result=STATE['validation'])
+        script = f"import socket; s=socket.create_connection(('10.0.0.62',{opts.port}),3);print('READY')"
+        if cmd('knode1', ['python3', '-c', script], timeout=8) != 'READY':
+            raise RuntimeError('Client endpoint does not reach migrated workload')
+        event('client_endpoint_verified')
     check_memory_children('knode3', 'target')
+    if opts.kernel_demand_only:
+        # The source must remain available for every future fault while Redis
+        # serves. End the measured workload and verify all data *before* the
+        # target exits; unaccessed markers then retire without a BG sweep.
+        cmd('knode3', ['docker', 'kill', NAME])
+        event('remote_fork_target_stopped_after_validation')
+        deadline = time.monotonic() + 120
+        while True:
+            check_migration_jobs()
+            statuses = {label: py(host, f'from pathlib import Path;p=Path({str(OUT)!r})/{label + ".status"!r};print(p.read_text() if p.exists() else "running")')
+                        for host, label in [('knode2','checkpoint'),('knode3','restore'),('knode3','pageclient')]}
+            info = json.loads(cmd('knode2', ['docker','inspect', STATE['knode2_cid']]))[0]
+            if all(value == '0' for value in statuses.values()) and not info['State']['Running']:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Remote-fork source did not retire after target exit: ' + str(statuses))
+            time.sleep(.15)
+        capture_logs()
+        text = (OUT/'pageclient.log').read_text(errors='replace')
+        if text.count('SB_KERNEL baseline_demand_only=1 background_disabled=1') != 1:
+            raise RuntimeError('Remote-fork demand-only catalog was not active')
+        stats = validate_completion({key:int(value) for key,value in statuses.items()}, info,
+            STATE['knode2_cid'], (OUT/'dump.log').read_text(errors='replace'), text)
+        if not stats['PF'] or stats['FT'] or stats['BG'] or stats['PS'] or stats['invalid']:
+            raise RuntimeError('Remote-fork baseline used a non-fault page path: ' + str(stats))
+        STATE['kernel_stats'] = stats
+        STATE['source_retired'] = True
+        save()
+        event('all_pages_copied', marker='target exit retired remaining remote markers', kernel_stats=stats)
+        event('source_retired')
     if opts.cow_descendants and not opts.kernel_transfer:
         capture_logs()
         text = (OUT / 'restore.log').read_text(errors='replace')

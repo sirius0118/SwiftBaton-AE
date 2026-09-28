@@ -25,10 +25,19 @@ struct sb_sched_stats {
 };
 size_t sb_sched_size(uint64_t pages, unsigned queue_capacity);
 struct sb_sched *sb_sched_init(void *memory, size_t length, uint64_t pages, unsigned capacity);
+/* Only for a fresh, never-written anonymous mapping. It must not have been
+ * shared with a worker, initialized, reused, or seeded. Length/bounds/alignment
+ * checks are identical to sb_sched_init; caller guarantees all bytes are zero. */
+struct sb_sched *sb_sched_init_zeroed(void *memory, size_t length, uint64_t pages, unsigned capacity);
 struct sb_sched *sb_sched_attach(void *memory, size_t length);
 /* Before submitting work: reserve validated pages for the local pre-copy or
  * parent-stage path. Reservation does NOT count as installation/completion. */
 int sb_sched_seed(struct sb_sched *s, uint64_t page);
+/* Initialization only: the coordinator has exclusive ownership, before any
+ * worker/queue operations. Bitmap bit zero corresponds to `first`, not page 0.
+ * Does not commit a page; AS still waits for the actual install/adoption ACK. */
+int sb_sched_seed_bitmap(struct sb_sched *s, uint64_t first, uint64_t pages,
+                         const volatile unsigned long *bitmap, uint64_t *seeded);
 /* Acknowledge that the reserved page was installed or actually adopted. */
 int sb_sched_seed_commit(struct sb_sched *s, uint64_t page);
 /* 1 = enqueued/promoted, 0 = already owned/committed, negative errno.

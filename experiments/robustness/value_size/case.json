@@ -1,0 +1,86 @@
+{
+  "name": "robustness-value-size",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "64B",
+      "parameters": {
+        "field_length": 64,
+        "records": 16777216
+      },
+      "options": {}
+    },
+    {
+      "name": "128B",
+      "parameters": {
+        "field_length": 128,
+        "records": 8388608
+      },
+      "options": {}
+    },
+    {
+      "name": "256B",
+      "parameters": {
+        "field_length": 256,
+        "records": 4194304
+      },
+      "options": {}
+    },
+    {
+      "name": "512B",
+      "parameters": {
+        "field_length": 512,
+        "records": 2097152
+      },
+      "options": {}
+    },
+    {
+      "name": "1024B",
+      "parameters": {
+        "field_length": 1024,
+        "records": 1048576
+      },
+      "options": {}
+    },
+    {
+      "name": "2048B",
+      "parameters": {
+        "field_length": 2048,
+        "records": 524288
+      },
+      "options": {}
+    },
+    {
+      "name": "4096B",
+      "parameters": {
+        "field_length": 4096,
+        "records": 262144
+      },
+      "options": {}
+    },
+    {
+      "name": "8192B",
+      "parameters": {
+        "field_length": 8192,
+        "records": 131072
+      },
+      "options": {}
+    },
+    {
+      "name": "16384B",
+      "parameters": {
+        "field_length": 16384,
+        "records": 65536
+      },
+      "options": {}
+    }
+  ],
+  "note": "Paper Fig.10(b), 64B\u201316KiB, constant 1GiB value payload. RSS varies with key overhead."
+}

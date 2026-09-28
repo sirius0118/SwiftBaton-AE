@@ -21,12 +21,18 @@
 #include <linux/delay.h>
 #include <linux/bitmap.h>
 #include <linux/overflow.h>
+#include <linux/capability.h>
+#include <linux/pid.h>
+#include <linux/list.h>
+#include <linux/spinlock.h>
+#include <linux/poll.h>
 #ifdef CONFIG_SWIFTBATON_PTE
 #include <linux/swiftbaton_pte.h>
 #endif
 #include "sbk_uapi.h"
 #include "sbk_rdma.h"
 #include "sbk_dispatch.h"
+#include "sbk_token_pool.h"
 
 #define SBK_MAX_PAGES (1UL << 20)
 #define SBK_MAX_WORKERS 32
@@ -49,10 +55,28 @@ struct sbk_bg_worker {
 	union { struct work_struct work; struct sbk_work job; };
 	struct sbk_context *ctx;
 };
+struct sbk_proxy_waiter {
+	struct list_head link;
+	struct kref refs;
+	struct completion done;
+	struct page *page;
+	u64 id, index;
+	u32 lane;
+	int status;
+	bool dispatched;
+};
 struct sbk_context {
+	spinlock_t proxy_lock;
+	struct list_head proxy_pending, proxy_inflight;
+	wait_queue_head_t proxy_wait;
+	atomic_t proxy_pending_count;
+	u64 proxy_next_id;
+	struct sbk_token_pool *token_pool;
 	struct kref refs;
 	struct work_struct destroy;
 	struct work_struct drain;
+	struct work_struct creator_drop;
+	unsigned long creator_tokens;
 	union { struct work_struct coverage; struct sbk_work coverage_job; };
 	struct sbk_work_owner owner;
 	struct sbk_dispatch *ft_pool, *bg_pool;
@@ -61,13 +85,14 @@ struct sbk_context {
 	struct eventfd_ctx *drain_event;
 	atomic_t armed, drain_started, drained, drain_signaled;
 	atomic64_t retired_tokens;
+	atomic_t retirement_audited;
 	struct mutex control;
 	bool config_attempted, configured, mapped, background_started, pretransferred, sealed;
 	atomic_t stopping;
 	struct sbk_config cfg;
 	struct sbk_rdma *rdma;
 	struct sbk_rdma_region region;
-	bool has_region;
+	bool has_region, unbound_region;
 	struct page **source;
 	unsigned long pinned;
 	struct sbk_entry *entries;
@@ -78,14 +103,34 @@ struct sbk_context {
 	struct mm_struct *mm;
 	unsigned long base;
 	bool anonymous;
+	bool plan_mode;
+#ifdef SBK_PTE_PLAN_API
+	struct sbk_pte_plan *arm_plan;
+	unsigned long plan_address;
+#endif
 	unsigned long *token_ids, tokens_created;
 	atomic64_t faults, hits, waits, errors, fetched[SBK_LANES];
 	atomic64_t installed, skipped, fault_ns, fault_max, histogram[32];
 	atomic64_t batches, completed, ps_pages, invalidated;
 };
 static struct workqueue_struct *reap_wq;
+#ifdef CONFIG_SWIFTBATON_PTE
+static struct workqueue_struct *creator_wq;
+#endif
 static const struct vm_operations_struct sbk_vm_ops;
 static const struct file_operations sbk_fops;
+static bool arm_timing;
+module_param(arm_timing, bool, 0444);
+MODULE_PARM_DESC(arm_timing, "Log anonymous ARM phase durations; disabled by default");
+static bool defer_creator_drop;
+module_param(defer_creator_drop, bool, 0444);
+MODULE_PARM_DESC(defer_creator_drop, "Release successful ARM creator refs on a NUMA-local worker");
+static unsigned int creator_drop_test_delay_ms;
+module_param(creator_drop_test_delay_ms, uint, 0444);
+MODULE_PARM_DESC(creator_drop_test_delay_ms, "LOOPBACK_TEST only: delay creator release, maximum 1000 ms");
+static bool retirement_audit;
+module_param(retirement_audit, bool, 0444);
+MODULE_PARM_DESC(retirement_audit, "Diagnostic only: report first unfetched token retirement per region");
 static bool early_prefetch = true;
 module_param(early_prefetch, bool, 0444);
 MODULE_PARM_DESC(early_prefetch, "Queue neighbors after demand WR post, before completion; false retains late-trigger ablation");
@@ -119,12 +164,193 @@ static void sbk_max(atomic64_t *v, u64 n)
 	}
 }
 
+static void sbk_proxy_free(struct kref *ref)
+{
+	struct sbk_proxy_waiter *request = container_of(ref, struct sbk_proxy_waiter, refs);
+	put_page(request->page);
+	kfree(request);
+}
+
+/* A dispatched request holds a second reference until COMPLETE, timeout or
+ * cancellation removes it from the inflight list. The page reference also
+ * protects against a late userspace copy racing a failed fault. */
+static int sbk_proxy_fetch(struct sbk_context *c, struct page *page,
+			   unsigned long index, unsigned int lane)
+{
+	struct sbk_proxy_waiter *request;
+	unsigned long flags;
+	bool drop_dispatch = false;
+	int ret;
+	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&request->link);
+	kref_init(&request->refs);
+	init_completion(&request->done);
+	get_page(page);
+	request->page = page;
+	request->index = index;
+	request->lane = lane;
+	spin_lock_irqsave(&c->proxy_lock, flags);
+	if (atomic_read(&c->stopping)) {
+		spin_unlock_irqrestore(&c->proxy_lock, flags);
+		ret = -ECANCELED;
+		goto out;
+	}
+	request->id = ++c->proxy_next_id;
+	list_add_tail(&request->link, &c->proxy_pending);
+	atomic_inc(&c->proxy_pending_count);
+	spin_unlock_irqrestore(&c->proxy_lock, flags);
+	wake_up_interruptible(&c->proxy_wait);
+	if (!wait_for_completion_timeout(&request->done, SBK_WAIT_TIMEOUT))
+		ret = -ETIMEDOUT;
+	else
+		ret = READ_ONCE(request->status);
+	spin_lock_irqsave(&c->proxy_lock, flags);
+	if (!list_empty(&request->link)) {
+		list_del_init(&request->link);
+		if (request->dispatched)
+			drop_dispatch = true;
+		else
+			atomic_dec(&c->proxy_pending_count);
+	}
+	spin_unlock_irqrestore(&c->proxy_lock, flags);
+	if (drop_dispatch)
+		kref_put(&request->refs, sbk_proxy_free);
+out:
+	kref_put(&request->refs, sbk_proxy_free);
+	return ret;
+}
+
+static int sbk_proxy_next(struct file *file, void __user *user)
+{
+	struct sbk_context *c = file->private_data;
+	struct sbk_proxy_waiter *request;
+	struct sbk_proxy_request desc;
+	unsigned long flags;
+	int ret;
+	if (!READ_ONCE(c->configured) || c->cfg.backend != SBK_BACKEND_RSOCKET_PROXY)
+		return -EINVAL;
+	for (;;) {
+		spin_lock_irqsave(&c->proxy_lock, flags);
+		if (atomic_read(&c->stopping)) {
+			spin_unlock_irqrestore(&c->proxy_lock, flags);
+			return -ECANCELED;
+		}
+		if (list_empty(&c->proxy_pending)) {
+			spin_unlock_irqrestore(&c->proxy_lock, flags);
+			if (file->f_flags & O_NONBLOCK)
+				return -EAGAIN;
+			ret = wait_event_interruptible(c->proxy_wait,
+				atomic_read(&c->proxy_pending_count) || atomic_read(&c->stopping));
+			if (ret)
+				return ret;
+			continue;
+		}
+		request = list_first_entry(&c->proxy_pending, struct sbk_proxy_waiter, link);
+		list_move_tail(&request->link, &c->proxy_inflight);
+		atomic_dec(&c->proxy_pending_count);
+		request->dispatched = true;
+		/* One list reference and one temporary copyout reference. */
+		kref_get(&request->refs);
+		kref_get(&request->refs);
+		desc = (struct sbk_proxy_request){.id = request->id,
+			.index = request->index, .lane = request->lane};
+		spin_unlock_irqrestore(&c->proxy_lock, flags);
+		ret = copy_to_user(user, &desc, sizeof(desc)) ? -EFAULT : 0;
+		if (ret) {
+			bool removed = false;
+			spin_lock_irqsave(&c->proxy_lock, flags);
+			if (!list_empty(&request->link)) {
+				list_del_init(&request->link);
+				removed = true;
+			}
+			spin_unlock_irqrestore(&c->proxy_lock, flags);
+			if (removed) {
+				WRITE_ONCE(request->status, ret);
+				kref_put(&request->refs, sbk_proxy_free);
+				complete(&request->done);
+			}
+		}
+		kref_put(&request->refs, sbk_proxy_free);
+		return ret;
+	}
+}
+
+static int sbk_proxy_complete(struct sbk_context *c, void __user *user)
+{
+	struct sbk_proxy_completion done;
+	struct sbk_proxy_waiter *request, *found = NULL;
+	unsigned long flags;
+	void *address;
+	int ret;
+	if (copy_from_user(&done, user, sizeof(done)))
+		return -EFAULT;
+	if (!READ_ONCE(c->configured) || c->cfg.backend != SBK_BACKEND_RSOCKET_PROXY ||
+	    !done.id || done.reserved || done.status > 0 ||
+	    (done.status == 0 && !done.data))
+		return -EINVAL;
+	spin_lock_irqsave(&c->proxy_lock, flags);
+	list_for_each_entry(request, &c->proxy_inflight, link)
+		if (request->id == done.id) {
+			list_del_init(&request->link);
+			found = request;
+			break;
+		}
+	spin_unlock_irqrestore(&c->proxy_lock, flags);
+	if (!found)
+		return -ENOENT;
+	ret = atomic_read(&c->stopping) ? -ECANCELED : done.status;
+	if (!ret) {
+		address = kmap_local_page(found->page);
+		ret = copy_from_user(address, u64_to_user_ptr(done.data), PAGE_SIZE) ? -EFAULT : 0;
+		kunmap_local(address);
+	}
+	WRITE_ONCE(found->status, ret);
+	/* Drop the dispatcher's page pin before the owner can return it to the
+	 * fault handler. The anonymous-PTE provider requires an exclusive page. */
+	kref_put(&found->refs, sbk_proxy_free);
+	complete(&found->done);
+	return ret;
+}
+
+static void sbk_proxy_cancel(struct sbk_context *c)
+{
+	struct sbk_proxy_waiter *request;
+	unsigned long flags;
+	bool dispatched;
+	atomic_set(&c->stopping, 1);
+	wake_up_interruptible_all(&c->proxy_wait);
+	for (;;) {
+		spin_lock_irqsave(&c->proxy_lock, flags);
+		if (!list_empty(&c->proxy_pending))
+			request = list_first_entry(&c->proxy_pending, struct sbk_proxy_waiter, link);
+		else if (!list_empty(&c->proxy_inflight))
+			request = list_first_entry(&c->proxy_inflight, struct sbk_proxy_waiter, link);
+		else {
+			spin_unlock_irqrestore(&c->proxy_lock, flags);
+			break;
+		}
+		dispatched = request->dispatched;
+		kref_get(&request->refs);
+		list_del_init(&request->link);
+		if (!dispatched)
+			atomic_dec(&c->proxy_pending_count);
+		spin_unlock_irqrestore(&c->proxy_lock, flags);
+		WRITE_ONCE(request->status, -ECANCELED);
+		if (dispatched)
+			kref_put(&request->refs, sbk_proxy_free);
+		kref_put(&request->refs, sbk_proxy_free);
+		complete(&request->done);
+	}
+}
+
 /* Last VMA close can hold mmap_write_lock: destruction must not flush there. */
 static void sbk_destroy(struct work_struct *work)
 {
 	struct sbk_context *c = container_of(work, struct sbk_context, destroy);
 	unsigned long i;
-	atomic_set(&c->stopping, 1);
+	sbk_proxy_cancel(c);
 	/* Close admission, then join this region only; sibling regions stay live. */
 	sbk_owner_stop(&c->owner);
 	/* Shared transport survives destruction of any individual region. */
@@ -147,6 +373,9 @@ static void sbk_destroy(struct work_struct *work)
 	kvfree(c->entries);
 	kvfree(c->order);
 	kvfree(c->token_ids);
+#ifdef CONFIG_SWIFTBATON_PTE
+	sbk_token_pool_put(c->token_pool);
+#endif
 	kfree(c);
 	/* module_exit flushes reap_wq before unloading its callback text. */
 	module_put(THIS_MODULE);
@@ -171,13 +400,17 @@ static void sbk_drain_work(struct work_struct *work)
 	struct sbk_context *c = container_of(work, struct sbk_context, drain);
 	/* All markers are gone, but background reads might still be completing
 	 * after munmap/discard. Join those DMA owners before allowing retirement. */
-	atomic_set(&c->stopping, 1);
 	if (c->bg_pool)
 		sbk_owner_stop(&c->owner);
 	else {
 		flush_workqueue(c->ft_wq);
 		flush_workqueue(c->bg_wq);
 	}
+	/* Retirement is not cancellation: an admitted batch can still own DMA
+	 * for pages whose last markers were discarded. Let it finish before
+	 * marking the context stopped; a real transport failure remains fatal.
+	 * The owner closes admission and joins all session jobs above. */
+	atomic_set(&c->stopping, 1);
 	atomic_set_release(&c->drained, 1);
 	sbk_signal_drain(c);
 	kref_put(&c->refs, sbk_release_ref);
@@ -190,6 +423,27 @@ static void sbk_maybe_drain(struct sbk_context *c)
 		kref_get(&c->refs);
 		queue_work(reap_wq, &c->drain);
 	}
+}
+static void sbk_creator_drop_work(struct work_struct *work)
+{
+	struct sbk_context *c = container_of(work, struct sbk_context, creator_drop);
+	unsigned long i, count = c->creator_tokens;
+	u64 begin = arm_timing ? ktime_get_ns() : 0;
+	if (creator_drop_test_delay_ms && c->cfg.backend == SBK_BACKEND_LOOPBACK_TEST)
+		msleep(creator_drop_test_delay_ms);
+	/* This work owns the creator references and an independent context ref.
+	 * PTEs may fault, fork or disappear, and the device fd may close meanwhile.
+	 * Only the last token release contributes to retirement and the drain ACK. */
+	for (i = 0; i < count; i++) {
+		sbk_pte_token_put(c->token_ids[i]);
+		if (!(i & 4095))
+			cond_resched();
+	}
+	c->creator_tokens = 0;
+	sbk_maybe_drain(c);
+	if (arm_timing)
+		pr_info("SBK_CREATOR_DROP pages=%lu work_ns=%llu\n", count, ktime_get_ns() - begin);
+	kref_put(&c->refs, sbk_release_ref);
 }
 static int sbk_watch_drain(struct sbk_context *c, void __user *user)
 {
@@ -289,6 +543,17 @@ static void sbk_fetch_batch_reserved(struct sbk_entry **entries, unsigned int co
 			err = sbk_rdma_read_notify(c->rdma, lane == SBK_PRETRANSFER ? SBK_BACKGROUND : lane,
 				    pages, indices, count, c->has_region ? &c->region : NULL,
 				    &notify);
+		goto publish;
+	}
+	if (c->cfg.backend == SBK_BACKEND_RSOCKET_PROXY) {
+		if (request)
+			sbk_prefetch_posted(request);
+		for (i = 0; i < count; i++) {
+			err = sbk_proxy_fetch(c, pages[i], indices[i], lane);
+			if (err)
+				break;
+			sbk_batch_page_ready(&progress, i);
+		}
 		goto publish;
 	}
 	if (request)
@@ -495,6 +760,10 @@ static struct page *sbk_anon_get_page(void *cookie, struct vm_area_struct *vma,
 		ret = sbk_rdma_read_notify(c->rdma, lane, &page, &e->index, 1,
 				    c->has_region ? &c->region : NULL,
 				    &notify);
+	} else if (c->cfg.backend == SBK_BACKEND_RSOCKET_PROXY) {
+		if (prefetch)
+			sbk_prefetch_posted(&request);
+		ret = sbk_proxy_fetch(c, page, e->index, lane);
 	} else {
 		if (prefetch)
 			sbk_prefetch_posted(&request);
@@ -533,6 +802,14 @@ static void sbk_anon_fault_done(void *cookie, u64 ns, vm_fault_t result)
 static void sbk_anon_release(void *cookie)
 {
 	struct sbk_entry *e = cookie;
+	int state = atomic_read_acquire(&e->state);
+	if (retirement_audit && state < READY &&
+	    !atomic_cmpxchg(&e->ctx->retirement_audited, 0, 1)) {
+		pr_info("SBK_RETIRE_UNFETCHED base=%lx index=%lu state=%d armed=%d mapped=%u pid=%d tgid=%d comm=%s\n",
+			e->ctx->base, e->index, state, atomic_read(&e->ctx->armed),
+			e->ctx->mapped, task_pid_nr(current), task_tgid_nr(current), current->comm);
+		dump_stack();
+	}
 	atomic64_inc(&e->ctx->retired_tokens);
 	sbk_maybe_drain(e->ctx);
 	kref_put(&e->ctx->refs, sbk_release_ref);
@@ -542,21 +819,38 @@ static const struct sbk_pte_provider sbk_anon_provider = {
 	.installed = sbk_anon_installed, .release = sbk_anon_release,
 	.fault_done = sbk_anon_fault_done,
 };
+static void sbk_token_retain(void *cookie)
+{
+	struct sbk_entry *e = cookie;
+	kref_get(&e->ctx->refs);
+}
+#ifdef SBK_PTE_PLAN_API
+#include "sbk_prepared_arm.h"
+#endif
 static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 {
 	struct sbk_anon_arm a;
 	unsigned long i;
 	int ret;
-	if (!c->configured || c->mapped || c->tokens_created ||
+	u64 begin = 0, allocated = 0, bound = 0, bridged = 0;
+	if (!c->configured || c->mapped || c->unbound_region || c->tokens_created ||
 	    (c->pretransferred && !c->sealed) || atomic_read(&c->stopping))
 		return -EINVAL;
 	if (copy_from_user(&a, user, sizeof(a)))
 		return -EFAULT;
+#ifdef SBK_PTE_PLAN_API
+	if (c->arm_plan)
+		return sbk_arm_prepared(c, &a);
+#endif
+	if (arm_timing) begin = ktime_get_ns();
 	atomic64_set(&c->retired_tokens, 0);
 	c->token_ids = kvcalloc(c->cfg.pages, sizeof(*c->token_ids), GFP_KERNEL);
 	if (!c->token_ids)
 		return -ENOMEM;
-	for (i = 0; i < c->cfg.pages; i++) {
+	if (arm_timing) allocated = ktime_get_ns();
+	c->tokens_created = sbk_token_pool_take(c->token_pool, c->entries,
+			sizeof(*c->entries), c->cfg.pages, c->token_ids, sbk_token_retain);
+	for (i = c->tokens_created; i < c->cfg.pages; i++) {
 		kref_get(&c->refs);
 		ret = sbk_pte_token_create(&sbk_anon_provider, &c->entries[i], &c->token_ids[i]);
 		if (ret) {
@@ -564,21 +858,37 @@ static int sbk_arm_anonymous(struct sbk_context *c, void __user *user)
 			goto fail;
 		}
 		c->tokens_created++;
+		sbk_token_pool_fallback(c->token_pool);
 	}
+	if (arm_timing) bound = ktime_get_ns();
 	c->base = a.address;
 	c->mm = current->mm;
 	mmgrab(c->mm);
 	c->anonymous = c->mapped = true;
 	ret = sbk_pte_arm(c->mm, c->base, c->cfg.pages, c->token_ids);
+	if (arm_timing) bridged = ktime_get_ns();
 	if (!ret) {
 		c->sealed = true;
 		atomic_set_release(&c->armed, 1);
-		/* PTEs (including fork copies) now own the token references. Keeping
-		 * creator references until fd close would hide outstanding markers. */
-		for (i = 0; i < c->tokens_created; i++)
-			sbk_pte_token_put(c->token_ids[i]);
-		c->tokens_created = 0;
+		/* PTEs (including fork copies) now own references. Transfer creator
+		 * ownership before publishing work, so fd release cannot double-put.
+		 * This is a one-shot work item: mapped prevents a second successful ARM.
+		 * Failures below still release synchronously without publishing work. */
+		if (defer_creator_drop) {
+			kref_get(&c->refs);
+			c->creator_tokens = c->tokens_created;
+			c->tokens_created = 0;
+			queue_work_node(numa_node_id(), creator_wq, &c->creator_drop);
+		} else {
+			for (i = 0; i < c->tokens_created; i++)
+				sbk_pte_token_put(c->token_ids[i]);
+			c->tokens_created = 0;
+		}
 		sbk_maybe_drain(c);
+		if (arm_timing)
+			pr_info("SBK_ARM pages=%llu alloc_ns=%llu bind_ns=%llu bridge_ns=%llu drop_ns=%llu total_ns=%llu deferred=%u\n",
+				c->cfg.pages, allocated - begin, bound - allocated,
+				bridged - bound, ktime_get_ns() - bridged, ktime_get_ns() - begin, defer_creator_drop);
 		return 0;
 	}
 	c->anonymous = c->mapped = false;
@@ -649,7 +959,8 @@ static bool sbk_background_batches(struct sbk_context *c)
 	unsigned long first, last, j;
 	struct sbk_entry *batch[SBK_MAX_BATCH];
 	unsigned int count, i, quantum;
-	for (quantum = 0; quantum < SBK_DISPATCH_BATCHES && !atomic_read(&c->stopping); quantum++) {
+	for (quantum = 0; quantum < SBK_DISPATCH_BATCHES &&
+	     !atomic_read(&c->stopping) && !atomic_read(&c->drain_started); quantum++) {
 		struct sbk_rdma_slot *slot = NULL;
 		bool pending = false;
 		int err = 0;
@@ -697,7 +1008,8 @@ static bool sbk_background_batches(struct sbk_context *c)
 			sbk_install_ahead(batch[i]);
 		cond_resched();
 	}
-	return !atomic_read(&c->stopping) && atomic_long_read(&c->cursor) < c->cfg.pages;
+	return !atomic_read(&c->stopping) && !atomic_read(&c->drain_started) &&
+	       atomic_long_read(&c->cursor) < c->cfg.pages;
 }
 
 static void sbk_background_work(struct work_struct *work)
@@ -789,7 +1101,8 @@ static int sbk_configure(struct sbk_context *c, void __user *arg)
 	if (copy_from_user(&cfg, arg, sizeof(cfg)))
 		return -EFAULT;
 	if (cfg.version != SBK_ABI_VERSION ||
-	    (cfg.backend != SBK_BACKEND_LOOPBACK_TEST && cfg.backend != SBK_BACKEND_RDMA) ||
+	    (cfg.backend != SBK_BACKEND_LOOPBACK_TEST && cfg.backend != SBK_BACKEND_RDMA &&
+	     cfg.backend != SBK_BACKEND_RSOCKET_PROXY) ||
 	    !cfg.pages || cfg.pages > SBK_MAX_PAGES || cfg.reserved ||
 	    !cfg.prefetch_workers || cfg.prefetch_workers > SBK_MAX_WORKERS ||
 	    !cfg.background_workers || cfg.background_workers > SBK_MAX_WORKERS ||
@@ -798,10 +1111,15 @@ static int sbk_configure(struct sbk_context *c, void __user *arg)
 	    (cfg.source_address & ~PAGE_MASK) ||
 	    (cfg.test_fail_page != SBK_NO_FAILURE && cfg.test_fail_page >= cfg.pages))
 		return -EINVAL;
-	if (cfg.backend == SBK_BACKEND_RDMA) {
-		if (!sbk_rdma_ready(c->rdma, c->has_region ? 0 : cfg.pages) ||
+	if (cfg.backend == SBK_BACKEND_RDMA ||
+	    (cfg.backend == SBK_BACKEND_RSOCKET_PROXY && c->rdma)) {
+		if (!sbk_rdma_ready(c->rdma, (c->has_region || c->unbound_region) ? 0 : cfg.pages) ||
 		    (c->has_region && c->region.pages != cfg.pages) || cfg.test_delay_us ||
 		    cfg.test_fail_page != SBK_NO_FAILURE || cfg.source_address)
+			return -EINVAL;
+	} else if (cfg.backend == SBK_BACKEND_RSOCKET_PROXY) {
+		if (c->rdma || cfg.source_address || cfg.test_delay_us ||
+		    cfg.test_fail_page != SBK_NO_FAILURE || c->has_region || c->unbound_region)
 			return -EINVAL;
 	} else if (c->rdma ||
 	    check_mul_overflow((unsigned long)cfg.pages, PAGE_SIZE, &bytes) ||
@@ -1033,6 +1351,8 @@ static int sbk_stage_list(struct sbk_context *c, struct sbk_hot_list list, bool 
 	int ret = 0;
 	if (!c->configured || c->mapped || c->sealed || atomic_read(&c->stopping))
 		return -EINVAL;
+	if (c->unbound_region && !seal)
+		return -EINVAL; /* Only PS ownership import is valid before final binding. */
 	if (list.count > c->cfg.pages || (!seal && !parallel && list.count > SBK_MAX_BATCH))
 		return -EINVAL;
 	if (list.count) {
@@ -1117,7 +1437,7 @@ static int sbk_seal_region(struct sbk_context *c, void __user *user)
 {
 	struct sbk_region_seal seal;
 	int ret;
-	if (!c->has_region || !c->configured || c->mapped || c->sealed ||
+	if ((!c->has_region && !c->unbound_region) || !c->configured || c->mapped || c->sealed ||
 	    atomic_read(&c->stopping))
 		return -EINVAL;
 	if (copy_from_user(&seal, user, sizeof(seal)))
@@ -1128,8 +1448,11 @@ static int sbk_seal_region(struct sbk_context *c, void __user *user)
 	if (ret)
 		return ret;
 	ret = sbk_stage_list(c, seal.dirty, true, false);
-	if (!ret)
+	if (!ret) {
 		c->region = seal.remote;
+		c->has_region = true;
+		c->unbound_region = false;
+	}
 	sbk_rdma_put(c->rdma);
 	return ret;
 }
@@ -1143,6 +1466,9 @@ static int sbk_bind_region(struct file *file, void __user *user)
 	struct sbk_region_bind bind;
 	struct sbk_rdma *r;
 	struct file *session;
+#ifdef CONFIG_SWIFTBATON_PTE
+	struct sbk_token_pool *pool = NULL;
+#endif
 	int ret;
 	if (copy_from_user(&bind, user, sizeof(bind)))
 		return -EFAULT;
@@ -1158,9 +1484,15 @@ static int sbk_bind_region(struct file *file, void __user *user)
 	parent = session->private_data;
 	mutex_lock(&parent->control);
 	r = parent->rdma;
-	ret = (parent->has_region || parent->config_attempted ||
+	ret = (parent->has_region || parent->unbound_region || parent->config_attempted ||
 	       atomic_read(&parent->stopping)) ? -EINVAL :
 		sbk_rdma_get_region(r, &bind.remote);
+#ifdef CONFIG_SWIFTBATON_PTE
+	if (!ret) {
+		pool = parent->token_pool;
+		sbk_token_pool_get(pool);
+	}
+#endif
 	mutex_unlock(&parent->control);
 	if (ret)
 		goto out;
@@ -1171,8 +1503,16 @@ static int sbk_bind_region(struct file *file, void __user *user)
 		c->rdma = r;
 		c->region = bind.remote;
 		c->has_region = true;
+#ifdef CONFIG_SWIFTBATON_PTE
+		sbk_token_pool_put(c->token_pool);
+		c->token_pool = pool;
+		pool = NULL;
+#endif
 	}
 	mutex_unlock(&c->control);
+#ifdef CONFIG_SWIFTBATON_PTE
+	sbk_token_pool_put(pool);
+#endif
 	if (ret)
 		sbk_rdma_put(r);
 out:
@@ -1203,7 +1543,8 @@ static int sbk_import_ps(struct file *file, void __user *user)
 	second = first == src ? dst : src;
 	mutex_lock(&first->control);
 	mutex_lock_nested(&second->control, SINGLE_DEPTH_NESTING);
-	if (!src->configured || !dst->configured || !src->has_region || !dst->has_region ||
+	if (!src->configured || !dst->configured || !src->has_region ||
+	    (!dst->has_region && !dst->unbound_region) ||
 	    src->rdma != dst->rdma || src->mapped || dst->mapped || src->sealed || dst->sealed ||
 	    src->background_started || dst->background_started ||
 	    atomic_read(&src->stopping) || atomic_read(&dst->stopping) ||
@@ -1267,7 +1608,7 @@ static int sbk_export_region(struct sbk_context *c, void __user *user)
 		return -EFAULT;
 	mutex_lock(&c->control);
 	r = c->rdma;
-	if (!r || c->has_region || c->config_attempted || atomic_read(&c->stopping)) {
+	if (!r || c->has_region || c->unbound_region || c->config_attempted || atomic_read(&c->stopping)) {
 		mutex_unlock(&c->control);
 		return -EINVAL;
 	}
@@ -1288,6 +1629,7 @@ struct sbk_export_job {
 	struct sbk_rdma *rdma;
 	struct mm_struct *mm;
 	struct sbk_export_batch batch;
+	bool prearm;
 	unsigned long memlock_limit;
 	atomic_t next, error, completed, active, peak;
 };
@@ -1307,7 +1649,9 @@ static void sbk_export_run(struct sbk_export_job *job)
 		peak = atomic_read(&job->peak);
 		while (active > peak && !atomic_try_cmpxchg(&job->peak, &peak, active))
 			;
-		ret = sbk_rdma_export_region(job->rdma, &job->batch.regions[index]);
+		ret = job->prearm ?
+			sbk_rdma_prearm_region(job->rdma, &job->batch.regions[index], job->mm) :
+			sbk_rdma_export_region(job->rdma, &job->batch.regions[index]);
 		atomic_dec(&job->active);
 		if (ret)
 			atomic_cmpxchg(&job->error, 0, ret);
@@ -1327,20 +1671,35 @@ static int sbk_export_thread(void *arg)
 	complete(&worker->done);
 	return 0;
 }
-static int sbk_export_batch(struct sbk_context *c, void __user *user)
+static int sbk_export_batch(struct sbk_context *c, void __user *user, bool prearm)
 {
 	struct sbk_export_job *job;
 	struct sbk_export_worker *workers = NULL;
+	struct pid *source_pid = NULL;
+	struct task_struct *source_task = NULL;
+	int pid = 0;
+	u32 reserved = 0;
 	unsigned int i, launched = 0, nr;
 	int ret = -EINVAL;
 	job = kzalloc(sizeof(*job), GFP_KERNEL);
 	if (!job)
 		return -ENOMEM;
+	if (prearm) {
+		struct sbk_prearm_batch __user *request = user;
+		if (!capable(CAP_SYS_ADMIN)) { ret = -EPERM; goto free_job; }
+		if (get_user(pid, &request->pid) ||
+		    get_user(reserved, &request->reserved)) {
+			ret = -EFAULT;
+			goto free_job;
+		}
+		if (pid <= 0 || reserved) goto free_job;
+		user = &request->batch;
+	}
 	if (copy_from_user(&job->batch, user, sizeof(job->batch))) {
 		ret = -EFAULT;
 		goto free_job;
 	}
-	if (!current->mm || !job->batch.count || job->batch.count > SBK_MAX_BATCH ||
+	if ((!prearm && !current->mm) || !job->batch.count || job->batch.count > SBK_MAX_BATCH ||
 	    !job->batch.workers || job->batch.workers > SBK_MAX_WORKERS ||
 	    job->batch.completed || job->batch.peak)
 		goto free_job;
@@ -1357,7 +1716,7 @@ static int sbk_export_batch(struct sbk_context *c, void __user *user)
 	if (!workers) { ret = -ENOMEM; goto free_job; }
 	mutex_lock(&c->control);
 	job->rdma = c->rdma;
-	if (!job->rdma || c->has_region || c->config_attempted || atomic_read(&c->stopping)) {
+	if (!job->rdma || c->has_region || c->unbound_region || c->config_attempted || atomic_read(&c->stopping)) {
 		mutex_unlock(&c->control);
 		goto free_workers;
 	}
@@ -1365,10 +1724,23 @@ static int sbk_export_batch(struct sbk_context *c, void __user *user)
 	mutex_unlock(&c->control);
 	/* mm_users, not just mm_count: prevents address-space teardown while any
 	 * helper runs, even if another thread kills the owner during this ioctl. */
-	job->mm = current->mm;
-	mmget(job->mm);
+	job->prearm = prearm;
+	if (prearm) {
+		source_pid = find_get_pid(pid);
+		source_task = source_pid ? get_pid_task(source_pid, PIDTYPE_PID) : NULL;
+		if (source_pid) put_pid(source_pid);
+		job->mm = source_task ? get_task_mm(source_task) : NULL;
+		if (source_task) put_task_struct(source_task);
+		if (!job->mm) {
+			ret = -ESRCH;
+			goto put_rdma;
+		}
+	} else {
+		job->mm = current->mm;
+		mmget(job->mm);
+	}
 	job->memlock_limit = rlimit(RLIMIT_MEMLOCK);
-	if (nr == 1) {
+	if (nr == 1 && !prearm) {
 		sbk_export_run(job);
 	} else {
 		for (i = 0; i < nr && !atomic_read(&job->error); i++) {
@@ -1408,6 +1780,7 @@ static int sbk_export_batch(struct sbk_context *c, void __user *user)
 	 * As in EXPORT_REGION, close/revoke reclaims all partial registrations. */
 	if (copy_to_user(user, &job->batch, sizeof(job->batch)))
 		ret = -EFAULT;
+put_rdma:
 	sbk_rdma_put(job->rdma);
 free_workers:
 	kfree(workers);
@@ -1428,26 +1801,49 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	struct sbk_page_info p;
 	struct sbk_rdma_setup setup;
 	struct sbk_rdma_endpoint peer;
+	struct sbk_prearm_status prearm_status;
 	struct sbk_entry *e;
 	int ret = 0, i;
 	if (cmd == SBK_IOC_EXPORT_BATCH)
-		return sbk_export_batch(c, user);
+		return sbk_export_batch(c, user, false);
+	if (cmd == SBK_IOC_PREARM_BATCH)
+		return sbk_export_batch(c, user, true);
 	if (cmd == SBK_IOC_EXPORT_REGION)
 		return sbk_export_region(c, user);
 	if (cmd == SBK_IOC_BIND_REGION)
 		return sbk_bind_region(f, user);
+#ifdef SBK_PTE_PLAN_API
+	if (cmd == SBK_IOC_BIND_UNBOUND)
+		return sbk_bind_unbound(f, user);
+#endif
 	if (cmd == SBK_IOC_IMPORT_PS)
 		return sbk_import_ps(f, user);
+	if (cmd == SBK_IOC_PROXY_NEXT)
+		return sbk_proxy_next(f, user);
+	if (cmd == SBK_IOC_PROXY_COMPLETE)
+		return sbk_proxy_complete(c, user);
 	mutex_lock(&c->control);
 	switch (cmd) {
 	case SBK_IOC_CAPABILITIES:
-		caps.features |= SBK_FEATURE_PARALLEL_PS | SBK_FEATURE_PS_SLICE | SBK_FEATURE_PARALLEL_EXPORT;
+		caps.features |= SBK_FEATURE_PARALLEL_PS | SBK_FEATURE_PS_SLICE | SBK_FEATURE_PARALLEL_EXPORT | SBK_FEATURE_DMA_MR | SBK_FEATURE_REMOTE_PREARM | SBK_FEATURE_RSOCKET_PROXY;
 		if (sbk_session_dispatch_enabled())
 			caps.features |= SBK_FEATURE_SESSION_DISPATCH;
 #ifdef CONFIG_SWIFTBATON_PTE
-		caps.features |= SBK_FEATURE_ANONYMOUS_PTE;
+		caps.features |= SBK_FEATURE_ANONYMOUS_PTE | SBK_FEATURE_TOKEN_POOL;
+#endif
+#ifdef SBK_PTE_PLAN_API
+		caps.features |= SBK_FEATURE_PREPARED_ARM | SBK_FEATURE_UNBOUND_REGION;
 #endif
 		ret = copy_to_user(user, &caps, sizeof(caps)) ? -EFAULT : 0;
+		break;
+	case SBK_IOC_PREARM_STATUS:
+		if (copy_from_user(&prearm_status, user, sizeof(prearm_status))) {
+			ret = -EFAULT;
+			break;
+		}
+		ret = sbk_rdma_prearm_status(c->rdma, &prearm_status);
+		if (!ret && copy_to_user(user, &prearm_status, sizeof(prearm_status)))
+			ret = -EFAULT;
 		break;
 	case SBK_IOC_WATCH_DRAIN:
 #ifdef CONFIG_SWIFTBATON_PTE
@@ -1467,8 +1863,55 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		drain.drained = atomic_read_acquire(&c->drained);
 		ret = copy_to_user(user, &drain, sizeof(drain)) ? -EFAULT : 0;
 		break;
+	case SBK_IOC_DMA_ENABLE:
+		ret = c->config_attempted || c->has_region || c->unbound_region ? -EBUSY : sbk_rdma_dma_enable(c->rdma);
+		break;
+	case SBK_IOC_DMA_EXPORT_MAP:
+	case SBK_IOC_DMA_IMPORT_MAP:
+	{
+		struct sbk_dma_map map;
+		if (c->config_attempted || c->has_region || c->unbound_region) ret = -EBUSY;
+		else if (copy_from_user(&map, user, sizeof(map))) ret = -EFAULT;
+		else ret = sbk_rdma_dma_map(c->rdma, &map, cmd == SBK_IOC_DMA_IMPORT_MAP);
+		break;
+	}
 	case SBK_IOC_REVOKE_SOURCE:
 		ret = sbk_rdma_revoke_source(c->rdma);
+		break;
+	case SBK_IOC_TOKEN_RESERVE:
+#ifdef CONFIG_SWIFTBATON_PTE
+	{
+		u64 pages;
+		if (c->mapped || atomic_read(&c->stopping))
+			ret = -EINVAL;
+		else if (copy_from_user(&pages, user, sizeof(pages)))
+			ret = -EFAULT;
+		else if (!pages || pages > SBK_TOKEN_POOL_MAX_PAGES)
+			ret = -EINVAL;
+		else
+			ret = sbk_token_pool_reserve(c->token_pool, pages);
+	}
+#else
+		ret = -EOPNOTSUPP;
+#endif
+		break;
+	case SBK_IOC_TOKEN_POOL_STATS:
+#ifdef CONFIG_SWIFTBATON_PTE
+	{
+		struct sbk_token_pool_stats pool_stats = {};
+		sbk_token_pool_stats(c->token_pool, &pool_stats);
+		ret = copy_to_user(user, &pool_stats, sizeof(pool_stats)) ? -EFAULT : 0;
+	}
+#else
+		ret = -EOPNOTSUPP;
+#endif
+		break;
+	case SBK_IOC_PREPARE_ANON:
+#ifdef SBK_PTE_PLAN_API
+		ret = sbk_prepare_anonymous(c, user);
+#else
+		ret = -EOPNOTSUPP;
+#endif
 		break;
 	case SBK_IOC_ARM_ANON:
 #ifdef CONFIG_SWIFTBATON_PTE
@@ -1487,7 +1930,7 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		ret = sbk_seal_region(c, user);
 		break;
 	case SBK_IOC_SEAL:
-		ret = sbk_stage(c, user, true, false);
+		ret = c->unbound_region ? -EINVAL : sbk_stage(c, user, true, false);
 		break;
 	case SBK_IOC_RDMA_CREATE:
 		if (c->rdma || c->config_attempted || atomic_read(&c->stopping)) {
@@ -1566,9 +2009,9 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		ret = copy_to_user(user, &p, sizeof(p)) ? -EFAULT : 0;
 		break;
 	case SBK_IOC_CANCEL:
-		atomic_set(&c->stopping, 1);
+		sbk_proxy_cancel(c);
 		/* A region only cancels itself; catalog controller cancels all views. */
-		if (!c->has_region)
+		if (!c->has_region && !c->unbound_region)
 			sbk_rdma_cancel(c->rdma);
 		if (c->configured)
 			for (i = 0; i < c->cfg.pages; i++)
@@ -1588,7 +2031,7 @@ static int sbk_mmap(struct file *file, struct vm_area_struct *vma)
 	/* mmap holds mmap_write_lock; configure can fault/pin source pages. */
 	if (!mutex_trylock(&c->control))
 		return -EAGAIN;
-	if (!c->configured || c->mapped || c->drain_event || atomic_read(&c->stopping) ||
+	if (!c->configured || c->mapped || c->unbound_region || c->plan_mode || c->drain_event || atomic_read(&c->stopping) ||
 	    (c->pretransferred && !c->sealed) ||
 	    vma->vm_pgoff || (vma->vm_end - vma->vm_start) != c->cfg.pages * PAGE_SIZE ||
 	    (vma->vm_flags & (VM_SHARED | VM_EXEC))) {
@@ -1625,8 +2068,20 @@ static int sbk_open(struct inode *inode, struct file *file)
 	INIT_WORK(&c->destroy, sbk_destroy);
 #ifdef CONFIG_SWIFTBATON_PTE
 	INIT_WORK(&c->drain, sbk_drain_work);
+	INIT_WORK(&c->creator_drop, sbk_creator_drop_work);
+	c->token_pool = sbk_token_pool_create(&sbk_anon_provider, reap_wq);
+	if (!c->token_pool) {
+		module_put(THIS_MODULE);
+		kfree(c);
+		return -ENOMEM;
+	}
 #endif
 	mutex_init(&c->control);
+	spin_lock_init(&c->proxy_lock);
+	INIT_LIST_HEAD(&c->proxy_pending);
+	INIT_LIST_HEAD(&c->proxy_inflight);
+	init_waitqueue_head(&c->proxy_wait);
+	atomic_set(&c->proxy_pending_count, 0);
 	sbk_owner_init(&c->owner);
 	file->private_data = c;
 	return 0;
@@ -1636,6 +2091,14 @@ static int sbk_release(struct inode *inode, struct file *file)
 	struct sbk_context *c = file->private_data;
 #ifdef CONFIG_SWIFTBATON_PTE
 	unsigned long i;
+#endif
+#ifdef SBK_PTE_PLAN_API
+	/* An unarmed plan owns tokens whose providers own this context. Break
+	 * that cycle while the file reference still protects c and its entries. */
+	sbk_pte_plan_free(c->arm_plan);
+	c->arm_plan = NULL;
+#endif
+#ifdef CONFIG_SWIFTBATON_PTE
 	/* Markers still mapped after close keep the context and transport alive. */
 	for (i = 0; i < c->tokens_created; i++)
 		sbk_pte_token_put(c->token_ids[i]);
@@ -1643,9 +2106,21 @@ static int sbk_release(struct inode *inode, struct file *file)
 	kref_put(&c->refs, sbk_release_ref);
 	return 0;
 }
+static __poll_t sbk_poll(struct file *file, poll_table *wait)
+{
+	struct sbk_context *c = file->private_data;
+	poll_wait(file, &c->proxy_wait, wait);
+	if (atomic_read(&c->stopping))
+		return EPOLLERR | EPOLLHUP;
+	if (READ_ONCE(c->configured) && c->cfg.backend == SBK_BACKEND_RSOCKET_PROXY &&
+	    atomic_read(&c->proxy_pending_count))
+		return EPOLLIN | EPOLLRDNORM;
+	return 0;
+}
 static const struct file_operations sbk_fops = {
 	.owner = THIS_MODULE, .open = sbk_open, .release = sbk_release,
-	.mmap = sbk_mmap, .unlocked_ioctl = sbk_ioctl, .llseek = no_llseek,
+	.mmap = sbk_mmap, .unlocked_ioctl = sbk_ioctl, .poll = sbk_poll,
+	.llseek = no_llseek,
 };
 static struct miscdevice sbk_device = {
 	.minor = MISC_DYNAMIC_MINOR, .name = "swiftbaton_k", .mode = 0600,
@@ -1654,17 +2129,39 @@ static struct miscdevice sbk_device = {
 static int __init sbk_init(void)
 {
 	int ret;
+	if (creator_drop_test_delay_ms > 1000)
+		return -EINVAL;
 	reap_wq = alloc_workqueue("sbk_reap", WQ_UNBOUND, 1);
 	if (!reap_wq)
 		return -ENOMEM;
-	ret = misc_register(&sbk_device);
-	if (ret)
+#ifdef CONFIG_SWIFTBATON_PTE
+	creator_wq = alloc_workqueue("sbk_creator", WQ_UNBOUND, 1);
+	if (!creator_wq) {
 		destroy_workqueue(reap_wq);
+		return -ENOMEM;
+	}
+#else
+	if (defer_creator_drop) {
+		destroy_workqueue(reap_wq);
+		return -EOPNOTSUPP;
+	}
+#endif
+	ret = misc_register(&sbk_device);
+	if (ret) {
+#ifdef CONFIG_SWIFTBATON_PTE
+		destroy_workqueue(creator_wq);
+#endif
+		destroy_workqueue(reap_wq);
+	}
 	return ret;
 }
 static void __exit sbk_exit(void)
 {
 	misc_deregister(&sbk_device);
+#ifdef CONFIG_SWIFTBATON_PTE
+	/* Creator completion can queue drain/destruction on reap_wq. */
+	destroy_workqueue(creator_wq);
+#endif
 	destroy_workqueue(reap_wq);
 }
 module_init(sbk_init);

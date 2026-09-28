@@ -1,0 +1,56 @@
+{
+  "name": "robustness-zipf",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "z0p5",
+      "parameters": {
+        "zipf_zeta": 0.5
+      },
+      "options": {}
+    },
+    {
+      "name": "z0p7",
+      "parameters": {
+        "zipf_zeta": 0.7
+      },
+      "options": {}
+    },
+    {
+      "name": "z0p9",
+      "parameters": {
+        "zipf_zeta": 0.9
+      },
+      "options": {}
+    },
+    {
+      "name": "z0p99",
+      "parameters": {
+        "zipf_zeta": 0.99
+      },
+      "options": {}
+    },
+    {
+      "name": "z1p1",
+      "parameters": {
+        "zipf_zeta": 1.1
+      },
+      "options": {}
+    },
+    {
+      "name": "z1p22",
+      "parameters": {
+        "zipf_zeta": 1.22
+      },
+      "options": {}
+    }
+  ],
+  "note": "Paper Fig.10(a), skewness sweep."
+}

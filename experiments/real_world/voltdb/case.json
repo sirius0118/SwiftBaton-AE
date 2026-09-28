@@ -1,0 +1,21 @@
+{
+  "name": "real-world-voltdb",
+  "workload": "voltdb",
+  "parameters": {
+    "records": 400000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "ycsb-a",
+      "parameters": {},
+      "options": {
+        "vma_cache": false
+      }
+    }
+  ],
+  "note": "Paper \u00a75.1: 400K records, ~3.3GiB, YCSB-A. Persistent filesystem migration must be validated before claiming equivalence."
+}

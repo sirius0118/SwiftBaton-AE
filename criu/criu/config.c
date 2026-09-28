@@ -713,7 +713,9 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		{ "fd-placeholder", no_argument, 0, 1219 },
 		{ "vma-cache", no_argument, 0, 1221 },
 		{ "parent-stage", no_argument, 0, 1214 },
+		{ "pclive-refresh", no_argument, 0, 1248 },
 		{ "parallel-transfer", no_argument, 0, 1215 },
+		{ "rsocket-as", no_argument, 0, 1249 },
 		{ "no-prefetch", no_argument, 0, 1224 },
 		{ "no-hot-first", no_argument, 0, 1225 },
 		{ "no-pretransfer", no_argument, 0, 1226 },
@@ -1113,6 +1115,7 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		case 1227: SET_CHAR_OPTS(sb_page_trace, optarg); break;
 		case 1228: opts.sb_serial_precopy_ack = true; break;
 		case 1229: opts.sb_sync_fault_transport = true; break;
+		case 1249: opts.sb_rsocket_as = true; break;
 		case 1231: opts.sb_fault_trace = true; break;
 		case 1242: opts.sb_spin_lifecycle = true; break;
 		case 1244: opts.sb_compact_bg_wire = true; break;
@@ -1152,6 +1155,9 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 			break;
 		case 1214:
 			opts.sb_parent_stage = true;
+			break;
+		case 1248:
+			opts.sb_pclive_refresh = true;
 			break;
 		case 1221:
 			opts.sb_vma_cache = true;

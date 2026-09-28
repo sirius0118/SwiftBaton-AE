@@ -393,9 +393,10 @@ fail:
   return ret;
 }
 
-int sb_kernel_ps_validate(int pid, const struct sbk_rdma_region *r,
-                          uint64_t **dirty, size_t *nr) {
-  uint64_t *entries = NULL, *invalid = NULL;
+int sb_kernel_ps_validate_snapshot(int pid, const struct sbk_rdma_region *r,
+                          const uint64_t *observed, uint64_t **dirty, size_t *nr) {
+  uint64_t *owned_entries = NULL, *invalid = NULL;
+  const uint64_t *entries = observed;
   int ret = 0;
   *dirty = NULL;
   *nr = 0;
@@ -406,21 +407,23 @@ int sb_kernel_ps_validate(int pid, const struct sbk_rdma_region *r,
     uint64_t p_end = p->record.address + p->record.remote.pages * PS_PAGE;
     if (p->record.source_pid != (uint32_t)pid || p->record.address >= end || p_end <= r->address)
       continue;
-    if (!entries) {
-      entries = malloc(r->pages * sizeof(uint64_t));
+    if (!invalid) {
+      if (!entries) { owned_entries = malloc(r->pages * sizeof(uint64_t)); entries = owned_entries; }
       invalid = malloc(r->pages * sizeof(uint64_t));
       if (!entries || !invalid) {
         ret = -ENOMEM;
         goto out;
       }
-      char path[64];
-      snprintf(path, sizeof(path), "/proc/%d/pagemap", pid);
-      int fd = open(path, O_RDONLY | O_CLOEXEC);
-      ret = fd < 0 ? -errno : read_entries(fd, r->address, entries, r->pages);
-      if (fd >= 0)
-        close(fd);
-      if (ret)
-        goto out;
+      if (owned_entries) {
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/pagemap", pid);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        ret = fd < 0 ? -errno : read_entries(fd, r->address, owned_entries, r->pages);
+        if (fd >= 0)
+          close(fd);
+        if (ret)
+          goto out;
+      }
     }
     for (size_t j = 0; j < p->count; j++) {
       uint64_t source_index = p->indices[j];
@@ -438,12 +441,29 @@ int sb_kernel_ps_validate(int pid, const struct sbk_rdma_region *r,
   }
   *dirty = invalid;
   invalid = NULL;
-  pr_info("SB_KERNEL PS validated pid=%d address=%llx candidates=%zu invalid=%zu\n",
-          pid, (unsigned long long)r->address, candidates, *nr);
+  /* A normal final catalog has hundreds of valid records. Avoid synchronous
+   * per-record logging while the source is frozen; retain invalidation data. */
+  if (*nr)
+    pr_info("SB_KERNEL PS invalidated pid=%d address=%llx candidates=%zu invalid=%zu\n",
+            pid, (unsigned long long)r->address, candidates, *nr);
 out:
-  free(entries);
+  free(owned_entries);
   free(invalid);
   return ret;
+}
+int sb_kernel_ps_validate(int pid, const struct sbk_rdma_region *r, uint64_t **dirty, size_t *nr)
+{ return sb_kernel_ps_validate_snapshot(pid,r,NULL,dirty,nr); }
+bool sb_kernel_ps_has_candidates(int pid, uint64_t address, uint64_t pages) {
+  uint64_t end = address + pages * PS_PAGE;
+  if (end < address) return true;
+  for (unsigned i = 0; i < ps_count; i++) {
+    const struct sbk_ps_region *p = &ps[i];
+    uint64_t p_end = p->record.address + p->record.remote.pages * PS_PAGE;
+    if (p->record.source_pid == (uint32_t)pid && p->count &&
+        p->record.address < end && p_end > address)
+      return true;
+  }
+  return false;
 }
 void sb_kernel_ps_destroy(void) {
   if (ps_work.pool || ps_work.groups || ps_work.completed)

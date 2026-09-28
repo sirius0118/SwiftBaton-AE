@@ -142,7 +142,11 @@ struct cr_options {
 	bool sb_fd_placeholder;
 	bool sb_vma_cache;
 	bool sb_parent_stage;
+	bool sb_pclive_refresh; /* Re-read a second PS snapshot into resident stage. */
+	bool sb_buffered_cutover;
+	unsigned int sb_stage_max_mb; /* zero retains unlimited parent staging */
 	bool sb_parallel_transfer;
+	bool sb_rsocket_as; /* Baseline AS ring transport over three rsocket lanes. */
 	bool sb_no_prefetch, sb_no_hot_first, sb_no_pretransfer;
 	bool sb_serial_precopy_ack; /* Diagnostic ablation: retain old demand-lane ACK scan. */
 	bool sb_sync_fault_transport; /* Ablation: synchronous PF writes and shared client lock. */

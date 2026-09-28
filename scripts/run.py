@@ -6,12 +6,54 @@ R=Path(__file__).resolve().parents[1]
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('mode',choices=['U','K']);p.add_argument('--profile',choices=['smoke','redis'],default='smoke')
 g=p.add_mutually_exclusive_group();g.add_argument('--check',action='store_true');g.add_argument('--execute',action='store_true')
+p.add_argument('--network-lock', choices=['iptables','nftables'])
+p.add_argument('--vma-cache', action='store_true')
+p.add_argument('--buffered-cutover', action='store_true')
+p.add_argument('--stage-max-mb', type=int)
+p.add_argument('--precopy-limit-mb', type=int)
+p.add_argument('--kernel-export-workers', type=int, choices=range(1,33))
+p.add_argument('--kernel-catalog-workers', type=int, choices=range(1,33))
+p.add_argument('--kernel-dma-mr', action='store_true')
+p.add_argument('--kernel-ps-arm', action='store_true')
+p.add_argument('--kernel-ps-mr', action='store_true')
+p.add_argument('--kernel-ps-mr-all', action='store_true')
+p.add_argument('--kernel-export-chunk-mb', type=int)
+p.add_argument('--validation-workers', type=int, choices=range(1,33))
 a=p.parse_args()
 W=Path(os.environ.get('SB_AE_WORK_ROOT',str(R.parent/(R.name+'-work')))).resolve()
 if R==W or R in W.parents:raise SystemExit('SB_AE_WORK_ROOT must be outside the source repository')
 profile=json.loads((R/'configs/profiles.json').read_text())[a.mode][:]
 if a.profile=='smoke':
  for key,value in [('--records','100000'),('--field-length','1024'),('--duration','45'),('--warmup','10'),('--threads','16')]:profile[profile.index(key)+1]=value
+if a.validation_workers is not None:
+ if '--validation-workers' in profile:profile[profile.index('--validation-workers')+1]=str(a.validation_workers)
+ else:profile += ['--validation-workers',str(a.validation_workers)]
+for key,value in (('--kernel-catalog-workers',a.kernel_catalog_workers),('--kernel-export-workers',a.kernel_export_workers),('--kernel-export-chunk-mb',a.kernel_export_chunk_mb)):
+ if value is not None:
+  if a.mode!='K':raise SystemExit(key+' requires K mode')
+  if key=='--kernel-export-chunk-mb' and not 0<=value<=4096:raise SystemExit('kernel-export-chunk-mb must be 0..4096')
+  if key in profile:profile[profile.index(key)+1]=str(value)
+  else:profile += [key,str(value)]
+if a.kernel_ps_arm:
+ if a.mode!='K':raise SystemExit('--kernel-ps-arm requires K mode')
+ profile += ['--kernel-ps-arm']
+if a.kernel_ps_mr:
+ if a.mode!='K' or not (a.kernel_ps_arm or '--kernel-ps-arm' in profile):raise SystemExit('--kernel-ps-mr requires K and --kernel-ps-arm')
+ profile += ['--kernel-ps-mr']
+if a.kernel_ps_mr_all:
+ if not a.kernel_ps_mr:raise SystemExit('--kernel-ps-mr-all requires --kernel-ps-mr')
+ profile += ['--kernel-ps-mr-all']
+if a.kernel_dma_mr:
+ if a.mode!='K':raise SystemExit('--kernel-dma-mr requires K mode')
+ profile += ['--kernel-dma-mr']
+if a.precopy_limit_mb is not None:
+ if not 1 <= a.precopy_limit_mb <= 65536:raise SystemExit('precopy-limit-mb must be 1..65536')
+ if '--precopy-limit-mb' in profile:profile[profile.index('--precopy-limit-mb')+1]=str(a.precopy_limit_mb)
+ else:profile += ['--precopy-limit-mb',str(a.precopy_limit_mb)]
+if a.stage_max_mb is not None:profile += ['--stage-max-mb', str(a.stage_max_mb)]
+if a.buffered_cutover:profile += ['--buffered-cutover']
+if a.network_lock:profile += ['--network-lock',a.network_lock]
+if a.vma_cache and '--vma-cache' not in profile:profile += ['--vma-cache']
 argv=[sys.executable,str(R/'scripts/ae'/a.mode.lower()/'run_ae.py')]+profile
 if not (a.execute or a.check):
  print(json.dumps(dict(mode=a.mode,profile=a.profile,command=argv,results=str(W),mutates_hosts=False),indent=2));sys.exit(0)
@@ -81,6 +123,9 @@ assert list((r/'build/YCSB/core/target/dependency').glob('*.jar')),'Missing YCSB
 print(json.dumps(names))
 '''
 remote('knode1',client,[R])
+if a.buffered_cutover:
+ remote('knode1', "import ctypes;ctypes.CDLL('libnetfilter_queue.so.1');ctypes.CDLL('libnftables.so.1');ctypes.CDLL('libnetfilter_conntrack.so.3')")
+if a.buffered_cutover:remote('knode3', "import ctypes;ctypes.CDLL('libnetfilter_conntrack.so.3')")
 image_ref=os.environ.get('SB_REDIS_IMAGE',json.loads((R/'configs/lab.json').read_text())['redis_image'])
 image_ids={}
 for host in previous:
@@ -105,14 +150,15 @@ try:
    if line.startswith('STATE='):state=Path(line.strip().split('=',1)[1]);result['state']=str(state)
   result['driver_rc']=proc.wait()
  if result['driver_rc'] or state is None or not json.loads(state.read_text()).get('success'):raise RuntimeError('Migration failed; inspect '+str(out/'run.log'))
- scripts=['analyze_run.py','analyze_recovery.py','verify_images.py']
+ scripts=['verify_images.py','analyze_run.py','analyze_recovery.py','analyze_success_gaps.py']
  if a.mode=='U':scripts+=['analyze_transport.py','analyze_faults.py']
  result['analysis']={}
  for name in scripts:
   with (out/(name+'.log')).open('w') as log:
    q=subprocess.run([sys.executable,str(R/'scripts'/name),str(state if name=='verify_images.py' else state.parent)],stdout=log,stderr=subprocess.STDOUT)
   result['analysis'][name]=q.returncode
-  if q.returncode:raise RuntimeError('Validation failed: '+name)
+ failed=[name for name,code in result['analysis'].items() if code]
+ if failed:raise RuntimeError('Validation failed: '+', '.join(failed))
  result['success']=True
 finally:
  if state:

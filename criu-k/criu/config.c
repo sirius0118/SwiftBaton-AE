@@ -711,6 +711,7 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		{ "lsm-mount-context", required_argument, 0, 1099 },
 		{ "network-lock", required_argument, 0, 1100 },
 		{ "kernel-transfer", no_argument, 0, 1248 },
+		{ "kernel-rsocket-proxy", no_argument, 0, 1261 },
 		{ "kernel-dense", no_argument, 0, 1252 },
 		{ "kernel-ps-chunk-mb", required_argument, 0, 1253 },
 		{ "kernel-export-workers", required_argument, 0, 1254 },
@@ -755,6 +756,11 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		{ "prefetch-workers", required_argument, 0, 1223 },
 		{ "precopy-workers", required_argument, 0, 1212 },
 		{ "validation-workers", required_argument, 0, 1220 },
+		{ "kernel-catalog-workers", required_argument, 0, 1256 },
+		{ "kernel-dma-mr", no_argument, 0, 1257 },
+		{ "kernel-ps-arm", no_argument, 0, 1258 },
+		{ "kernel-ps-mr", no_argument, 0, 1259 },
+		{ "kernel-ps-mr-all", no_argument, 0, 1260 },
 		{ "precopy-limit-mb", required_argument, 0, 1213 },
 		BOOL_OPT("mntns-compat-mode", &opts.mntns_compat_mode),
 		BOOL_OPT("unprivileged", &opts.unprivileged),
@@ -1144,6 +1150,7 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
               opts.sb_kernel_export_chunk_mb = value; }
             break;
 		case 1248: opts.sb_kernel_transfer = true; break;
+		case 1261: opts.sb_kernel_rsocket_proxy = true; break;
         case 1249: SET_CHAR_OPTS(sb_kernel_device, optarg); break;
         case 1250:
             { char *end; unsigned long value = strtoul(optarg, &end, 10);
@@ -1199,6 +1206,22 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 			break;
 		case 1211:
 			opts.sb_u_precopy = true;
+			break;
+		case 1258:
+			opts.sb_kernel_ps_arm = true;
+			break;
+		case 1259:
+			opts.sb_kernel_ps_mr = true;
+			break;
+		case 1260:
+			opts.sb_kernel_ps_mr_all = true;
+			break;
+		case 1257:
+			opts.sb_kernel_dma_mr = true;
+			break;
+		case 1256:
+			opts.sb_kernel_catalog_workers = atoi(optarg);
+			if (!opts.sb_kernel_catalog_workers || opts.sb_kernel_catalog_workers > 32) return 1;
 			break;
 		case 1220:
 			opts.sb_validation_workers = atoi(optarg);

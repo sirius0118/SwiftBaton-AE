@@ -6,9 +6,15 @@
 
 void *sb_stage_allocate(uint64_t length, int *fd);
 int sb_stage_send(int socket, int snapshot_fd, void *buffer, uint64_t length);
-int sb_stage_receive(int socket, unsigned workers);
+int sb_stage_receive(int socket, unsigned workers, bool refresh_round);
+/* After the pageclient re-reads the same memfd, update resident anonymous
+ * pages in place before PS validation and before any restore-tree fork. */
+int sb_stage_refresh(int image_dir_fd, unsigned workers);
+#define SB_PCLIVE_READY "sb-pclive-refresh.ready"
 /* -1 preserves the current policy; otherwise bind each stage before copying. */
 void sb_stage_set_numa_node(int node);
+/* Limit inherited pages only; the complete PS cache remains available in AS. */
+void sb_stage_set_max_mb(unsigned int mb);
 int sb_stage_prune(int image_dir_fd);
 int sb_stage_finalize(int image_dir_fd);
 /* Enable only around restoration-tree forks; utility children need no pages. */

@@ -16,6 +16,7 @@
 #include "sb-trace.h"
 #include "sb-heat.h"
 #include "sb-precopy.h"
+#include "sb-rsocket-snapshot.h"
 #include "sb-fd.h"
 #include "sb-fdpool.h"
 #include "servicefd.h"
@@ -634,6 +635,33 @@ int rdma_prepare_pretransfer(struct resources *res, struct data_buffer *pre_mr, 
     return prepare_pretransfer_rx(res, pre_mr, type) ? 0 : -1;
 }
 
+static int pclive_rsocket_initial(struct pretransfer_rx *rx)
+{
+    const uint64_t segment = 128ULL * 1024 * 1024;
+    uint64_t bytes = 0, begun = pretransfer_now_ns();
+    size_t count = (rx->length + segment - 1) / segment;
+    struct sb_rsocket_range *ranges = calloc(count, sizeof(*ranges));
+    int result;
+    if (!ranges) return -1;
+    for (size_t i = 0; i < count; i++) {
+        ranges[i].offset = i * segment;
+        ranges[i].length = rx->length - ranges[i].offset;
+        if (ranges[i].length > segment) ranges[i].length = segment;
+    }
+    result = sb_rsocket_snapshot_read(rx->buffer, rx->length, opts.addr,
+                                      opts.port + 8, ranges, count, 4, &bytes);
+    free(ranges);
+    if (result || bytes != rx->length || ibv_dereg_mr(rx->mr)) {
+        pr_perror("PCLive initial rsocket read");
+        return -1;
+    }
+    rx->mr = NULL;
+    pr_info("SB_PCLIVE rsocket_initial bytes=%llu sessions=%zu elapsed_ns=%llu\n",
+            (unsigned long long)bytes, count,
+            (unsigned long long)(pretransfer_now_ns() - begun));
+    return 0;
+}
+
 int rdma_read_pretransfer(struct resources *res, struct data_buffer *pre_mr, int type)
 {
     struct ibv_send_wr *wr_list = NULL, *bad_wr;
@@ -646,6 +674,8 @@ int rdma_read_pretransfer(struct resources *res, struct data_buffer *pre_mr, int
     int max_wr_queue_size = 100;
     if (!rx)
         return -1;
+    if ((opts.sb_pclive_refresh || opts.sb_rsocket_as) && type == 1)
+        return pclive_rsocket_initial(rx);
     total_length = rx->length;
     mr = rx->mr;
     local_addr_ptr = type == 1 ? &pre_mr->l_addr1 : &pre_mr->l_addr2;
@@ -719,6 +749,155 @@ cleanup:
 	free(wr_list);
 	free(sge_list);
 	return result;
+}
+
+#define PCLIVE_WR_BATCH 64
+
+static int pclive_rsocket_delta(struct pretransfer_rx *rx)
+{
+    struct sb_precopy_view view;
+    struct sb_rsocket_range header = {0, 4096}, *ranges;
+    uint64_t metadata, bytes = 0, changed = 0, runs = 0;
+    uint64_t begun = pretransfer_now_ns();
+    if (sb_rsocket_snapshot_read(rx->buffer, rx->length, opts.addr,
+                                 opts.port + 8, &header, 1, 1, &bytes) ||
+        sb_precopy_metadata_length(rx->buffer, rx->length, &metadata)) return -1;
+    if (metadata > 4096) {
+        struct sb_rsocket_range rest = {4096, metadata - 4096};
+        uint64_t read_bytes = 0;
+        if (sb_rsocket_snapshot_read(rx->buffer, rx->length, opts.addr,
+                                     opts.port + 8, &rest, 1, 1, &read_bytes)) return -1;
+        bytes += read_bytes;
+    }
+    if (sb_precopy_view(rx->buffer, rx->length, &view)) return -1;
+    ranges = calloc(view.count ? view.count : 1, sizeof(*ranges));
+    if (!ranges) return -1;
+    for (uint64_t i = 0; i < view.count;) {
+        uint64_t first;
+        if (view.pages[i].copied > 2) { free(ranges); return -1; }
+        if (view.pages[i].copied != 2) { i++; continue; }
+        first = i++;
+        while (i < view.count && view.pages[i].copied == 2) i++;
+        ranges[runs++] = (struct sb_rsocket_range){
+            metadata + first * 4096, (i - first) * 4096};
+        changed += i - first;
+    }
+    if (runs) {
+        uint64_t read_bytes = 0;
+        int result = sb_rsocket_snapshot_read(rx->buffer, rx->length, opts.addr,
+                                              opts.port + 8, ranges, runs, 4, &read_bytes);
+        free(ranges);
+        if (result || read_bytes != changed * 4096) return -1;
+        bytes += read_bytes;
+    } else {
+        free(ranges);
+    }
+    if (ibv_dereg_mr(rx->mr)) return -1;
+    rx->mr = NULL;
+    pr_info("SB_PCLIVE rsocket_delta metadata_bytes=%llu payload_bytes=%llu changed_pages=%llu runs=%llu total_bytes=%llu elapsed_ns=%llu\n",
+            (unsigned long long)metadata, (unsigned long long)(changed * 4096),
+            (unsigned long long)changed, (unsigned long long)runs,
+            (unsigned long long)bytes,
+            (unsigned long long)(pretransfer_now_ns() - begun));
+    return 0;
+}
+struct pclive_read_batch {
+    struct ibv_send_wr wr[PCLIVE_WR_BATCH];
+    struct ibv_sge sge[PCLIVE_WR_BATCH];
+    unsigned count;
+    uint64_t bytes, completions;
+};
+
+static int pclive_flush(struct resources *res, struct pclive_read_batch *batch)
+{
+    struct ibv_send_wr *bad;
+    struct ibv_wc wc;
+    uint64_t started;
+    int ret;
+    if (!batch->count) return 0;
+    batch->wr[batch->count - 1].next = NULL;
+    batch->wr[batch->count - 1].send_flags = IBV_SEND_SIGNALED;
+    ret = ibv_post_send(res->qp, batch->wr, &bad);
+    if (ret) { errno = ret; pr_perror("PCLive delta RDMA post"); return -1; }
+    started = pretransfer_now_ns();
+    for (;;) {
+        ret = ibv_poll_cq(res->cq, 1, &wc);
+        if (ret > 0) break;
+        if (ret < 0 || pretransfer_now_ns() - started > UINT64_C(15000000000)) {
+            pr_err("PCLive delta RDMA completion timed out\n");
+            return -1;
+        }
+    }
+    if (wc.status != IBV_WC_SUCCESS) {
+        pr_err("PCLive delta RDMA completion status=%u vendor=%u\n", wc.status, wc.vendor_err);
+        return -1;
+    }
+    batch->completions++;
+    batch->count = 0;
+    return 0;
+}
+
+static int pclive_add(struct resources *res, struct pretransfer_rx *rx,
+                      struct data_buffer *descriptor, struct pclive_read_batch *batch,
+                      uint64_t offset, uint64_t length)
+{
+    if (offset > rx->length || length > rx->length - offset) return -1;
+    while (length) {
+        unsigned n;
+        uint64_t chunk = length > MAX_BLOCK_SIZE ? MAX_BLOCK_SIZE : length;
+        if (batch->count == PCLIVE_WR_BATCH && pclive_flush(res, batch)) return -1;
+        n = batch->count++;
+        batch->sge[n] = (struct ibv_sge){
+            .addr = (uintptr_t)rx->buffer + offset,
+            .length = chunk,
+            .lkey = rx->mr->lkey,
+        };
+        batch->wr[n] = (struct ibv_send_wr){
+            .sg_list = &batch->sge[n], .num_sge = 1, .opcode = IBV_WR_RDMA_READ,
+            .wr.rdma = { .remote_addr = descriptor->r_addr + offset,
+                         .rkey = descriptor->mr.rkey },
+        };
+        if (n) batch->wr[n - 1].next = &batch->wr[n];
+        batch->bytes += chunk;
+        offset += chunk;
+        length -= chunk;
+    }
+    return 0;
+}
+
+int rdma_read_pclive_delta(struct resources *res, struct data_buffer *pre_mr)
+{
+    struct pretransfer_rx *rx = prepare_pretransfer_rx(res, pre_mr, 1);
+    struct pclive_read_batch batch = {0};
+    struct sb_precopy_view view;
+    uint64_t metadata, changed = 0, runs = 0;
+    if (!rx || rx->length < 4096) return -1;
+    if (opts.sb_pclive_refresh)
+        return pclive_rsocket_delta(rx);
+    if (pclive_add(res, rx, pre_mr, &batch, 0, 4096) || pclive_flush(res, &batch) ||
+        sb_precopy_metadata_length(rx->buffer, rx->length, &metadata)) return -1;
+    if (metadata > 4096 &&
+        (pclive_add(res, rx, pre_mr, &batch, 4096, metadata - 4096) ||
+         pclive_flush(res, &batch))) return -1;
+    if (sb_precopy_view(rx->buffer, rx->length, &view)) return -1;
+    for (uint64_t i = 0; i < view.count;) {
+        uint64_t first;
+        if (view.pages[i].copied > 2) return -1;
+        if (view.pages[i].copied != 2) { i++; continue; }
+        first = i++;
+        while (i < view.count && view.pages[i].copied == 2) i++;
+        if (pclive_add(res, rx, pre_mr, &batch, metadata + first * 4096,
+                       (i - first) * 4096)) return -1;
+        changed += i - first;
+        runs++;
+    }
+    if (pclive_flush(res, &batch) || ibv_dereg_mr(rx->mr)) return -1;
+    rx->mr = NULL;
+    pr_info("SB_PCLIVE rdma_delta metadata_bytes=%llu payload_bytes=%llu changed_pages=%llu runs=%llu completions=%llu total_bytes=%llu\n",
+            (unsigned long long)metadata, (unsigned long long)(changed * 4096),
+            (unsigned long long)changed, (unsigned long long)runs,
+            (unsigned long long)batch.completions, (unsigned long long)batch.bytes);
+    return 0;
 }
 
 // dumper, page server

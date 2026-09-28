@@ -1,0 +1,26 @@
+{
+  "name": "breakdown-pretransfer",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "on",
+      "parameters": {},
+      "options": {}
+    },
+    {
+      "name": "off",
+      "parameters": {},
+      "options": {
+        "no_pretransfer": true
+      }
+    }
+  ],
+  "note": "Paper Fig.12: pre-transfer enabled vs omitted, same memory and client workload."
+}

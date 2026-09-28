@@ -1,0 +1,23 @@
+{
+  "name": "breakdown-page-completion",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "demand-emphasis",
+      "parameters": {},
+      "options": {
+        "no_pretransfer": true,
+        "no_prefetch": true,
+        "no_hot_first": true
+      }
+    }
+  ],
+  "note": "Fig.15-inspired demand-emphasis comparison: pre-transfer, prefetch and hot-first are off, but background copy remains active. A true fault-only K run uses kernel-demand-only with its separate baseline binary; native CRIU/TCP baselines are not part of this case."
+}
