@@ -66,8 +66,13 @@ about 113 s; target restore and endpoint switch took about 68 s after image
 arrival. The last-ten-second target reference was stable at 42.1k ops/s.
 All 500k indexed keys were present with the expected value length, and the
 8 MiB canary passed byte-for-byte SHA-256 verification. The indexed values
-were not individually checksummed. Both CRIU symlinks were restored and the
-owned containers removed. `baseline/report.py` builds a matched-workload table
+were not individually checksummed. A subsequent parallel rsocket trial with
+the same workload (`sb_native_20260928_082012`) sent 6.40 GB in 5.61 s and
+measured a 183.958 s client success gap, 42.5k stable target ops/s, and
+TTR90 start 0.480 s after service resumed. All indexed key lengths and the
+canary passed, both CRIU symlinks were restored, and the owned containers were
+removed. These are single runs, so the end-to-end gap difference also includes
+checkpoint/restore variance. `baseline/report.py` builds a matched-workload table
 from validated result/state files and rejects missing cleanup or unstable
 target throughput. U profiles use native ibverbs, K uses kernel RDMA, and
 native CRIU uses rsocket; results are not yet transport-normalized speedups.

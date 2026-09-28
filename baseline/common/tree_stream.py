@@ -6,6 +6,7 @@ large Redis image sets do not require a second in-memory copy of the tree.
 """
 import argparse
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -14,9 +15,70 @@ import socket
 import struct
 import time
 
-MAGIC = b'SB-TREE-2\n'
+MAGIC = b'SB-TREE-3\n'
 CHUNK = 1024 * 1024
 SEGMENT = 128 * CHUNK
+
+
+def segments(size, lane, lanes):
+    for offset in range(lane * SEGMENT, size, lanes * SEGMENT):
+        yield offset, min(SEGMENT, size - offset)
+
+
+def put_segment_hashes(digest, results):
+    # The tree commits to each segment's SHA-256 and its order. Each lane can
+    # hash concurrently without rereading the multi-gigabyte image tree.
+    for _, segment_hash in sorted(item for result in results for item in result):
+        digest.update(segment_hash)
+
+
+def send_lane(fd, size, data_port, lane, lanes):
+    hashes = []
+    for offset, length in segments(size, lane, lanes):
+        with socket.create_connection(('127.0.0.1', data_port), timeout=15) as data:
+            data.settimeout(300)
+            segment_hash = hashlib.sha256()
+            part = length
+            while part:
+                block = os.pread(fd, min(CHUNK, part), offset + length - part)
+                if not block:
+                    raise EOFError('image changed during transfer')
+                data.sendall(block)
+                segment_hash.update(block)
+                part -= len(block)
+            hashes.append((offset, segment_hash.digest()))
+            data.shutdown(socket.SHUT_WR)
+            if recv_exact(data, 2) != b'OK':
+                raise RuntimeError('receiver rejected image segment')
+    return hashes
+
+
+def write_all(fd, block, offset):
+    while block:
+        done = os.pwrite(fd, block, offset)
+        if done <= 0:
+            raise OSError('image write made no progress')
+        offset += done
+        block = block[done:]
+
+
+def receive_lane(fd, size, listener, lane, lanes):
+    hashes = []
+    for offset, length in segments(size, lane, lanes):
+        with listener.accept()[0] as data:
+            data.settimeout(300)
+            segment_hash = hashlib.sha256()
+            part = length
+            while part:
+                block = recv_exact(data, min(CHUNK, part))
+                write_all(fd, block, offset + length - part)
+                segment_hash.update(block)
+                part -= len(block)
+            hashes.append((offset, segment_hash.digest()))
+            if data.recv(1):
+                raise ValueError('segment exceeds declared size')
+            data.sendall(b'OK')
+    return hashes
 
 
 def entries(source):
@@ -34,7 +96,7 @@ def send(source, port, data_ports):
     transferred = 0
     sessions = 0
     start = time.monotonic()
-    with socket.create_connection(('127.0.0.1', port), timeout=15) as conn:
+    with socket.create_connection(('127.0.0.1', port), timeout=15) as conn, ThreadPoolExecutor(max_workers=len(data_ports)) as pool:
         conn.settimeout(300)
         conn.sendall(MAGIC + struct.pack('!Q', len(found)))
         for path in found:
@@ -49,27 +111,14 @@ def send(source, port, data_ports):
             conn.sendall(framed)
             digest.update(framed)
             if path.is_file():
+                lanes = min(len(data_ports), (st.st_size + SEGMENT - 1) // SEGMENT)
                 with path.open('rb') as image:
-                    remaining = st.st_size
-                    while remaining:
-                        segment = min(remaining, SEGMENT)
-                        data_port = data_ports[sessions % len(data_ports)]
-                        with socket.create_connection(('127.0.0.1', data_port), timeout=15) as data:
-                            data.settimeout(300)
-                            part = segment
-                            while part:
-                                block = image.read(min(CHUNK, part))
-                                if not block:
-                                    raise EOFError('image changed during transfer: ' + str(path))
-                                data.sendall(block)
-                                digest.update(block)
-                                transferred += len(block)
-                                part -= len(block)
-                            data.shutdown(socket.SHUT_WR)
-                            if recv_exact(data, 2) != b'OK':
-                                raise RuntimeError('receiver rejected image segment')
-                        remaining -= segment
-                        sessions += 1
+                    futures = [pool.submit(send_lane, image.fileno(), st.st_size,
+                                           data_ports[lane], lane, lanes)
+                               for lane in range(lanes)]
+                    put_segment_hashes(digest, [future.result() for future in futures])
+                transferred += st.st_size
+                sessions += (st.st_size + SEGMENT - 1) // SEGMENT
         conn.sendall(digest.digest())
         conn.shutdown(socket.SHUT_WR)
         if recv_exact(conn, 2) != b'OK':
@@ -105,7 +154,7 @@ def receive(destination, port, data_ports, max_bytes):
     transferred = 0
     sessions = 0
     start = time.monotonic()
-    with socket.socket() as listener, contextlib.ExitStack() as sockets:
+    with socket.socket() as listener, contextlib.ExitStack() as sockets, ThreadPoolExecutor(max_workers=len(data_ports)) as pool:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(('127.0.0.1', port))
         listener.listen(1)
@@ -146,23 +195,13 @@ def receive(destination, port, data_ports, max_bytes):
                 else:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     with path.open('xb') as image:
-                        remaining = size
-                        while remaining:
-                            segment = min(remaining, SEGMENT)
-                            with data_listeners[sessions % len(data_listeners)].accept()[0] as data:
-                                data.settimeout(300)
-                                part = segment
-                                while part:
-                                    block = recv_exact(data, min(CHUNK, part))
-                                    image.write(block)
-                                    digest.update(block)
-                                    transferred += len(block)
-                                    part -= len(block)
-                                if data.recv(1):
-                                    raise ValueError('segment exceeds declared size')
-                                data.sendall(b'OK')
-                            remaining -= segment
-                            sessions += 1
+                        lanes = min(len(data_ports), (size + SEGMENT - 1) // SEGMENT)
+                        futures = [pool.submit(receive_lane, image.fileno(), size,
+                                               data_listeners[lane], lane, lanes)
+                                   for lane in range(lanes)]
+                        put_segment_hashes(digest, [future.result() for future in futures])
+                        transferred += size
+                        sessions += (size + SEGMENT - 1) // SEGMENT
                 os.chmod(path, info['mode'] & 0o777)
             expected = recv_exact(conn, 32)
             if digest.digest() != expected:

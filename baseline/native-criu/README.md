@@ -17,7 +17,9 @@ also takes the same migration lock used by `scripts/run.py`.
 
 Validated 2026-09-28: stock CRIU GitID `v3.18`, binary SHA-256
 `cdd7744ee2adbd37292f0778d7d13016e55c17caf430a9d66c3e5aa14a8fbaa2`.
-The Redis container smoke transferred 4,144,545 image payload bytes, verified
-SHA-256 `8313222ce420f77154d54207a723a431f4340001d04ca5b55d1ff91811696b9e`,
+The latest Redis container smoke (`sb-native-docker-20260928-082741-1255633`)
+used tree-stream protocol 3 with a single data lane, transferred 4,148,656
+image payload bytes, verified tree SHA-256
+`9587140492d688de5e2cd0c4a7564e33b36db22f1e33a44e904b2bd673820d8d`,
 and restored both sentinel and 1,024-byte value. No YCSB performance claim is
 made from this smoke.

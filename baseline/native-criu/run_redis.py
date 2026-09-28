@@ -90,10 +90,12 @@ def script(host, source, argv=(), *, timeout=60):
 def launch(host, label, argv):
     log = out / (label + '.log')
     status = out / (label + '.status')
+    pidfile = out / (label + '.pid')
     child = ('import subprocess,pathlib; f=open(%r,"w"); '
              'p=subprocess.Popen(%r,stdout=f,stderr=subprocess.STDOUT,start_new_session=True); '
+             'pathlib.Path(%r).write_text(str(p.pid)); '
              'pathlib.Path(%r).write_text(str(p.wait()))' %
-             (str(log), list(map(str, argv)), str(status)))
+             (str(log), list(map(str, argv)), str(pidfile), str(status)))
     launcher = ('import subprocess; p=subprocess.Popen(["python3","-c",%r],'
                 'stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True); '
                 'print(p.pid)' % child)
@@ -128,6 +130,25 @@ def stage_to_target(local, target):
 
 def cleanup():
     cleanup_errors = []
+    if ycsb_pid is not None:
+        stop_owned = '''import os, signal, sys
+from pathlib import Path
+root, wrapper = Path(sys.argv[1]), int(sys.argv[2])
+pidfile = root / 'run.pid'
+targets = []
+if pidfile.exists():
+    targets.append((int(pidfile.read_text()), (b'site.ycsb.Client', str(root).encode())))
+targets.append((wrapper, (str(root).encode(),)))
+for pid, markers in targets:
+    try:
+        command = Path('/proc/%d/cmdline' % pid).read_bytes()
+        if all(marker in command for marker in markers):
+            os.kill(pid, signal.SIGTERM)
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+'''
+        try: script('knode1', stop_owned, [out, ycsb_pid])
+        except Exception as error: cleanup_errors.append('client workload: ' + str(error))
     for source_relay in source_relays:
         source_relay.terminate()
         try: source_relay.wait(timeout=2)

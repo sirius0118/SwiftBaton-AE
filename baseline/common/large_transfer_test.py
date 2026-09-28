@@ -4,6 +4,7 @@
 Run on Node2. Owns and removes only its unique /tmp test directories.
 """
 import argparse
+import hashlib
 from pathlib import Path
 import shlex
 import subprocess
@@ -47,6 +48,13 @@ try:
     (src / 'images').mkdir()
     with (src / 'images/pages.img').open('wb') as image:
         image.truncate(size)
+        # Sparse zero data can hide reordered segments. Put distinct content at
+        # each segment boundary and at EOF, then verify the whole received file.
+        for offset in range(0, size, 128 * 1024 * 1024):
+            image.seek(offset)
+            image.write(hashlib.sha256(str(offset).encode()).digest() * 128)
+        image.seek(size - 4096)
+        image.write(hashlib.sha256(b'end' + str(size).encode()).digest() * 128)
     remote(['mkdir', '-m', '700', dst])
     remote(['sh', '-c', 'cat > ' + shlex.quote(str(dst / 'stream.py'))], stream.read_bytes())
     remote(['sh', '-c', 'cat > ' + shlex.quote(str(dst / 'relay'))], relay.read_bytes())
@@ -81,6 +89,11 @@ try:
     actual = int(remote(['stat', '-c', '%s', dst / 'received/pages.img']))
     if actual != size:
         raise RuntimeError('received size %d != %d' % (actual, size))
+    local_hash = subprocess.check_output(['sha256sum', src / 'images/pages.img'],
+                                         text=True).split()[0]
+    target_hash = remote(['sha256sum', dst / 'received/pages.img']).split()[0]
+    if target_hash != local_hash:
+        raise RuntimeError('received image content digest mismatch')
     print('PASS size=%d %s' % (size, output), flush=True)
 finally:
     for source_relay in source_relays:
