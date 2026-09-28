@@ -16,6 +16,7 @@
 #include "sb-trace.h"
 #include "sb-heat.h"
 #include "sb-precopy.h"
+#include "sb-rsocket-snapshot.h"
 #include "sb-fd.h"
 #include "sb-fdpool.h"
 #include "servicefd.h"
@@ -634,6 +635,33 @@ int rdma_prepare_pretransfer(struct resources *res, struct data_buffer *pre_mr, 
     return prepare_pretransfer_rx(res, pre_mr, type) ? 0 : -1;
 }
 
+static int pclive_rsocket_initial(struct pretransfer_rx *rx)
+{
+    const uint64_t segment = 128ULL * 1024 * 1024;
+    uint64_t bytes = 0, begun = pretransfer_now_ns();
+    size_t count = (rx->length + segment - 1) / segment;
+    struct sb_rsocket_range *ranges = calloc(count, sizeof(*ranges));
+    int result;
+    if (!ranges) return -1;
+    for (size_t i = 0; i < count; i++) {
+        ranges[i].offset = i * segment;
+        ranges[i].length = rx->length - ranges[i].offset;
+        if (ranges[i].length > segment) ranges[i].length = segment;
+    }
+    result = sb_rsocket_snapshot_read(rx->buffer, rx->length, opts.addr,
+                                      opts.port + 8, ranges, count, 4, &bytes);
+    free(ranges);
+    if (result || bytes != rx->length || ibv_dereg_mr(rx->mr)) {
+        pr_perror("PCLive initial rsocket read");
+        return -1;
+    }
+    rx->mr = NULL;
+    pr_info("SB_PCLIVE rsocket_initial bytes=%llu sessions=%zu elapsed_ns=%llu\n",
+            (unsigned long long)bytes, count,
+            (unsigned long long)(pretransfer_now_ns() - begun));
+    return 0;
+}
+
 int rdma_read_pretransfer(struct resources *res, struct data_buffer *pre_mr, int type)
 {
     struct ibv_send_wr *wr_list = NULL, *bad_wr;
@@ -646,6 +674,8 @@ int rdma_read_pretransfer(struct resources *res, struct data_buffer *pre_mr, int
     int max_wr_queue_size = 100;
     if (!rx)
         return -1;
+    if (opts.sb_pclive_refresh && type == 1)
+        return pclive_rsocket_initial(rx);
     total_length = rx->length;
     mr = rx->mr;
     local_addr_ptr = type == 1 ? &pre_mr->l_addr1 : &pre_mr->l_addr2;
@@ -722,6 +752,55 @@ cleanup:
 }
 
 #define PCLIVE_WR_BATCH 64
+
+static int pclive_rsocket_delta(struct pretransfer_rx *rx)
+{
+    struct sb_precopy_view view;
+    struct sb_rsocket_range header = {0, 4096}, *ranges;
+    uint64_t metadata, bytes = 0, changed = 0, runs = 0;
+    uint64_t begun = pretransfer_now_ns();
+    if (sb_rsocket_snapshot_read(rx->buffer, rx->length, opts.addr,
+                                 opts.port + 8, &header, 1, 1, &bytes) ||
+        sb_precopy_metadata_length(rx->buffer, rx->length, &metadata)) return -1;
+    if (metadata > 4096) {
+        struct sb_rsocket_range rest = {4096, metadata - 4096};
+        uint64_t read_bytes = 0;
+        if (sb_rsocket_snapshot_read(rx->buffer, rx->length, opts.addr,
+                                     opts.port + 8, &rest, 1, 1, &read_bytes)) return -1;
+        bytes += read_bytes;
+    }
+    if (sb_precopy_view(rx->buffer, rx->length, &view)) return -1;
+    ranges = calloc(view.count ? view.count : 1, sizeof(*ranges));
+    if (!ranges) return -1;
+    for (uint64_t i = 0; i < view.count;) {
+        uint64_t first;
+        if (view.pages[i].copied > 2) { free(ranges); return -1; }
+        if (view.pages[i].copied != 2) { i++; continue; }
+        first = i++;
+        while (i < view.count && view.pages[i].copied == 2) i++;
+        ranges[runs++] = (struct sb_rsocket_range){
+            metadata + first * 4096, (i - first) * 4096};
+        changed += i - first;
+    }
+    if (runs) {
+        uint64_t read_bytes = 0;
+        int result = sb_rsocket_snapshot_read(rx->buffer, rx->length, opts.addr,
+                                              opts.port + 8, ranges, runs, 4, &read_bytes);
+        free(ranges);
+        if (result || read_bytes != changed * 4096) return -1;
+        bytes += read_bytes;
+    } else {
+        free(ranges);
+    }
+    if (ibv_dereg_mr(rx->mr)) return -1;
+    rx->mr = NULL;
+    pr_info("SB_PCLIVE rsocket_delta metadata_bytes=%llu payload_bytes=%llu changed_pages=%llu runs=%llu total_bytes=%llu elapsed_ns=%llu\n",
+            (unsigned long long)metadata, (unsigned long long)(changed * 4096),
+            (unsigned long long)changed, (unsigned long long)runs,
+            (unsigned long long)bytes,
+            (unsigned long long)(pretransfer_now_ns() - begun));
+    return 0;
+}
 struct pclive_read_batch {
     struct ibv_send_wr wr[PCLIVE_WR_BATCH];
     struct ibv_sge sge[PCLIVE_WR_BATCH];
@@ -793,6 +872,8 @@ int rdma_read_pclive_delta(struct resources *res, struct data_buffer *pre_mr)
     struct sb_precopy_view view;
     uint64_t metadata, changed = 0, runs = 0;
     if (!rx || rx->length < 4096) return -1;
+    if (opts.sb_pclive_refresh)
+        return pclive_rsocket_delta(rx);
     if (pclive_add(res, rx, pre_mr, &batch, 0, 4096) || pclive_flush(res, &batch) ||
         sb_precopy_metadata_length(rx->buffer, rx->length, &metadata)) return -1;
     if (metadata > 4096 &&

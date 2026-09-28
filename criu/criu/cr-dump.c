@@ -24,6 +24,8 @@
 
 #include <sched.h>
 #include <sys/resource.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
 
 #include "types.h"
 #include "protobuf.h"
@@ -128,6 +130,7 @@ int enter_multi_process = 0;
 #include "common/shregion.h"
 #include "transfer.h"
 #include "pre-transfer.h"
+#include "sb-rsocket-snapshot.h"
 
 struct resources PF_res;
 struct resources TS_res;
@@ -3044,6 +3047,26 @@ int cr_dump_tasks(pid_t pid)
 		sb_trace("precopy.ps_prune_begin");
 		if (sb_precopy_prune(get_service_fd(IMG_FD_OFF))) goto err;
 		sb_trace("precopy.ps_prune_done");
+	}
+	/* A live rsocket listener adds a thread. Start it only after CRIU has
+	 * finished entering and dumping mount namespaces: setns(mnt) rejects a
+	 * process that still shares its fs_struct with another thread. */
+	if (opts.sb_pclive_refresh) {
+		struct sockaddr_in local = {0};
+		socklen_t local_length = sizeof(local);
+		char bind_ip[INET_ADDRSTRLEN];
+		/* sync_addr is the coordinator's peer IP. Derive the source NIC IP
+		 * from the accepted page-client control connection. */
+		if (getsockname(sync_fd_PC, (struct sockaddr *)&local, &local_length) ||
+		    local.sin_family != AF_INET ||
+		    !inet_ntop(AF_INET, &local.sin_addr, bind_ip, sizeof(bind_ip)) ||
+		    sb_rsocket_snapshot_serve((const void *)mem, mem_size,
+		                              bind_ip, opts.port + 8)) {
+			pr_perror("Start PCLive rsocket snapshot server");
+			goto err;
+		}
+		pr_info("SB_PCLIVE rsocket_bind ip=%s port=%d bytes=%llu\n",
+		        bind_ip, opts.port + 8, (unsigned long long)mem_size);
 	}
 	if (sb_images_publish(sync_pretransfer, DUMP_NAMESPACE_DONE))
 		goto err;

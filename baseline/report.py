@@ -41,6 +41,10 @@ for path in a.runs:
     elif workload != current:
         p.error('runs have different records, value length, threads or duration')
     root = state_path.parent
+    if label == 'pclive':
+        delta = json.loads((root / 'pclive-delta-validation.json').read_text())
+        if delta.get('transport') == 'rsocket':
+            transport = 'rsocket PS + native ibverbs AS'
     gaps = json.loads((root / 'success-gap-metrics.json').read_text())
     recovery = json.loads((root / 'recovery-metrics.json').read_text())
     events = [json.loads(line) for line in (root / 'events.jsonl').read_text().splitlines()]

@@ -2370,6 +2370,10 @@ int cr_lazy_pages(bool daemon)
 	// pre_mr->length1 = 4 * 1024 * 1024;
 	pr_warn("执行到这 length1:%ld\n", pre_mr->length1);
 	wait_state(sync_pretransfer, END_PAGE_PRTRANSFER);
+	/* The PCLive rsocket listener starts after source namespace dumping. Read
+	 * the matching image barrier before opening the first snapshot session. */
+	if (opts.sb_pclive_refresh &&
+	    sb_images_receive(sync_pretransfer, DUMP_NAMESPACE_DONE)) return -1;
 	if (rdma_read_pretransfer(&PT_res, pre_mr, 1))
 		return -1;
 	if (opts.sb_parent_stage && (!opts.sb_u_precopy ||
@@ -2390,7 +2394,8 @@ int cr_lazy_pages(bool daemon)
 	// ret = poll_completion(&PT_res);
 	pr_warn("RDMA读取数据成功, vma_num:%d off:%lx, pid:%ld\n", *(int *)(pre_mr->l_addr1 + 16), *(u_int64_t *)(pre_mr->l_addr1 + 8), *(u_int64_t *)(pre_mr->l_addr1));
 	// close(sync_fd_PC);
-	if (sb_images_receive(sync_pretransfer, DUMP_NAMESPACE_DONE))
+	if (!opts.sb_pclive_refresh &&
+	    sb_images_receive(sync_pretransfer, DUMP_NAMESPACE_DONE))
 		return -1;
 	if (opts.sb_parent_stage) {
 		if (sb_images_receive(sync_pretransfer, PS_PAGES_REFRESH_DONE)) return -1;

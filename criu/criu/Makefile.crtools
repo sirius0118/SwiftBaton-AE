@@ -15,6 +15,7 @@ obj-y			+= cr-check.o
 obj-y			+= cr-dedup.o
 obj-y			+= cr-dump.o
 obj-y			+= sb-precopy.o
+obj-y			+= sb-rsocket-snapshot.o
 obj-y += sb-stage.o
 obj-y += sb-fork.o
 obj-y += sb-fd.o
