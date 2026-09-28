@@ -19,6 +19,7 @@ DMA_MR = 64
 PREPARED_ARM = 128
 UNBOUND_REGION = 256
 REMOTE_PREARM = 512
+RSOCKET_PROXY = 1024
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class KernelSettings:
     ps_arm: bool = False
     ps_mr: bool = False
     ps_mr_all: bool = False
+    rsocket_proxy: bool = False
 
     def values(self):
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,31}', self.device):
@@ -81,6 +83,10 @@ class KernelSettings:
                 values['kernel-ps-mr-all'] = True
         if self.dma_mr:
             values['kernel-dma-mr'] = True
+        if self.rsocket_proxy:
+            if not self.no_pretransfer or not self.no_prefetch or self.ps_arm or self.ps_mr or self.dma_mr:
+                raise ValueError('K rsocket proxy requires demand-only faults without PS/DMA')
+            values['kernel-rsocket-proxy'] = True
         for option in ('no_pretransfer', 'no_prefetch', 'no_hot_first', 'dense'):
             if getattr(self, option):
                 values['kernel-dense' if option == 'dense' else option.replace('_', '-')] = True
@@ -156,7 +162,8 @@ def host_probe(binary, device, gid):
     return result
 
 
-def validate_preflight(hosts, export_workers=1, dma_mr=False, ps_arm=False, ps_mr=False):
+def validate_preflight(hosts, export_workers=1, dma_mr=False, ps_arm=False,
+                       ps_mr=False, rsocket_proxy=False):
     errors = []
     reference = hosts.get('knode2', {}).get('binary_sha256')
     for host in ('knode2', 'knode3'):
@@ -184,6 +191,8 @@ def validate_preflight(hosts, export_workers=1, dma_mr=False, ps_arm=False, ps_m
             errors.append(host + ': PS ARM preparation unavailable')
         if host == 'knode3' and not features & ANONYMOUS_PTE:
             errors.append(host + ': anonymous PTE bridge unavailable')
+        if host == 'knode3' and rsocket_proxy and not features & RSOCKET_PROXY:
+            errors.append(host + ': rsocket proxy bridge unavailable')
         if row.get('rdma_state') != '4: ACTIVE':
             errors.append(host + ': RDMA port is not ACTIVE')
         gid = row.get('rdma_gid', '')

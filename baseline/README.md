@@ -14,16 +14,18 @@ client, Node2 as source, Node3 as destination, 500,000 × 10 KiB records,
 | PCLive prototype | First resident PS snapshot, source re-read and changed-page second round, final validation and resident adoption | Rsocket images, both PS rounds and separate AS fault/prefetch/background lanes; changed-page and byte/ACK checks |
 | Post-copy prototype | No PS page payload; independent demand faults and address-order background transfer | Rsocket images, PS control snapshot and separate AS fault/background lanes |
 | Hybrid-copy prototype | Resident PS plus demand and bounded page-index background queues | Rsocket images, PS snapshot and separate AS fault/background lanes; checkerboard fragmentation check |
-| Remote-fork prototype | Kernel demand-only pages, with no PS/FT/BG installation during service | Kernel RDMA and marker-retirement checks |
+| Remote-fork prototype | Kernel demand-only pages, with no PS/FT/BG installation during service | Rsocket images and userspace rsocket page proxy; source/target/kernel byte and marker-retirement checks |
 
 The U prototypes reuse SwiftBaton CRIU orchestration, and the remote-fork
 prototype reuses its kernel module. They are functional algorithm profiles,
-not independent reimplementations of the cited systems. The main image and
-memory payloads of the U baselines use the same librdmacm rsocket library;
-some existing setup/control messages still use the original CRIU channels.
-The kernel fault handler cannot call a userspace rsocket API, so remote-fork
-retains kernel RDMA under the same NIC cap. Do not interpret the one-run
-end-to-end differences as transport-normalized speedups.
+not independent reimplementations of the cited systems. The image and memory
+payloads of all five baselines use the librdmacm rsocket library; some
+existing setup/control messages still use the original CRIU channels.
+Remote-fork's kernel fault handler queues requests to a userspace pageclient,
+which sends each demand page over rsocket and completes the kernel request.
+Its inherited kernel RDMA catalog setup still opens QPs and registers source
+memory, but does not carry page or image payloads. Do not interpret the
+one-run end-to-end differences as isolated speedups.
 
 The stock CRIU path uses `common/rsocket_relay` because normal `send`/`recv`
 cannot take rsocket pseudo-descriptors. `tree_stream.py` copies the image tree

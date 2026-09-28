@@ -35,6 +35,14 @@ for path in a.runs:
     if not state.get('success'):
         p.error('migration state failed: ' + str(state_path))
     parameters = state['parameters']
+    if label == 'remote-fork' and parameters.get('kernel_rsocket_proxy'):
+        validation_path = state_path.parent / 'rsocket-remote-fork-validation.json'
+        if report.get('analysis', {}).get('verify_rsocket.py') != 0 or not validation_path.is_file():
+            p.error('remote-fork rsocket payloads were not verified: ' + str(state_path))
+        validation = json.loads(validation_path.read_text())
+        if validation.get('transport') != 'rsocket images and proxy demand pages':
+            p.error('invalid remote-fork transport verification: ' + str(validation_path))
+        transport = 'rsocket images + proxy demand pages'
     current = tuple(parameters[key] for key in ('records', 'field_length', 'threads', 'duration'))
     if workload is None:
         workload = current
@@ -77,10 +85,10 @@ for path in a.runs:
                  ttr['confirmed_after_service_seconds'] if ttr else None, root))
 
 print('Workload: %d records x %d bytes, %d client threads, %d s' % workload)
-print('| Baseline | RDMA transport | Client success gap (ms) | Stable target ops/s | TTR90 start / confirmed (s) | Artifact |')
+print('| Baseline | Payload transport | Client success gap (ms) | Stable target ops/s | TTR90 start / confirmed (s) | Artifact |')
 print('| --- | --- | ---: | ---: | ---: | --- |')
 for label, transport, gap, ops, start, confirmed, root in rows:
     ttr = ('%.3f / %.3f' % (start, confirmed)) if start is not None else 'unavailable'
     print('| %s | %s | %.3f | %.0f | %s | `%s` |' %
           (label, transport, gap, ops, ttr, root))
-print('\nU baseline bulk payloads use rsocket; remote-fork retains kernel RDMA. These are single end-to-end observations, not transport-normalized speedup estimates.')
+print('\nThese are single end-to-end observations; each row records its verified payload transport.')

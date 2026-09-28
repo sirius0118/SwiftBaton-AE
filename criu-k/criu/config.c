@@ -711,6 +711,7 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		{ "lsm-mount-context", required_argument, 0, 1099 },
 		{ "network-lock", required_argument, 0, 1100 },
 		{ "kernel-transfer", no_argument, 0, 1248 },
+		{ "kernel-rsocket-proxy", no_argument, 0, 1261 },
 		{ "kernel-dense", no_argument, 0, 1252 },
 		{ "kernel-ps-chunk-mb", required_argument, 0, 1253 },
 		{ "kernel-export-workers", required_argument, 0, 1254 },
@@ -1149,6 +1150,7 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
               opts.sb_kernel_export_chunk_mb = value; }
             break;
 		case 1248: opts.sb_kernel_transfer = true; break;
+		case 1261: opts.sb_kernel_rsocket_proxy = true; break;
         case 1249: SET_CHAR_OPTS(sb_kernel_device, optarg); break;
         case 1250:
             { char *end; unsigned long value = strtoul(optarg, &end, 10);

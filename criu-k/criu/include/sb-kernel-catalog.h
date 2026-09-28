@@ -53,6 +53,8 @@ int sbk_catalog_stage(struct sbk_catalog *catalog,
 int sbk_catalog_import_ps_early(struct sbk_catalog *catalog);
 int sbk_catalog_seal(struct sbk_catalog *catalog,
                      const struct sbk_catalog_final *records, size_t count);
+int sbk_catalog_start_rsocket_proxy(struct sbk_catalog *catalog,
+                                   int control_fd, int port, unsigned workers);
 /* Serialized local control connection. Receiver owns returned fds and malloc
  * table; every error closes received descriptors. No fd number goes on wire. */
 int sbk_catalog_serve(struct sbk_catalog *catalog, int socket_fd);

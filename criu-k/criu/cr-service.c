@@ -893,8 +893,10 @@ pr_warn("执行到这\n");
 				opts.sb_image_rdma = strstr(buf + 11, "yes") != NULL;
 			}else if (!strncmp(buf, "kernel-dense=", 13)) {
                 opts.sb_kernel_dense = !strncmp(buf + 13, "yes", 3);
-            }else if (!strncmp(buf, "kernel-transfer=", 16)) {
+			}else if (!strncmp(buf, "kernel-transfer=", 16)) {
                 opts.sb_kernel_transfer = !strncmp(buf + 16, "yes", 3);
+			}else if (!strncmp(buf, "kernel-rsocket-proxy=", 21)) {
+				opts.sb_kernel_rsocket_proxy = !strncmp(buf + 21, "yes", 3);
             }else if (!strncmp(buf, "kernel-device=", 14)) {
                 char device[64];
                 if (sscanf(buf + 14, "%63s", device) != 1) return -1;
@@ -1129,8 +1131,10 @@ static int restore_using_req(int sk, CriuOpts *req)
 				opts.sb_image_rdma = strstr(buf + 11, "yes") != NULL;
 			}else if (!strncmp(buf, "kernel-dense=", 13)) {
                 opts.sb_kernel_dense = !strncmp(buf + 13, "yes", 3);
-            }else if (!strncmp(buf, "kernel-transfer=", 16)) {
+			}else if (!strncmp(buf, "kernel-transfer=", 16)) {
                 opts.sb_kernel_transfer = !strncmp(buf + 16, "yes", 3);
+			}else if (!strncmp(buf, "kernel-rsocket-proxy=", 21)) {
+				opts.sb_kernel_rsocket_proxy = !strncmp(buf + 21, "yes", 3);
             }else if (!strncmp(buf, "kernel-device=", 14)) {
                 char device[64];
                 if (sscanf(buf + 14, "%63s", device) != 1) return -1;

@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #endif
 #include "sb-kernel-catalog.h"
+#include "sb-kernel-rsocket-proxy.h"
 #include "log.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -384,7 +385,8 @@ out:
 struct sbk_catalog *sbk_catalog_create(int session,
                                        const struct sbk_config *config) {
   if (!config || config->version != SBK_ABI_VERSION ||
-      config->backend != SBK_BACKEND_RDMA) {
+      (config->backend != SBK_BACKEND_RDMA &&
+       config->backend != SBK_BACKEND_RSOCKET_PROXY)) {
     errno = EINVAL;
     return NULL;
   }
@@ -723,6 +725,22 @@ int sbk_catalog_seal(struct sbk_catalog *c,
   c->timing.seal_ns = catalog_now_ns() - begin;
   c->phase = 1;
   return 0;
+}
+int sbk_catalog_start_rsocket_proxy(struct sbk_catalog *c,
+                                   int control_fd, int port, unsigned workers) {
+  struct sbk_proxy_region *regions;
+  int ret;
+  if (!c || c->phase != 1 || !c->count || !workers) return -EINVAL;
+  regions = calloc(c->count, sizeof(*regions));
+  if (!regions) return -ENOMEM;
+  for (size_t i = 0; i < c->count; i++) {
+    if (!c->entries[i]->final) { free(regions); return -EINVAL; }
+    regions[i].fd = c->entries[i]->fd;
+    regions[i].record = c->entries[i]->record;
+  }
+  ret = sbk_rsocket_target_start(control_fd, port, regions, c->count, workers);
+  free(regions);
+  return ret;
 }
 static int compare_address(const void *a, const void *b) {
   const struct catalog_entry *x = *(struct catalog_entry *const *)a,

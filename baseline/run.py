@@ -66,14 +66,16 @@ if not (a.execute or a.check):
  print(json.dumps(dict(baseline=a.baseline,criu_mode=criu_mode,profile=a.profile,command=argv,results=str(W),mutates_hosts=False),indent=2));sys.exit(0)
 W.mkdir(parents=True,exist_ok=True)
 lock=(W/'run.lock').open('w');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-binary=R/'build'/('criu-K-baseline' if a.baseline=='remote-fork' else
+binary=R/'build'/('criu-K-rsocket' if a.baseline=='remote-fork' else
                   'criu-U-pclive' if a.baseline=='pclive' else
                   'criu-U-rsocket-as')/'criu/criu'
 sha=hashlib.sha256(binary.read_bytes()).hexdigest()
 def remote(host,program,args=()):
  command=['sudo','-n','python3','-c',program]+list(map(str,args))
  if host!='knode2':command=['ssh','-oBatchMode=yes','-oConnectTimeout=8',host,shlex.join(command)]
- return subprocess.check_output(command,text=True,timeout=45)
+ result=subprocess.run(command,text=True,capture_output=True,timeout=45)
+ if result.returncode:raise RuntimeError(host+': '+(result.stderr.strip() or result.stdout.strip()))
+ return result.stdout
 probe=r'''from pathlib import Path
 import os,json,hashlib,subprocess,sys
 binary,expected,mode=sys.argv[1:]
@@ -90,9 +92,17 @@ p=Path('/usr/bin/criu');assert p.is_symlink(),'Administrator must provision /usr
 assert p.is_file(),'Installed CRIU symlink is broken'
 ref=Path('/sys/module/swiftbaton_k/refcnt')
 if ref.exists():assert ref.read_text().strip()=='0','K module is busy'
-if mode=='K':
+if mode.startswith('K'):
  assert ref.exists(),'The reviewed K module must already be loaded on both hosts'
  assert Path('/sys/module/swiftbaton_k/parameters/session_dispatch').read_text().strip()=='Y'
+if mode=='K-proxy':
+ import fcntl,struct
+ request=(2<<30)|(16<<16)|(ord('B')<<8)|17
+ data=bytearray(16)
+ with open('/dev/swiftbaton_k','rb+',buffering=0) as device:
+  fcntl.ioctl(device,request,data,True)
+ version,features,_,_=struct.unpack('=4I',data)
+ assert features & (1<<10),'Load the reviewed rsocket-proxy module on Node3 first'
 print(json.dumps(dict(installed=os.readlink(p),kernel=os.uname().release)))
 '''
 switch=r'''from pathlib import Path
@@ -122,7 +132,8 @@ for p in Path('/proc').iterdir():
 assert daemons=={'dockerd','containerd'}
 print(json.dumps(seen))
 '''
-previous={h:json.loads(remote(h,probe,[binary,sha,criu_mode])) for h in ('knode2','knode3')}
+def probe_mode(host):return 'K-proxy' if a.baseline=='remote-fork' and host=='knode3' else criu_mode
+previous={h:json.loads(remote(h,probe,[binary,sha,probe_mode(h)])) for h in ('knode2','knode3')}
 # Check client classes before creating any workload.
 client=r'''from pathlib import Path
 import subprocess,json,sys
@@ -184,6 +195,11 @@ try:
    q=subprocess.run(command,
                     stdout=log,stderr=subprocess.STDOUT)
   result['analysis']['verify_rsocket_as.py']=q.returncode
+ if a.baseline=='remote-fork' and '--kernel-rsocket-proxy' in profile:
+  with (out/'verify_rsocket.py.log').open('w') as log:
+   q=subprocess.run([sys.executable,str(R/'baseline/remote-fork/verify_rsocket.py'),str(state.parent)],
+                    stdout=log,stderr=subprocess.STDOUT)
+  result['analysis']['verify_rsocket.py']=q.returncode
  failed=[name for name,code in result['analysis'].items() if code]
  if failed:raise RuntimeError('Validation failed: '+', '.join(failed))
  result['success']=True
@@ -195,7 +211,7 @@ finally:
  result['restored']={}
  for host in reversed(changed):
   try:
-   remote(host,probe,[binary,sha,criu_mode]);remote(host,switch,[binary,previous[host]['installed']]);result['restored'][host]=True
+   remote(host,probe,[binary,sha,probe_mode(host)]);remote(host,switch,[binary,previous[host]['installed']]);result['restored'][host]=True
   except Exception as e:result['restored'][host]=str(e);result['success']=False
  (out/'result.json').write_text(json.dumps(result,indent=2)+'\n')
  print('RESULT='+str(out/'result.json'),flush=True)

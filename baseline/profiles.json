@@ -32,7 +32,7 @@
     "--install-workers", "4", "--batch-pages", "16", "--fault-read-batch", "1"
   ],
   "remote-fork": [
-    "--image-rdma", "--u-precopy", "--kernel-transfer", "--kernel-demand-only",
+    "--image-rdma", "--u-precopy", "--kernel-transfer", "--kernel-demand-only", "--kernel-rsocket-proxy",
     "--no-pretransfer", "--no-prefetch", "--fast-cutover",
     "--records", "500000", "--field-length", "10240", "--threads", "32",
     "--duration", "90", "--warmup", "15", "--canary-mib", "8",

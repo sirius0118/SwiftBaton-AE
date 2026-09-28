@@ -139,6 +139,7 @@ struct cr_options {
 	char *sync_addr;
 	bool sb_image_rdma;
 	bool sb_kernel_transfer;
+	bool sb_kernel_rsocket_proxy;
 	bool sb_kernel_dense;
 	char *sb_kernel_device;
 	unsigned sb_kernel_gid;

@@ -13,6 +13,7 @@
 #include "sb-kernel-dma-wire.h"
 #include "sb-kernel-layout.h"
 #include "sb-kernel-layout-wire.h"
+#include "sb-kernel-rsocket-proxy.h"
 #include "sb-kernel.h"
 #include "sb-trace.h"
 #include "uffd.h"
@@ -292,7 +293,14 @@ static uint64_t kernel_now_ns(void) {
 
 int sb_kernel_options(void) {
   if (!opts.sb_kernel_transfer)
-    return (opts.sb_kernel_dma_mr || opts.sb_kernel_ps_arm || opts.sb_kernel_ps_mr || opts.sb_kernel_ps_mr_all) ? -EINVAL : 0;
+    return (opts.sb_kernel_dma_mr || opts.sb_kernel_ps_arm || opts.sb_kernel_ps_mr ||
+            opts.sb_kernel_ps_mr_all || opts.sb_kernel_rsocket_proxy) ? -EINVAL : 0;
+  if (opts.sb_kernel_rsocket_proxy &&
+      (!opts.sb_no_prefetch || !opts.sb_no_pretransfer || opts.sb_kernel_ps_arm ||
+       opts.sb_kernel_ps_mr || opts.sb_kernel_dma_mr)) {
+    pr_err("K rsocket proxy requires demand-only faults and no PS/DMA mode\n");
+    return -EINVAL;
+  }
   if (opts.sb_kernel_ps_mr_all && !opts.sb_kernel_ps_mr) return -EINVAL;
   if (opts.sb_kernel_ps_mr && (!opts.sb_kernel_ps_arm || opts.sb_kernel_dma_mr || opts.sb_kernel_dense)) {
     pr_err("K source PS MR requires PS ARM, sparse planning and ordinary MRs\n");
@@ -317,7 +325,7 @@ int sb_kernel_connect(int socket_fd, int source) {
   struct sbk_rdma_endpoint remote;
   struct sbk_config cfg = {
       .version = SBK_ABI_VERSION,
-      .backend = SBK_BACKEND_RDMA,
+      .backend = opts.sb_kernel_rsocket_proxy ? SBK_BACKEND_RSOCKET_PROXY : SBK_BACKEND_RDMA,
       .prefetch_workers =
           opts.sb_prefetch_workers ? opts.sb_prefetch_workers : 2,
       .background_workers =
@@ -326,8 +334,14 @@ int sb_kernel_connect(int socket_fd, int source) {
       .prefetch_enabled = !opts.sb_no_prefetch,
       .test_fail_page = SBK_NO_FAILURE};
   int ret;
-  if (sb_kernel_options() || session_fd >= 0)
+  uint32_t local_proxy = opts.sb_kernel_rsocket_proxy, remote_proxy = 0;
+  const char *stage = "options";
+  if (sb_kernel_options() || session_fd >= 0) {
+    pr_err("SB_KERNEL connect role=%s invalid options proxy=%d no_pf=%d no_pt=%d session=%d\n",
+           source ? "source" : "destination", opts.sb_kernel_rsocket_proxy,
+           opts.sb_no_prefetch, opts.sb_no_pretransfer, session_fd);
     return -EINVAL;
+  }
   /* Connection creation is coordinator-only, after any previous close. */
   pthread_mutex_lock(&final_gate.lock);
   final_gate.error = 0;
@@ -344,14 +358,23 @@ int sb_kernel_connect(int socket_fd, int source) {
   snprintf(setup.device, sizeof(setup.device), "%s",
            opts.sb_kernel_device ? opts.sb_kernel_device : "mlx5_1");
   session_fd = open("/dev/swiftbaton_k", O_RDWR | O_CLOEXEC);
-  if (session_fd < 0)
+  if (session_fd < 0) {
+    pr_perror("SB_KERNEL open session role=%s", source ? "source" : "destination");
     return -errno;
+  }
+  stage = "capabilities";
   struct sbk_capabilities caps;
   if (ioctl(session_fd, SBK_IOC_CAPABILITIES, &caps) ||
       caps.version != SBK_ABI_VERSION ||
       (!source && !(caps.features & SBK_FEATURE_ANONYMOUS_PTE))) {
     pr_err("SwiftBaton-K requires the anonymous-PTE kernel bridge on the "
            "destination\n");
+    ret = -EOPNOTSUPP;
+    goto fail;
+  }
+  if (opts.sb_kernel_rsocket_proxy && !source &&
+      !(caps.features & SBK_FEATURE_RSOCKET_PROXY)) {
+    pr_err("K rsocket proxy module capability unavailable on destination\n");
     ret = -EOPNOTSUPP;
     goto fail;
   }
@@ -377,6 +400,7 @@ int sb_kernel_connect(int socket_fd, int source) {
     ret = -EOPNOTSUPP;
     goto fail;
   }
+  stage = "rdma_create";
   if (ioctl(session_fd, SBK_IOC_RDMA_CREATE, &setup)) {
     ret = -errno;
     goto fail;
@@ -387,9 +411,17 @@ int sb_kernel_connect(int socket_fd, int source) {
   }
   setup.local.reserved[0] = opts.sb_kernel_dma_mr ? 1 : 0;
   setup.local.reserved[1] = opts.sb_kernel_ps_arm ? 1 : 0;
+  stage = "endpoint_exchange";
   if (sync_transfer(socket_fd, &setup.local, sizeof(setup.local), true) ||
       sync_transfer(socket_fd, &remote, sizeof(remote), false)) {
     ret = -EIO;
+    goto fail;
+  }
+  stage = "mode_exchange";
+  if (sync_transfer(socket_fd, &local_proxy, sizeof(local_proxy), true) ||
+      sync_transfer(socket_fd, &remote_proxy, sizeof(remote_proxy), false) ||
+      local_proxy != remote_proxy) {
+    ret = -EPROTO;
     goto fail;
   }
   if (!sbk_layout_mode_matches(opts.sb_kernel_dma_mr, opts.sb_kernel_ps_arm, &remote)) {
@@ -397,21 +429,25 @@ int sb_kernel_connect(int socket_fd, int source) {
     ret = -EPROTO;
     goto fail;
   }
+  stage = "rdma_connect";
   if (ioctl(session_fd, SBK_IOC_RDMA_CONNECT, &remote)) {
     ret = -errno;
     goto fail;
   }
   if (!source) {
+    stage = "catalog_create";
     destination = sbk_catalog_create(session_fd, &cfg);
     if (!destination) {
       ret = -errno;
       goto fail;
     }
+    stage = "catalog_workers";
     ret = sbk_catalog_prepare_workers(destination,
           opts.sb_kernel_catalog_workers ? opts.sb_kernel_catalog_workers : 1);
     if (ret) goto fail;
   }
   struct timeval deadline = {.tv_sec = SBK_SESSION_TIMEOUT_SEC};
+  stage = "control_timeout";
   if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &deadline,
                  sizeof(deadline)) ||
       setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &deadline,
@@ -430,6 +466,9 @@ int sb_kernel_connect(int socket_fd, int source) {
           opts.sb_no_pretransfer ? "disabled" : "enabled", opts.sb_kernel_dma_mr);
   return 0;
 fail:
+  pr_err("SB_KERNEL connect failed role=%s stage=%s ret=%d errno=%d local_proxy=%u remote_proxy=%u\n",
+         source ? "source" : "destination", stage, ret, errno,
+         local_proxy, remote_proxy);
   sb_kernel_transfer_close();
   return ret;
 }
@@ -1093,6 +1132,12 @@ int sb_kernel_send_final(int socket_fd) {
   struct sbk_wire_header h = {SBK_WIRE_MAGIC, sbk_dma_final_version(opts.sb_kernel_dma_mr), nr_final, 0};
   ret = -EIO;
   if (!nr_final) goto out;
+  if (opts.sb_kernel_rsocket_proxy) {
+    ret = sbk_rsocket_source_start(socket_fd, opts.port + 13,
+                                  final_regions, nr_final,
+                                  opts.sb_fault_workers ? opts.sb_fault_workers : 4);
+    if (ret) goto out;
+  }
   /* A partial send may have reached the peer even if the local write fails.
    * Preserve this fence across close: resuming the source after this point
    * requires an external proof that the destination has been destroyed. */
@@ -1165,6 +1210,9 @@ int sb_kernel_client_receive(int socket_fd) {
   }
   report_dma_phase("final", false, &dma);
   ret = sbk_catalog_seal(destination, final_regions, nr_final);
+  if (!ret && opts.sb_kernel_rsocket_proxy)
+    ret = sbk_catalog_start_rsocket_proxy(destination, socket_fd, opts.port + 13,
+                                         opts.sb_fault_workers ? opts.sb_fault_workers : 4);
   struct sbk_catalog_timing timing = {0};
   sbk_catalog_get_timing(destination, &timing);
   if (opts.sb_kernel_ps_arm)
@@ -1371,6 +1419,8 @@ out:
 }
 void sb_kernel_transfer_close(void) {
   sbk_final_close(&final_gate);
+  sbk_rsocket_target_stop();
+  sbk_rsocket_source_stop();
   sbk_catalog_destroy(destination);
   destination = NULL;
   for (unsigned int i = 0; i < nr_final; i++) {

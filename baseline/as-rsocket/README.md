@@ -22,7 +22,9 @@ write/receive/acknowledgement counts, then restores `/usr/bin/criu` and cleans
 the owned containers. The PCLive run additionally verifies the changed-page
 delta and resident refresh.
 
-The demand-only kernel remote-fork profile retains its kernel RDMA transport:
-a kernel fault handler cannot call the userspace librdmacm rsocket API. All
-profiles run under the same 25 Gbps hardware QoS cap, but the kernel row is
-not an identical userspace transport comparison.
+The demand-only kernel remote-fork profile queues faults to a userspace
+pageclient. That pageclient uses the same librdmacm rsocket API for page and
+image payloads, then completes the kernel fault request. It retains native
+kernel RDMA setup for the inherited catalog/control plane. All profiles run
+under the same 25 Gbps hardware QoS cap; their algorithms and execution
+contexts still differ.

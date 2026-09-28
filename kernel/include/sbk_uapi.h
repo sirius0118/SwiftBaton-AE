@@ -7,6 +7,7 @@
 #define SBK_ABI_VERSION 1
 #define SBK_BACKEND_LOOPBACK_TEST 1
 #define SBK_BACKEND_RDMA 2
+#define SBK_BACKEND_RSOCKET_PROXY 3
 #define SBK_LANES 3
 #define SBK_DEMAND 0
 #define SBK_PREFETCH 1
@@ -70,6 +71,7 @@ struct sbk_region_seal {
 #define SBK_FEATURE_PREPARED_ARM (1U << 7)
 #define SBK_FEATURE_UNBOUND_REGION (1U << 8)
 #define SBK_FEATURE_REMOTE_PREARM (1U << 9)
+#define SBK_FEATURE_RSOCKET_PROXY (1U << 10)
 #define SBK_TOKEN_POOL_MAX_PAGES (1U << 22)
 struct sbk_token_pool_stats {
     __u64 available, prepared, claimed, fallback;
@@ -105,6 +107,20 @@ struct sbk_stats {
 struct sbk_page_info {
     __u64 index, started_ns, completed_ns;
     __u32 state, lane;
+};
+
+/* Demand-only userspace transport bridge. The kernel owns PTE installation;
+ * a process holding this region fd supplies one complete page via rsocket.
+ * NEXT may be issued by several workers concurrently. A request expires after
+ * the ordinary SBK_WAIT_TIMEOUT; a late COMPLETE then returns ENOENT. */
+struct sbk_proxy_request {
+    __u64 id, index;
+    __u32 lane, reserved;
+};
+struct sbk_proxy_completion {
+    __u64 id, data; /* data points to exactly PAGE_SIZE bytes on success. */
+    __s32 status;   /* 0 or a negative errno; partial pages are forbidden. */
+    __u32 reserved;
 };
 
 /* Control plane exchanges this over an authenticated channel. No remote writes. */
@@ -198,4 +214,6 @@ struct sbk_dma_map {
  * the source is frozen; mapping invalidation forces ordinary final export. */
 #define SBK_IOC_PREARM_BATCH _IOWR('B', 29, struct sbk_prearm_batch)
 #define SBK_IOC_PREARM_STATUS _IOWR('B', 30, struct sbk_prearm_status)
+#define SBK_IOC_PROXY_NEXT _IOR('B', 31, struct sbk_proxy_request)
+#define SBK_IOC_PROXY_COMPLETE _IOW('B', 32, struct sbk_proxy_completion)
 #endif

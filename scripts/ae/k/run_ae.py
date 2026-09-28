@@ -19,6 +19,7 @@ if BASE == RUN_ROOT or BASE in RUN_ROOT.parents:
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--kernel-transfer', action='store_true', help='Use the already deployed K CRIU and anonymous-PTE module; never installs or loads them')
 parser.add_argument('--kernel-demand-only', action='store_true', help='Remote-fork baseline: use only kernel faults while serving; retire source after target shutdown')
+parser.add_argument('--kernel-rsocket-proxy', action='store_true', help='Experimental remote-fork: carry kernel fault payloads through userspace rsocket')
 parser.add_argument('--kernel-device', default='mlx5_1')
 parser.add_argument('--kernel-gid', type=int, default=3)
 parser.add_argument('--kernel-timeout-ms', type=int, default=2000)
@@ -95,8 +96,11 @@ parser.add_argument('--canary-mib', type=int, default=0, help='Immutable data fo
 opts = parser.parse_args()
 if opts.kernel_demand_only and not (opts.kernel_transfer and opts.no_pretransfer and opts.no_prefetch):
     parser.error('--kernel-demand-only requires --kernel-transfer --no-pretransfer --no-prefetch')
+if opts.kernel_rsocket_proxy and not opts.kernel_demand_only:
+    parser.error('--kernel-rsocket-proxy requires --kernel-demand-only')
 SCRIPT_ROOT = Path(__file__).resolve().parent
-CRIU_ROOT = BASE / ('build/criu-K-baseline' if opts.kernel_demand_only else
+CRIU_ROOT = BASE / ('build/criu-K-rsocket' if opts.kernel_rsocket_proxy else
+                    'build/criu-K-baseline' if opts.kernel_demand_only else
                     'build/criu-K' if opts.kernel_transfer else 'build/criu-U')
 if opts.batch_pages is None:
     opts.batch_pages = 32 if opts.kernel_transfer else 64
@@ -123,7 +127,8 @@ if opts.kernel_transfer:
         ps_chunk_mb=opts.kernel_ps_chunk_mb, export_workers=opts.kernel_export_workers,
         export_chunk_mb=opts.kernel_export_chunk_mb, validation_workers=opts.validation_workers,
         catalog_workers=opts.kernel_catalog_workers, dma_mr=opts.kernel_dma_mr, ps_arm=opts.kernel_ps_arm,
-        ps_mr=opts.kernel_ps_mr, ps_mr_all=opts.kernel_ps_mr_all)
+        ps_mr=opts.kernel_ps_mr, ps_mr_all=opts.kernel_ps_mr_all,
+        rsocket_proxy=opts.kernel_rsocket_proxy)
     try:
         kernel_settings.values()
     except ValueError as error:
@@ -446,7 +451,8 @@ try:
                  repr(str(CRIU_ROOT / 'criu/criu')) + ',' + repr(opts.kernel_device) + ',' + str(opts.kernel_gid) + ')))'))
                  for host in ('knode2','knode3')}
         errors = validate_preflight(hosts, opts.kernel_export_workers, opts.kernel_dma_mr,
-                                    opts.kernel_ps_arm, opts.kernel_ps_mr)
+                                    opts.kernel_ps_arm, opts.kernel_ps_mr,
+                                    opts.kernel_rsocket_proxy)
         STATE['kernel_preflight'] = {'hosts': hosts, 'errors': errors, 'passed': not errors}
         (OUT / 'kernel-preflight.json').write_text(json.dumps(STATE['kernel_preflight'], indent=2)+'\n')
         save()

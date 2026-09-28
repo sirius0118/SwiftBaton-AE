@@ -23,6 +23,9 @@
 #include <linux/overflow.h>
 #include <linux/capability.h>
 #include <linux/pid.h>
+#include <linux/list.h>
+#include <linux/spinlock.h>
+#include <linux/poll.h>
 #ifdef CONFIG_SWIFTBATON_PTE
 #include <linux/swiftbaton_pte.h>
 #endif
@@ -52,7 +55,22 @@ struct sbk_bg_worker {
 	union { struct work_struct work; struct sbk_work job; };
 	struct sbk_context *ctx;
 };
+struct sbk_proxy_waiter {
+	struct list_head link;
+	struct kref refs;
+	struct completion done;
+	struct page *page;
+	u64 id, index;
+	u32 lane;
+	int status;
+	bool dispatched;
+};
 struct sbk_context {
+	spinlock_t proxy_lock;
+	struct list_head proxy_pending, proxy_inflight;
+	wait_queue_head_t proxy_wait;
+	atomic_t proxy_pending_count;
+	u64 proxy_next_id;
 	struct sbk_token_pool *token_pool;
 	struct kref refs;
 	struct work_struct destroy;
@@ -146,12 +164,193 @@ static void sbk_max(atomic64_t *v, u64 n)
 	}
 }
 
+static void sbk_proxy_free(struct kref *ref)
+{
+	struct sbk_proxy_waiter *request = container_of(ref, struct sbk_proxy_waiter, refs);
+	put_page(request->page);
+	kfree(request);
+}
+
+/* A dispatched request holds a second reference until COMPLETE, timeout or
+ * cancellation removes it from the inflight list. The page reference also
+ * protects against a late userspace copy racing a failed fault. */
+static int sbk_proxy_fetch(struct sbk_context *c, struct page *page,
+			   unsigned long index, unsigned int lane)
+{
+	struct sbk_proxy_waiter *request;
+	unsigned long flags;
+	bool drop_dispatch = false;
+	int ret;
+	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&request->link);
+	kref_init(&request->refs);
+	init_completion(&request->done);
+	get_page(page);
+	request->page = page;
+	request->index = index;
+	request->lane = lane;
+	spin_lock_irqsave(&c->proxy_lock, flags);
+	if (atomic_read(&c->stopping)) {
+		spin_unlock_irqrestore(&c->proxy_lock, flags);
+		ret = -ECANCELED;
+		goto out;
+	}
+	request->id = ++c->proxy_next_id;
+	list_add_tail(&request->link, &c->proxy_pending);
+	atomic_inc(&c->proxy_pending_count);
+	spin_unlock_irqrestore(&c->proxy_lock, flags);
+	wake_up_interruptible(&c->proxy_wait);
+	if (!wait_for_completion_timeout(&request->done, SBK_WAIT_TIMEOUT))
+		ret = -ETIMEDOUT;
+	else
+		ret = READ_ONCE(request->status);
+	spin_lock_irqsave(&c->proxy_lock, flags);
+	if (!list_empty(&request->link)) {
+		list_del_init(&request->link);
+		if (request->dispatched)
+			drop_dispatch = true;
+		else
+			atomic_dec(&c->proxy_pending_count);
+	}
+	spin_unlock_irqrestore(&c->proxy_lock, flags);
+	if (drop_dispatch)
+		kref_put(&request->refs, sbk_proxy_free);
+out:
+	kref_put(&request->refs, sbk_proxy_free);
+	return ret;
+}
+
+static int sbk_proxy_next(struct file *file, void __user *user)
+{
+	struct sbk_context *c = file->private_data;
+	struct sbk_proxy_waiter *request;
+	struct sbk_proxy_request desc;
+	unsigned long flags;
+	int ret;
+	if (!READ_ONCE(c->configured) || c->cfg.backend != SBK_BACKEND_RSOCKET_PROXY)
+		return -EINVAL;
+	for (;;) {
+		spin_lock_irqsave(&c->proxy_lock, flags);
+		if (atomic_read(&c->stopping)) {
+			spin_unlock_irqrestore(&c->proxy_lock, flags);
+			return -ECANCELED;
+		}
+		if (list_empty(&c->proxy_pending)) {
+			spin_unlock_irqrestore(&c->proxy_lock, flags);
+			if (file->f_flags & O_NONBLOCK)
+				return -EAGAIN;
+			ret = wait_event_interruptible(c->proxy_wait,
+				atomic_read(&c->proxy_pending_count) || atomic_read(&c->stopping));
+			if (ret)
+				return ret;
+			continue;
+		}
+		request = list_first_entry(&c->proxy_pending, struct sbk_proxy_waiter, link);
+		list_move_tail(&request->link, &c->proxy_inflight);
+		atomic_dec(&c->proxy_pending_count);
+		request->dispatched = true;
+		/* One list reference and one temporary copyout reference. */
+		kref_get(&request->refs);
+		kref_get(&request->refs);
+		desc = (struct sbk_proxy_request){.id = request->id,
+			.index = request->index, .lane = request->lane};
+		spin_unlock_irqrestore(&c->proxy_lock, flags);
+		ret = copy_to_user(user, &desc, sizeof(desc)) ? -EFAULT : 0;
+		if (ret) {
+			bool removed = false;
+			spin_lock_irqsave(&c->proxy_lock, flags);
+			if (!list_empty(&request->link)) {
+				list_del_init(&request->link);
+				removed = true;
+			}
+			spin_unlock_irqrestore(&c->proxy_lock, flags);
+			if (removed) {
+				WRITE_ONCE(request->status, ret);
+				kref_put(&request->refs, sbk_proxy_free);
+				complete(&request->done);
+			}
+		}
+		kref_put(&request->refs, sbk_proxy_free);
+		return ret;
+	}
+}
+
+static int sbk_proxy_complete(struct sbk_context *c, void __user *user)
+{
+	struct sbk_proxy_completion done;
+	struct sbk_proxy_waiter *request, *found = NULL;
+	unsigned long flags;
+	void *address;
+	int ret;
+	if (copy_from_user(&done, user, sizeof(done)))
+		return -EFAULT;
+	if (!READ_ONCE(c->configured) || c->cfg.backend != SBK_BACKEND_RSOCKET_PROXY ||
+	    !done.id || done.reserved || done.status > 0 ||
+	    (done.status == 0 && !done.data))
+		return -EINVAL;
+	spin_lock_irqsave(&c->proxy_lock, flags);
+	list_for_each_entry(request, &c->proxy_inflight, link)
+		if (request->id == done.id) {
+			list_del_init(&request->link);
+			found = request;
+			break;
+		}
+	spin_unlock_irqrestore(&c->proxy_lock, flags);
+	if (!found)
+		return -ENOENT;
+	ret = atomic_read(&c->stopping) ? -ECANCELED : done.status;
+	if (!ret) {
+		address = kmap_local_page(found->page);
+		ret = copy_from_user(address, u64_to_user_ptr(done.data), PAGE_SIZE) ? -EFAULT : 0;
+		kunmap_local(address);
+	}
+	WRITE_ONCE(found->status, ret);
+	/* Drop the dispatcher's page pin before the owner can return it to the
+	 * fault handler. The anonymous-PTE provider requires an exclusive page. */
+	kref_put(&found->refs, sbk_proxy_free);
+	complete(&found->done);
+	return ret;
+}
+
+static void sbk_proxy_cancel(struct sbk_context *c)
+{
+	struct sbk_proxy_waiter *request;
+	unsigned long flags;
+	bool dispatched;
+	atomic_set(&c->stopping, 1);
+	wake_up_interruptible_all(&c->proxy_wait);
+	for (;;) {
+		spin_lock_irqsave(&c->proxy_lock, flags);
+		if (!list_empty(&c->proxy_pending))
+			request = list_first_entry(&c->proxy_pending, struct sbk_proxy_waiter, link);
+		else if (!list_empty(&c->proxy_inflight))
+			request = list_first_entry(&c->proxy_inflight, struct sbk_proxy_waiter, link);
+		else {
+			spin_unlock_irqrestore(&c->proxy_lock, flags);
+			break;
+		}
+		dispatched = request->dispatched;
+		kref_get(&request->refs);
+		list_del_init(&request->link);
+		if (!dispatched)
+			atomic_dec(&c->proxy_pending_count);
+		spin_unlock_irqrestore(&c->proxy_lock, flags);
+		WRITE_ONCE(request->status, -ECANCELED);
+		if (dispatched)
+			kref_put(&request->refs, sbk_proxy_free);
+		kref_put(&request->refs, sbk_proxy_free);
+		complete(&request->done);
+	}
+}
+
 /* Last VMA close can hold mmap_write_lock: destruction must not flush there. */
 static void sbk_destroy(struct work_struct *work)
 {
 	struct sbk_context *c = container_of(work, struct sbk_context, destroy);
 	unsigned long i;
-	atomic_set(&c->stopping, 1);
+	sbk_proxy_cancel(c);
 	/* Close admission, then join this region only; sibling regions stay live. */
 	sbk_owner_stop(&c->owner);
 	/* Shared transport survives destruction of any individual region. */
@@ -344,6 +543,17 @@ static void sbk_fetch_batch_reserved(struct sbk_entry **entries, unsigned int co
 			err = sbk_rdma_read_notify(c->rdma, lane == SBK_PRETRANSFER ? SBK_BACKGROUND : lane,
 				    pages, indices, count, c->has_region ? &c->region : NULL,
 				    &notify);
+		goto publish;
+	}
+	if (c->cfg.backend == SBK_BACKEND_RSOCKET_PROXY) {
+		if (request)
+			sbk_prefetch_posted(request);
+		for (i = 0; i < count; i++) {
+			err = sbk_proxy_fetch(c, pages[i], indices[i], lane);
+			if (err)
+				break;
+			sbk_batch_page_ready(&progress, i);
+		}
 		goto publish;
 	}
 	if (request)
@@ -550,6 +760,10 @@ static struct page *sbk_anon_get_page(void *cookie, struct vm_area_struct *vma,
 		ret = sbk_rdma_read_notify(c->rdma, lane, &page, &e->index, 1,
 				    c->has_region ? &c->region : NULL,
 				    &notify);
+	} else if (c->cfg.backend == SBK_BACKEND_RSOCKET_PROXY) {
+		if (prefetch)
+			sbk_prefetch_posted(&request);
+		ret = sbk_proxy_fetch(c, page, e->index, lane);
 	} else {
 		if (prefetch)
 			sbk_prefetch_posted(&request);
@@ -887,7 +1101,8 @@ static int sbk_configure(struct sbk_context *c, void __user *arg)
 	if (copy_from_user(&cfg, arg, sizeof(cfg)))
 		return -EFAULT;
 	if (cfg.version != SBK_ABI_VERSION ||
-	    (cfg.backend != SBK_BACKEND_LOOPBACK_TEST && cfg.backend != SBK_BACKEND_RDMA) ||
+	    (cfg.backend != SBK_BACKEND_LOOPBACK_TEST && cfg.backend != SBK_BACKEND_RDMA &&
+	     cfg.backend != SBK_BACKEND_RSOCKET_PROXY) ||
 	    !cfg.pages || cfg.pages > SBK_MAX_PAGES || cfg.reserved ||
 	    !cfg.prefetch_workers || cfg.prefetch_workers > SBK_MAX_WORKERS ||
 	    !cfg.background_workers || cfg.background_workers > SBK_MAX_WORKERS ||
@@ -896,10 +1111,15 @@ static int sbk_configure(struct sbk_context *c, void __user *arg)
 	    (cfg.source_address & ~PAGE_MASK) ||
 	    (cfg.test_fail_page != SBK_NO_FAILURE && cfg.test_fail_page >= cfg.pages))
 		return -EINVAL;
-	if (cfg.backend == SBK_BACKEND_RDMA) {
+	if (cfg.backend == SBK_BACKEND_RDMA ||
+	    (cfg.backend == SBK_BACKEND_RSOCKET_PROXY && c->rdma)) {
 		if (!sbk_rdma_ready(c->rdma, (c->has_region || c->unbound_region) ? 0 : cfg.pages) ||
 		    (c->has_region && c->region.pages != cfg.pages) || cfg.test_delay_us ||
 		    cfg.test_fail_page != SBK_NO_FAILURE || cfg.source_address)
+			return -EINVAL;
+	} else if (cfg.backend == SBK_BACKEND_RSOCKET_PROXY) {
+		if (c->rdma || cfg.source_address || cfg.test_delay_us ||
+		    cfg.test_fail_page != SBK_NO_FAILURE || c->has_region || c->unbound_region)
 			return -EINVAL;
 	} else if (c->rdma ||
 	    check_mul_overflow((unsigned long)cfg.pages, PAGE_SIZE, &bytes) ||
@@ -1598,10 +1818,14 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 #endif
 	if (cmd == SBK_IOC_IMPORT_PS)
 		return sbk_import_ps(f, user);
+	if (cmd == SBK_IOC_PROXY_NEXT)
+		return sbk_proxy_next(f, user);
+	if (cmd == SBK_IOC_PROXY_COMPLETE)
+		return sbk_proxy_complete(c, user);
 	mutex_lock(&c->control);
 	switch (cmd) {
 	case SBK_IOC_CAPABILITIES:
-		caps.features |= SBK_FEATURE_PARALLEL_PS | SBK_FEATURE_PS_SLICE | SBK_FEATURE_PARALLEL_EXPORT | SBK_FEATURE_DMA_MR | SBK_FEATURE_REMOTE_PREARM;
+		caps.features |= SBK_FEATURE_PARALLEL_PS | SBK_FEATURE_PS_SLICE | SBK_FEATURE_PARALLEL_EXPORT | SBK_FEATURE_DMA_MR | SBK_FEATURE_REMOTE_PREARM | SBK_FEATURE_RSOCKET_PROXY;
 		if (sbk_session_dispatch_enabled())
 			caps.features |= SBK_FEATURE_SESSION_DISPATCH;
 #ifdef CONFIG_SWIFTBATON_PTE
@@ -1785,7 +2009,7 @@ static long sbk_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		ret = copy_to_user(user, &p, sizeof(p)) ? -EFAULT : 0;
 		break;
 	case SBK_IOC_CANCEL:
-		atomic_set(&c->stopping, 1);
+		sbk_proxy_cancel(c);
 		/* A region only cancels itself; catalog controller cancels all views. */
 		if (!c->has_region && !c->unbound_region)
 			sbk_rdma_cancel(c->rdma);
@@ -1853,6 +2077,11 @@ static int sbk_open(struct inode *inode, struct file *file)
 	}
 #endif
 	mutex_init(&c->control);
+	spin_lock_init(&c->proxy_lock);
+	INIT_LIST_HEAD(&c->proxy_pending);
+	INIT_LIST_HEAD(&c->proxy_inflight);
+	init_waitqueue_head(&c->proxy_wait);
+	atomic_set(&c->proxy_pending_count, 0);
 	sbk_owner_init(&c->owner);
 	file->private_data = c;
 	return 0;
@@ -1877,9 +2106,21 @@ static int sbk_release(struct inode *inode, struct file *file)
 	kref_put(&c->refs, sbk_release_ref);
 	return 0;
 }
+static __poll_t sbk_poll(struct file *file, poll_table *wait)
+{
+	struct sbk_context *c = file->private_data;
+	poll_wait(file, &c->proxy_wait, wait);
+	if (atomic_read(&c->stopping))
+		return EPOLLERR | EPOLLHUP;
+	if (READ_ONCE(c->configured) && c->cfg.backend == SBK_BACKEND_RSOCKET_PROXY &&
+	    atomic_read(&c->proxy_pending_count))
+		return EPOLLIN | EPOLLRDNORM;
+	return 0;
+}
 static const struct file_operations sbk_fops = {
 	.owner = THIS_MODULE, .open = sbk_open, .release = sbk_release,
-	.mmap = sbk_mmap, .unlocked_ioctl = sbk_ioctl, .llseek = no_llseek,
+	.mmap = sbk_mmap, .unlocked_ioctl = sbk_ioctl, .poll = sbk_poll,
+	.llseek = no_llseek,
 };
 static struct miscdevice sbk_device = {
 	.minor = MISC_DYNAMIC_MINOR, .name = "swiftbaton_k", .mode = 0600,
