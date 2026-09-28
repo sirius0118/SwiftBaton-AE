@@ -674,7 +674,7 @@ int rdma_read_pretransfer(struct resources *res, struct data_buffer *pre_mr, int
     int max_wr_queue_size = 100;
     if (!rx)
         return -1;
-    if (opts.sb_pclive_refresh && type == 1)
+    if ((opts.sb_pclive_refresh || opts.sb_rsocket_as) && type == 1)
         return pclive_rsocket_initial(rx);
     total_length = rx->length;
     mr = rx->mr;

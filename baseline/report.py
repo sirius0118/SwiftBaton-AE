@@ -45,6 +45,18 @@ for path in a.runs:
         delta = json.loads((root / 'pclive-delta-validation.json').read_text())
         if delta.get('transport') == 'rsocket':
             transport = 'rsocket PS + native ibverbs AS'
+    if label in ('pclive', 'postcopy', 'hybrid') and (root / 'rsocket-as-validation.json').exists():
+        validation = json.loads((root / 'rsocket-as-validation.json').read_text())
+        if validation.get('transport') != 'rsocket direct-write AS':
+            p.error('invalid rsocket AS validation: ' + str(root))
+        if (validation.get('ps_snapshot') and validation.get('image_phases') and
+                all(phase.get('transport') == 'rsocket'
+                    for phase in validation['image_phases'])):
+            transport = 'rsocket images + PS + AS'
+        else:
+            transport = ('rsocket PS + AS + native ibverbs images' if label == 'pclive' else
+                         'rsocket AS + native ibverbs images' if label == 'postcopy' else
+                         'rsocket AS + native ibverbs PS/images')
     gaps = json.loads((root / 'success-gap-metrics.json').read_text())
     recovery = json.loads((root / 'recovery-metrics.json').read_text())
     events = [json.loads(line) for line in (root / 'events.jsonl').read_text().splitlines()]
@@ -71,4 +83,4 @@ for label, transport, gap, ops, start, confirmed, root in rows:
     ttr = ('%.3f / %.3f' % (start, confirmed)) if start is not None else 'unavailable'
     print('| %s | %s | %.3f | %.0f | %s | `%s` |' %
           (label, transport, gap, ops, ttr, root))
-print('\nThe algorithms currently use different RDMA APIs; these are end-to-end observations, not a transport-normalized speedup claim.')
+print('\nU baseline bulk payloads use rsocket; remote-fork retains kernel RDMA. These are single end-to-end observations, not transport-normalized speedup estimates.')

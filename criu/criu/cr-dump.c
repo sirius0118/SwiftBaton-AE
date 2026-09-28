@@ -3051,7 +3051,7 @@ int cr_dump_tasks(pid_t pid)
 	/* A live rsocket listener adds a thread. Start it only after CRIU has
 	 * finished entering and dumping mount namespaces: setns(mnt) rejects a
 	 * process that still shares its fs_struct with another thread. */
-	if (opts.sb_pclive_refresh) {
+	if (opts.sb_pclive_refresh || opts.sb_rsocket_as) {
 		struct sockaddr_in local = {0};
 		socklen_t local_length = sizeof(local);
 		char bind_ip[INET_ADDRSTRLEN];

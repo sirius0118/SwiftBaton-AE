@@ -42,11 +42,11 @@ was 328.775 ms; the stable target reference was 44.8k ops/s and TTR90 began
 6.35 GB over RDMA and observed a 362.427 ms gap and 31.920 s TTR90 start.
 Both are single runs, not a statistical speedup estimate. Indexed values
 were checked for presence and length, not individually bytewise checksummed.
-That older run used native ibverbs for the PS payload. The current rsocket
-version keeps the U/AS page-fault and background paths on native ibverbs;
-the PCLive PS snapshot payload is the part moved to rsocket so far.
+That older run used native ibverbs for the PS payload. Later builds moved
+both PS rounds, CRIU images and the demand, prefetch and background AS page
+paths to librdmacm rsockets. The old results below are retained as history.
 
-The current full rsocket run `sb_ae_20260928_091321` passed all 500,000
+The earlier rsocket-PS/native-AS run `sb_ae_20260928_091321` passed all 500,000
 indexed key lengths and the bytewise 8 MiB canary. Its first snapshot moved
 6,358,683,648 bytes in 2.257 seconds over four persistent lanes. The second
 round moved 73,654,272 bytes of metadata plus 992,985,088 bytes for 242,428
@@ -54,3 +54,17 @@ changed pages in 0.445 seconds, and exactly 242,428 resident pages were
 refreshed. The client-wide success gap was 410.560 ms; the stable target rate
 was 44,727 ops/s, and TTR90 began 2.430 seconds after service resumed.
 These are one-run end-to-end observations under the 25 Gbps NIC limit.
+
+The current full rsocket image/PS/AS trial `sb_ae_20260928_102412` passed
+all 500,000 indexed key lengths and the bytewise 8 MiB canary. Its first
+6,355,300,352-byte snapshot arrived in 2.219 s; the second round transferred
+73,617,408 metadata bytes and 942,702,592 changed payload bytes in 0.431 s,
+refreshing exactly 230,152 resident pages. Three independent AS rsocket lanes
+carried actual demand, adjacent prefetch and background pages; all image,
+snapshot and lane byte/ACK counts matched on both hosts. The client-wide
+success gap was 501.026 ms, the stable target rate 44,117 ops/s, and TTR90
+began 6.017 s after service resumed. This is a single end-to-end run, not an
+isolated transport speedup measurement. The source socket catalog is gathered
+before the second PS round; the PCLive-only late-established-socket fallback
+addresses a connection that appears before IS. The successful 500k run did
+not exercise this rare fallback, so it remains a separate validation limit.

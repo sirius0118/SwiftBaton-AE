@@ -893,6 +893,8 @@ pr_warn("执行到这\n");
 				opts.sb_image_rdma = strstr(buf + 11, "yes") != NULL;
 			}else if (!strncmp(buf, "parallel-transfer=", 18)) {
 				opts.sb_parallel_transfer = strstr(buf + 18, "yes") != NULL;
+			}else if (!strncmp(buf, "rsocket-as=", 11)) {
+				opts.sb_rsocket_as = !strncmp(buf + 11, "yes", 3);
 			}else if (!strncmp(buf, "serial-precopy-ack=", 19)) {
 				opts.sb_serial_precopy_ack = !strncmp(buf + 19, "yes", 3);
 			}else if (!strncmp(buf, "sync-fault-transport=", 21)) {
@@ -1082,6 +1084,8 @@ static int restore_using_req(int sk, CriuOpts *req)
 				opts.sb_image_rdma = strstr(buf + 11, "yes") != NULL;
 			}else if (!strncmp(buf, "parallel-transfer=", 18)) {
 				opts.sb_parallel_transfer = strstr(buf + 18, "yes") != NULL;
+			}else if (!strncmp(buf, "rsocket-as=", 11)) {
+				opts.sb_rsocket_as = !strncmp(buf + 11, "yes", 3);
 			}else if (!strncmp(buf, "serial-precopy-ack=", 19)) {
 				opts.sb_serial_precopy_ack = !strncmp(buf + 19, "yes", 3);
 			}else if (!strncmp(buf, "sync-fault-transport=", 21)) {

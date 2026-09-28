@@ -67,7 +67,8 @@ if not (a.execute or a.check):
 W.mkdir(parents=True,exist_ok=True)
 lock=(W/'run.lock').open('w');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
 binary=R/'build'/('criu-K-baseline' if a.baseline=='remote-fork' else
-                  'criu-U-pclive' if a.baseline=='pclive' else 'criu-U')/'criu/criu'
+                  'criu-U-pclive' if a.baseline=='pclive' else
+                  'criu-U-rsocket-as')/'criu/criu'
 sha=hashlib.sha256(binary.read_bytes()).hexdigest()
 def remote(host,program,args=()):
  command=['sudo','-n','python3','-c',program]+list(map(str,args))
@@ -175,6 +176,14 @@ try:
    q=subprocess.run([sys.executable,str(R/'baseline/pclive/verify_delta.py'),str(state.parent)],
                     stdout=log,stderr=subprocess.STDOUT)
   result['analysis']['verify_delta.py']=q.returncode
+ if a.baseline in ('pclive','postcopy','hybrid') and '--rsocket-as' in profile:
+  with (out/'verify_rsocket_as.py.log').open('w') as log:
+   command=[sys.executable,str(R/'baseline/as-rsocket/verify.py'),str(state.parent),
+            '--require-snapshot','--require-images-rsocket']
+   if a.baseline=='pclive':command+=['--allow-empty-page-lanes']
+   q=subprocess.run(command,
+                    stdout=log,stderr=subprocess.STDOUT)
+  result['analysis']['verify_rsocket_as.py']=q.returncode
  failed=[name for name,code in result['analysis'].items() if code]
  if failed:raise RuntimeError('Validation failed: '+', '.join(failed))
  result['success']=True

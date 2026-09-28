@@ -1,6 +1,7 @@
 {
   "pclive": [
-    "--image-rdma", "--u-precopy", "--parent-stage", "--pclive-refresh", "--fast-cutover",
+    "--image-rdma", "--u-precopy", "--parent-stage", "--pclive-refresh",
+    "--parallel-transfer", "--sync-fault-transport", "--rsocket-as", "--fast-cutover",
     "--records", "500000", "--field-length", "10240", "--threads", "32",
     "--duration", "90", "--warmup", "15", "--canary-mib", "8",
     "--runtime-snapshot", "--numa-node", "0", "--poststeady-seconds", "30",
@@ -9,6 +10,7 @@
   ],
   "postcopy": [
     "--image-rdma", "--u-precopy", "--parent-stage", "--parallel-transfer",
+    "--sync-fault-transport", "--rsocket-as",
     "--no-pretransfer", "--no-prefetch", "--no-hot-first", "--fast-cutover",
     "--records", "500000", "--field-length", "10240", "--threads", "32",
     "--duration", "90", "--warmup", "15", "--canary-mib", "8",
@@ -19,6 +21,7 @@
   ],
   "hybrid": [
     "--image-rdma", "--u-precopy", "--parent-stage", "--parallel-transfer",
+    "--sync-fault-transport", "--rsocket-as",
     "--no-prefetch", "--no-hot-first", "--fast-cutover",
     "--records", "500000", "--field-length", "10240", "--threads", "32",
     "--duration", "90", "--warmup", "15", "--canary-mib", "8",

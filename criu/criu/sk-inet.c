@@ -310,18 +310,28 @@ static struct inet_sk_desc *gen_uncon_sk(int lfd, const struct fd_parms *p, int 
 			goto err;
 		}
 
-		if (info.tcpi_state != TCP_CLOSE) {
+		if (info.tcpi_state == TCP_CLOSE) {
+			sk->wqlen = info.tcpi_backoff;
+			if (dump_tcp_uncon_shutdown(lfd, sk))
+				goto err;
+		} else if (opts.sb_pclive_refresh && info.tcpi_state == TCP_ESTABLISHED &&
+			   sk->src_port && sk->dst_port) {
+			/* PCLive's resident refresh leaves the source running after the
+			 * namespace socket scan. A connection accepted during that window
+			 * is absent from the old inet_diag table. At IS the task is seized:
+			 * use the FD's current endpoints and TCP_INFO, then let the normal
+			 * TCP repair dump capture its queues and sequence state. */
+			pr_info("PCLive late TCP socket ino=%lu state=%u\n",
+				(unsigned long)p->stat.st_ino, info.tcpi_state);
+			sk->state = TCP_ESTABLISHED;
+		} else {
 			pr_err("Socket state %d obtained but expected %d\n", info.tcpi_state, TCP_CLOSE);
 			goto err;
 		}
-
-		sk->wqlen = info.tcpi_backoff;
-
-		if (dump_tcp_uncon_shutdown(lfd, sk))
-			goto err;
 	}
 
-	sk->state = TCP_CLOSE;
+	if (proto != IPPROTO_TCP || sk->state != TCP_ESTABLISHED)
+		sk->state = TCP_CLOSE;
 
 	sk_collect_one(sk->sd.ino, sk->sd.family, &sk->sd, ns);
 

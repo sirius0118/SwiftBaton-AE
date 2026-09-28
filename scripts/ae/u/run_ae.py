@@ -46,6 +46,7 @@ parser.add_argument('--no-hot-first', action='store_true', help='Ablation: use a
 parser.add_argument('--no-pretransfer', action='store_true', help='Ablation: send an empty PS control snapshot, no application page payload')
 parser.add_argument('--serial-precopy-ack', action='store_true', help='Ablation: scan PS installation acknowledgements on the source demand thread')
 parser.add_argument('--sync-fault-transport', action='store_true', help='Ablation: synchronous PF transport with the old shared client lock')
+parser.add_argument('--rsocket-as', action='store_true', help='Baseline: three independent rsocket direct-write AS lanes')
 parser.add_argument('--rdma-mtu', type=int, choices=[256,512,1024,2048,4096], help='Optional endpoint MTU ceiling; default negotiates active MTUs')
 parser.add_argument('--fault-trace', action='store_true', help='Buffer per-request transport timestamps and emit after AS; no disk I/O on the fault path')
 parser.add_argument('--spin-lifecycle', action='store_true', help='Experimental busy-wait lifecycle gate with pending-writer priority')
@@ -79,6 +80,8 @@ parser.add_argument('--canary-mib', type=int, default=0, help='Immutable data fo
 opts = parser.parse_args()
 if opts.defer_fault_credits and (not opts.parallel_transfer or opts.sync_fault_transport):
     parser.error('--defer-fault-credits requires asynchronous --parallel-transfer')
+if opts.rsocket_as and not (opts.parallel_transfer and opts.sync_fault_transport):
+    parser.error('--rsocket-as requires --parallel-transfer --sync-fault-transport')
 if opts.serial_ps_prepare and not opts.parent_stage:
     parser.error('--serial-ps-prepare requires --parent-stage')
 if opts.numa_node is not None and not (opts.parent_stage and opts.runtime_snapshot):
@@ -112,7 +115,7 @@ if opts.kernel_trace and (not opts.page_probe or not opts.fault_trace):
     parser.error('--kernel-trace requires --page-probe and --fault-trace')
 if opts.memory_children and not opts.parallel_transfer:
     parser.error('multi-process validation requires --parallel-transfer')
-if (opts.no_prefetch or opts.no_hot_first or opts.no_pretransfer or opts.serial_precopy_ack or opts.sync_fault_transport or opts.fault_trace or opts.reader_preferred_lock or opts.fixed_ready_scan or opts.serial_prefetch_install or opts.serial_background_install or opts.no_bg_fault_assist or opts.bg_round_robin or opts.install_trace or opts.compact_bg_wire) and not opts.parallel_transfer:
+if (opts.no_prefetch or opts.no_hot_first or opts.no_pretransfer or opts.serial_precopy_ack or opts.sync_fault_transport or opts.rsocket_as or opts.fault_trace or opts.reader_preferred_lock or opts.fixed_ready_scan or opts.serial_prefetch_install or opts.serial_background_install or opts.no_bg_fault_assist or opts.bg_round_robin or opts.install_trace or opts.compact_bg_wire) and not opts.parallel_transfer:
     parser.error('Path ablations require --parallel-transfer')
 if opts.parallel_transfer and not opts.u_precopy:
     parser.error('--parallel-transfer requires --u-precopy')
@@ -159,7 +162,7 @@ if opts.parallel_transfer:
     precopy_config += f'parallel-transfer=yes\ninstall-workers={opts.install_workers}\nbatch-pages={opts.batch_pages}\nbg-segment-pages={opts.bg_segment_pages}\ncopy-workers={opts.copy_workers}\nfault-read-batch={opts.fault_read_batch}\nfault-install-workers={opts.fault_install_workers}\nfault-workers={opts.fault_workers}\nprefetch-workers={opts.prefetch_workers}\n'
 if opts.rdma_mtu:
     precopy_config += f'rdma-mtu={opts.rdma_mtu}\n'
-for option in ['no_prefetch', 'no_hot_first', 'no_pretransfer', 'serial_precopy_ack', 'sync_fault_transport','fault_trace','reader_preferred_lock','spin_lifecycle','fixed_ready_scan','serial_prefetch_install','serial_background_install','no_bg_fault_assist','bg_round_robin','install_trace','compact_bg_wire','serial_ps_prepare','defer_fault_credits']:
+for option in ['no_prefetch', 'no_hot_first', 'no_pretransfer', 'serial_precopy_ack', 'sync_fault_transport','rsocket_as','fault_trace','reader_preferred_lock','spin_lifecycle','fixed_ready_scan','serial_prefetch_install','serial_background_install','no_bg_fault_assist','bg_round_robin','install_trace','compact_bg_wire','serial_ps_prepare','defer_fault_credits']:
     if getattr(opts, option):
         precopy_config += option.replace('_', '-') + '=yes\n'
 if opts.stage_max_mb < 0 or opts.stage_max_mb > 65536 or (opts.stage_max_mb and not opts.parent_stage):
@@ -379,7 +382,9 @@ try:
         active = cmd(host, ['python3', '-c', preflight])
         if active:
             raise RuntimeError(f'{host} has existing CRIU tasks {active}; finish or recover them before starting another migration')
-    hashes = {host: cmd(host, ['sha256sum', str(BASE / 'build/criu-U/criu/criu')]).split()[0]
+    # The baseline runner may temporarily select a dedicated CRIU binary.
+    # Record what the daemon will actually execute, not the sealed U build.
+    hashes = {host: cmd(host, ['sha256sum', '/usr/bin/criu']).split()[0]
               for host in ['knode2', 'knode3']}
     if hashes['knode2'] != hashes['knode3']:
         raise RuntimeError('Source and destination CRIU binaries differ')
@@ -565,7 +570,7 @@ try:
           (['--pclive-refresh'] if opts.pclive_refresh else []) +
           (['--parallel-transfer', '--install-workers', str(opts.install_workers),
             '--batch-pages', str(opts.batch_pages), '--bg-segment-pages', str(opts.bg_segment_pages), '--copy-workers', str(opts.copy_workers), '--fault-read-batch', str(opts.fault_read_batch), '--fault-install-workers', str(opts.fault_install_workers), '--fault-workers', str(opts.fault_workers), '--prefetch-workers', str(opts.prefetch_workers)] if opts.parallel_transfer else []) +
-          ['--' + option.replace('_', '-') for option in ['no_prefetch', 'no_hot_first', 'no_pretransfer','sync_fault_transport','fault_trace','reader_preferred_lock','spin_lifecycle','fixed_ready_scan','serial_prefetch_install','serial_background_install','no_bg_fault_assist','bg_round_robin','install_trace','compact_bg_wire','serial_ps_prepare','defer_fault_credits'] if getattr(opts, option)] +
+          ['--' + option.replace('_', '-') for option in ['no_prefetch', 'no_hot_first', 'no_pretransfer','sync_fault_transport','rsocket_as','fault_trace','reader_preferred_lock','spin_lifecycle','fixed_ready_scan','serial_prefetch_install','serial_background_install','no_bg_fault_assist','bg_round_robin','install_trace','compact_bg_wire','serial_ps_prepare','defer_fault_credits'] if getattr(opts, option)] +
           (['--rdma-mtu',str(opts.rdma_mtu)] if opts.rdma_mtu else []) +
           (['--prefetch-window',str(opts.prefetch_window)] if opts.parallel_transfer else []) +
           (['--page-trace', str(OUT / 'page-trace.csv')] if opts.page_trace else []))

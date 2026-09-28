@@ -30,6 +30,7 @@
 #include "sb-trace.h"
 #include "sb-rdma-tx.h"
 #include "sb-rdma-write.h"
+#include "sb-rsocket-as.h"
 #include "sb-install-queue.h"
 #include "sb-bg-install.h"
 #include "sb-lifecycle.h"
@@ -279,6 +280,13 @@ static void putv(struct resources *r, const struct write_part *parts, unsigned c
     struct ibv_wc wc;
     uint64_t started = now_ns(), spins = 0;
     int rc;
+    if (opts.sb_rsocket_as) {
+        int lane = r == &PF_res ? SB_RSOCKET_PF :
+                   r == &FT_res ? SB_RSOCKET_FT :
+                   r == &TS_res ? SB_RSOCKET_BG : -1;
+        if (sb_rsocket_as_putv(lane, parts, count)) die("rsocket AS write");
+        return;
+    }
     if (sb_rdma_write_chain(parts,count,r->remote_props.addr,r->remote_props.rkey,PROTOCOL_MAGIC,wr,sg))
         die("RDMA write bounds");
     rc = ibv_post_send(r->qp, wr, &bad);
@@ -324,12 +332,15 @@ static void fault_stats(const char *side, const struct sb_rdma_tx *tx)
 int sb_parallel_negotiate(int socket)
 {
     struct { uint64_t magic; uint32_t version, enabled; } local = {
-        PROTOCOL_MAGIC, 7, opts.sb_parallel_transfer | (opts.sb_no_prefetch << 1) |
-        (opts.sb_no_hot_first << 2) | (opts.sb_no_pretransfer << 3) }, remote;
+        PROTOCOL_MAGIC, opts.sb_rsocket_as ? 8 : 7,
+        opts.sb_parallel_transfer | (opts.sb_no_prefetch << 1) |
+        (opts.sb_no_hot_first << 2) | (opts.sb_no_pretransfer << 3) |
+        (opts.sb_rsocket_as << 4) }, remote;
     if (sync_transfer(socket, &local, sizeof(local), true) ||
         sync_transfer(socket, &remote, sizeof(remote), false)) return -1;
     if (memcmp(&local, &remote, sizeof(local)) ||
         (opts.sb_defer_fault_credits && (!opts.sb_parallel_transfer || opts.sb_sync_fault_transport)) ||
+        (opts.sb_rsocket_as && (!opts.sb_parallel_transfer || !opts.sb_sync_fault_transport)) ||
         (!opts.sb_parallel_transfer && (opts.sb_no_prefetch || opts.sb_no_hot_first || opts.sb_no_pretransfer)) ||
         (opts.sb_parallel_transfer && (!opts.sb_u_precopy || !opts.sb_image_rdma))) {
         pr_err("SB_TRANSFER incompatible peer/options; requires u-precopy and image-rdma\n");
@@ -961,6 +972,7 @@ int sb_parallel_server(int socket)
     }
     if (sync_transfer(socket, &count, sizeof(count), true) ||
         sync_transfer(socket, vpidset, count * sizeof(*vpidset), true)) return -1;
+    if (opts.sb_rsocket_as && sb_rsocket_as_start(socket, 1, opts.port)) return -1;
     pr_info("SB_TRANSFER source copy_workers_per_process=%u batch_pages=%u processes=%u\n",
             copy_workers, batch_pages, count);
     pr_info("SB_TRANSFER policy pretransfer=%u prefetch=%u hot_first=%u\n",
@@ -994,6 +1006,7 @@ int sb_parallel_server(int socket)
                 (unsigned long long)pidset[p],lane,(unsigned long long)copied,active);
             __atomic_store_n(&q->stop, 1, __ATOMIC_RELEASE);
         }
+    sb_rsocket_as_report("source");
     return 0;
 }
 
@@ -1611,6 +1624,7 @@ int sb_parallel_client(int socket)
     pthread_t demand[MAX_PROCESS], prefetch, background, precopy, fault_tx_thread, fault_dispatch_thread;
     if (sync_transfer(socket, &count, sizeof(count), false) || count != (unsigned)item_num || count > MAX_PROCESS ||
         sync_transfer(socket, peers, count * sizeof(*peers), false)) return -1;
+    if (opts.sb_rsocket_as && sb_rsocket_as_start(socket, 0, opts.port)) return -1;
     if (sb_uffd_lifecycle_start()) return -1;
     sb_trace("transfer.target_directory_begin");
     bg_directory_init();
@@ -1697,6 +1711,7 @@ int sb_parallel_client(int socket)
             (unsigned long long)target_copied[SB_BACKGROUND],
             (unsigned long long)(target_existing[0] + target_existing[1] + target_existing[2]), installers.workers,
             (unsigned long long)(target_discarded[0] + target_discarded[1] + target_discarded[2]));
+    sb_rsocket_as_report("target");
     if (lifecycle_result) return -1;
     return 0;
 }

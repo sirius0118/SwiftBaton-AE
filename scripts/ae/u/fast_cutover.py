@@ -31,7 +31,10 @@ def command(argv, accepted=(0,)):
     p = subprocess.run(argv, capture_output=True, text=True, timeout=12)
     if p.returncode not in accepted:
         raise RuntimeError(f'{argv[0]} exited {p.returncode}: {p.stderr}')
-    if p.returncode == 1 and '0 flow entries have been deleted' not in p.stderr:
+    # conntrack-tools versions report an empty selection with either message.
+    if p.returncode == 1 and not any(marker in p.stderr for marker in
+                                      ('0 flow entries have been deleted',
+                                       "Operation failed: such conntrack doesn't exist")):
         raise RuntimeError(f'{argv[0]} did not confirm an empty conntrack selection: {p.stderr}')
     return dict(returncode=p.returncode, stderr=p.stderr.strip())
 
