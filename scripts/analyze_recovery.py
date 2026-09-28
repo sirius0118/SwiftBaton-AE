@@ -120,7 +120,7 @@ def analyze(root, reference_event='source_retired'):
         'service_anchor_elapsed_seconds':anchor,'anchor_definition':'End of first positive operation-count interval following the recorded migration zero run. Client-observed service, not exact Tasks resumed or first request completion.',
         'zero_run_elapsed_seconds':[z0,z1],'same_timestamp_samples_coalesced':duplicates,'references':references,'recovery':{},'first_windows':{},'relapses':{},
         'primary_reference':'target_final_10s','ttr_valid':references['target_final_10s']['stable'],
-        'definitions':{'smoothing_seconds':[.1,.5],'sustain_seconds':1.,'threshold_fractions':[.5,.8,.9],
+        'definitions':{'smoothing_seconds':[.1,.5],'sustain_seconds':1.,'threshold_fractions':[.5,.8,.9,1.],
         'gap_limit_seconds':.05,'missing_data':'No missing intervals are filled. Same-millisecond samples retain the final cumulative operation count at that timestamp. Threshold windows containing gaps >50ms are invalid. Fixed-window operations use complete observed intervals only.',
         'purpose':'Application throughput recovery, not minimum AS duration. Final target reference is retrospective and can differ from source capacity. Single-run comparison cannot establish causal strategy benefit.'}}
     for label,ref in references.items():
@@ -128,10 +128,10 @@ def analyze(root, reference_event='source_retired'):
         result['relapses'][label]={}
         for width in [.1,.5]:
             rates=rolling(times,counts,width)
-            result['recovery'][label][str(width)]={str(fraction):sustained(times,rates,anchor,ref['mean_ops_per_second']*fraction) for fraction in [.5,.8,.9]}
+            result['recovery'][label][str(width)]={str(fraction):sustained(times,rates,anchor,ref['mean_ops_per_second']*fraction) for fraction in [.5,.8,.9,1.]}
             result['relapses'][label][str(width)]={str(fraction):(None if value is None else
                 relapse_intervals(times,rates,anchor+value['confirmed_after_service_seconds'],ref['mean_ops_per_second']*fraction))
-                for fraction in [.5,.8,.9] for value in [result['recovery'][label][str(width)][str(fraction)]]}
+                for fraction in [.5,.8,.9,1.] for value in [result['recovery'][label][str(width)][str(fraction)]]}
         result['first_windows'][label]={str(seconds):interval_summary(times,counts,anchor,anchor+seconds,ref['mean_ops_per_second']) for seconds in [.1,.25,.5,1,3,5]}
     # Preserve the service-relative diagnostic while also reporting the paper's
     # downtime-start axis with the client's measured zero-run boundary.

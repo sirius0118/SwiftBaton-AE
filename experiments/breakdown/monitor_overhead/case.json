@@ -1,0 +1,26 @@
+{
+  "name": "breakdown-monitor-overhead",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "hot-sampling-on",
+      "parameters": {},
+      "options": {}
+    },
+    {
+      "name": "hot-sampling-off",
+      "parameters": {},
+      "options": {
+        "no_hot_first": true
+      }
+    }
+  ],
+  "note": "Paper \u00a75.5 approximation: disabling hot-first also bypasses hot snapshot generation. Compare pre-migration throughput only; this is not a pure A/D-bit sampling isolation."
+}

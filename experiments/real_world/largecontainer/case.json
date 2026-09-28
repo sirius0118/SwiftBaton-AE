@@ -1,0 +1,24 @@
+{
+  "name": "real-world-largecontainer",
+  "workload": "largecontainer",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20,
+    "large_mib": 4096,
+    "large_workers": 32,
+    "large_range_kib": 16,
+    "large_sleep_us": 10,
+    "large_thread_iops": 100000
+  },
+  "variants": [
+    {
+      "name": "zipf-099",
+      "parameters": {},
+      "options": {}
+    }
+  ],
+  "note": "Paper \u00a75.1: 4GiB, 32 workers. One process, Zipf range reads/writes, configurable sleep and per-worker IOPS cap. External 10ms service probe."
+}

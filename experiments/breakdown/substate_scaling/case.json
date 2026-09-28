@@ -1,0 +1,38 @@
+{
+  "name": "breakdown-substate",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "base",
+      "parameters": {},
+      "options": {}
+    },
+    {
+      "name": "memory-4g",
+      "parameters": {
+        "memory_children": 4,
+        "child_mib": 1024,
+        "child_workers": 1
+      },
+      "options": {}
+    },
+    {
+      "name": "fd-12k",
+      "parameters": {
+        "memory_children": 2,
+        "child_mib": 64,
+        "child_workers": 1,
+        "fd_groups": 400
+      },
+      "options": {}
+    }
+  ],
+  "note": "Paper Fig.11(b) partial substate stress: 4GiB extra anonymous memory and about 12K fixture FDs. 20K VMA/4096 UNIX/512 TCP/300 mounts exact fixtures remain separate work."
+}

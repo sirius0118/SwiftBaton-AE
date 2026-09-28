@@ -1,0 +1,56 @@
+{
+  "name": "robustness-write-ratio",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "0pct",
+      "parameters": {
+        "write_ratio": 0
+      },
+      "options": {}
+    },
+    {
+      "name": "20pct",
+      "parameters": {
+        "write_ratio": 0.2
+      },
+      "options": {}
+    },
+    {
+      "name": "40pct",
+      "parameters": {
+        "write_ratio": 0.4
+      },
+      "options": {}
+    },
+    {
+      "name": "60pct",
+      "parameters": {
+        "write_ratio": 0.6
+      },
+      "options": {}
+    },
+    {
+      "name": "80pct",
+      "parameters": {
+        "write_ratio": 0.8
+      },
+      "options": {}
+    },
+    {
+      "name": "100pct",
+      "parameters": {
+        "write_ratio": 1
+      },
+      "options": {}
+    }
+  ],
+  "note": "Paper Fig.10(c), update share 0\u2013100%."
+}

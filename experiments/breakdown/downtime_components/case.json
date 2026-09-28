@@ -1,0 +1,19 @@
+{
+  "name": "breakdown-downtime-components",
+  "workload": "redis",
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20
+  },
+  "variants": [
+    {
+      "name": "default",
+      "parameters": {},
+      "options": {}
+    }
+  ],
+  "note": "Paper Fig.11(a): dump, restore, network and client gap from instrumented phase markers."
+}

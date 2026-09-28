@@ -153,6 +153,70 @@ public class JdbcDBClient extends DB {
     }
   }
 
+  /** A migrated server cannot keep the client's old TCP/JDBC connection. */
+  private void reconnectAfterConnectionLoss(SQLException failure) {
+    boolean connectionFailure = false;
+    for (Throwable error = failure; error != null; error = error.getCause()) {
+      if (error instanceof SQLException) {
+        String state = ((SQLException) error).getSQLState();
+        if (state != null && state.startsWith("08")) {
+          connectionFailure = true;
+          break;
+        }
+      }
+      String message = error.getMessage();
+      if (message != null && (message.contains("Communications link failure")
+          || message.contains("Connection is closed")
+          || message.contains("connection was lost"))) {
+        connectionFailure = true;
+        break;
+      }
+    }
+    if (!connectionFailure) {
+      return;
+    }
+
+    for (PreparedStatement statement : cachedStatements.values()) {
+      try { statement.close(); } catch (SQLException ignored) { }
+    }
+    cachedStatements.clear();
+    for (Connection connection : conns) {
+      try { connection.close(); } catch (SQLException ignored) { }
+    }
+
+    String[] urls = props.getProperty(CONNECTION_URL, DEFAULT_PROP).split(";");
+    String user = props.getProperty(CONNECTION_USER, DEFAULT_PROP);
+    String passwd = props.getProperty(CONNECTION_PASSWD, DEFAULT_PROP);
+    long deadline = System.nanoTime() + 10_000_000_000L;
+    while (true) {
+      List<Connection> replacements = new ArrayList<Connection>(urls.length);
+      try {
+        for (String url : urls) {
+          Connection connection = DriverManager.getConnection(url, user, passwd);
+          connection.setAutoCommit(autoCommit);
+          replacements.add(connection);
+        }
+        conns = replacements;
+        System.err.println("JDBC reconnected after server migration");
+        return;
+      } catch (SQLException reconnectError) {
+        for (Connection connection : replacements) {
+          try { connection.close(); } catch (SQLException ignored) { }
+        }
+        if (System.nanoTime() >= deadline) {
+          System.err.println("JDBC reconnect timed out: " + reconnectError);
+          return;
+        }
+        try {
+          Thread.sleep(100);
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          return;
+        }
+      }
+    }
+  }
+
   /** Returns parsed int value from the properties if set, otherwise returns -1. */
   private static int getIntProperty(Properties props, String key) throws DBException {
     String valueStr = props.getProperty(key);
@@ -360,6 +424,7 @@ public class JdbcDBClient extends DB {
       return Status.OK;
     } catch (SQLException e) {
       System.err.println("Error in processing read of table " + tableName + ": " + e);
+      reconnectAfterConnectionLoss(e);
       return Status.ERROR;
     }
   }
@@ -397,6 +462,7 @@ public class JdbcDBClient extends DB {
       return Status.OK;
     } catch (SQLException e) {
       System.err.println("Error in processing scan of table: " + tableName + e);
+      reconnectAfterConnectionLoss(e);
       return Status.ERROR;
     }
   }
@@ -424,6 +490,7 @@ public class JdbcDBClient extends DB {
       return Status.UNEXPECTED_STATE;
     } catch (SQLException e) {
       System.err.println("Error in processing update to table: " + tableName + e);
+      reconnectAfterConnectionLoss(e);
       return Status.ERROR;
     }
   }
@@ -492,6 +559,7 @@ public class JdbcDBClient extends DB {
       return Status.UNEXPECTED_STATE;
     } catch (SQLException e) {
       System.err.println("Error in processing insert to table: " + tableName + e);
+      reconnectAfterConnectionLoss(e);
       return Status.ERROR;
     }
   }
@@ -512,6 +580,7 @@ public class JdbcDBClient extends DB {
       return Status.UNEXPECTED_STATE;
     } catch (SQLException e) {
       System.err.println("Error in processing delete to table: " + tableName + e);
+      reconnectAfterConnectionLoss(e);
       return Status.ERROR;
     }
   }
