@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SOURCE_CR=${CRIU_SOURCE:-$ROOT/native-criu/.build/upstream-criu}
 CRIU_BIN=${CRIU_BIN:-$SOURCE_CR/criu/criu}
-TARGET=${TARGET:-knode3}
+TARGET=${TARGET:-node3}
 SOURCE_RDMA_IP=${SOURCE_RDMA_IP:-10.0.0.62}
 TARGET_RDMA_IP=${TARGET_RDMA_IP:-10.0.0.63}
 TAG=sb-native-$(date +%Y%m%d-%H%M%S)-$$

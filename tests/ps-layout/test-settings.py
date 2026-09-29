@@ -36,12 +36,12 @@ class Settings(unittest.TestCase):
         with self.assertRaises(ValueError):validate_ps_arm_config(s,d,False)
         with self.assertRaises(ValueError):validate_ps_arm_config('',d,True)
     def test_capabilities(self):
-        hosts={h:dict(binary_sha256='a',installed_sha256='a',pageclient_sha256='a',daemons=[dict(name=n,sha256='a') for n in ('dockerd','containerd')],capabilities=dict(version=1,features=511),rdma_state='4: ACTIVE',rdma_gid='1234') for h in ('knode2','knode3')}
+        hosts={h:dict(binary_sha256='a',installed_sha256='a',pageclient_sha256='a',daemons=[dict(name=n,sha256='a') for n in ('dockerd','containerd')],capabilities=dict(version=1,features=511),rdma_state='4: ACTIVE',rdma_gid='1234') for h in ('node2','node3')}
         self.assertEqual(validate_preflight(hosts,16,True,True),[])
-        hosts['knode2']['capabilities']['features']=127
+        hosts['node2']['capabilities']['features']=127
         self.assertEqual(validate_preflight(hosts,16,True,True),[])
         for features in (127,255,383):
-            hosts['knode3']['capabilities']['features']=features
+            hosts['node3']['capabilities']['features']=features
             self.assertTrue(any('PS ARM preparation unavailable' in e for e in validate_preflight(hosts,16,True,True)))
             self.assertEqual(validate_preflight(hosts,16,True,False),[])
 if __name__=='__main__':unittest.main()

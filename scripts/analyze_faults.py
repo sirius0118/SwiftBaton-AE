@@ -142,7 +142,7 @@ def analyze(root):
   if transfer:
    ft_waits.append(dict(**wait,transfer=transfer,
     target_receive_after_event_ns=transfer['target_received_ns']-wait['first_fault_read_ns']))
- result=dict(run=root.name,binary=state['criu_sha256']['knode2'],transport=modes,
+ result=dict(run=root.name,binary=state['criu_sha256']['node2'],transport=modes,
   event_gate_reader_preferred=gate_policy,event_gate_wait_by_pid=gate,
   prefetch_window=prefetch_window,fixed_ready_scan=fixed_ready_scan,source_observation=source_observation,
   prefetch_installer=ft_installer,demand_installer=pf_installer,fault_read_batch=fault_read_batch,

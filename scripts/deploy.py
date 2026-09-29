@@ -5,7 +5,7 @@ import argparse,fcntl,json,os,shlex,subprocess
 R=Path(__file__).resolve().parents[1]
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--execute',action='store_true');a=p.parse_args()
 commands=[]
-for h in ('knode1','knode3'):
+for h in ('node1','node3'):
  commands.append(['rsync','-az','--exclude=.git/','--exclude=/build/','--exclude=/.venv/','--exclude=__pycache__/','--exclude=.DS_Store','-e','ssh -oBatchMode=yes',str(R)+'/',h+':'+str(R)+'/'])
  for mode in ('U','K'):
   commands.append(['rsync','-az','--rsync-path=mkdir -p '+shlex.quote(str(R/'build'/('criu-'+mode)/'criu'))+' && rsync',str(R/'build'/('criu-'+mode)/'criu/criu'),h+':'+str(R/'build'/('criu-'+mode)/'criu/criu')])
@@ -18,11 +18,11 @@ for f in ('build/criu-U/criu/criu','build/criu-K/criu/criu','build/YCSB/core/tar
 W=Path(os.environ.get('SB_AE_WORK_ROOT',str(R.parent/(R.name+'-work')))).resolve();W.mkdir(parents=True,exist_ok=True)
 lock=(W/'run.lock').open('w');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
 probe="import subprocess; p=subprocess.run(['pgrep','-x','criu'],capture_output=True); assert p.returncode==1,'Active CRIU'; assert not subprocess.check_output(['docker','ps','-aq','--filter','label=swiftbaton.ae=true'],text=True).strip(),'Retained AE containers'"
-for h in ('knode2','knode3'):
+for h in ('node2','node3'):
  cmd=['sudo','-n','python3','-c',probe]
- if h!='knode2':cmd=['ssh','-oBatchMode=yes',h,shlex.join(cmd)]
+ if h!='node2':cmd=['ssh','-oBatchMode=yes',h,shlex.join(cmd)]
  subprocess.run(cmd,check=True,timeout=30)
-for h in ('knode1','knode3'):
+for h in ('node1','node3'):
  guard="from pathlib import Path;p=Path("+repr(str(R))+");assert not p.exists() or not any(p.iterdir()) or ((p/'README.md').exists() and 'SwiftBaton' in (p/'README.md').read_text()),'Unrelated destination directory';p.mkdir(parents=True,exist_ok=True)"
  subprocess.run(['ssh','-oBatchMode=yes',h,shlex.join(['python3','-c',guard])],check=True,timeout=30)
 for cmd in commands:subprocess.run(cmd,check=True)

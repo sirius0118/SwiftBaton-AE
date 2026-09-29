@@ -6,7 +6,7 @@ The main entry points are `scripts/run.py`, the two mode-specific `run_ae.py` dr
 
 `criu/criu/sb-precopy.c` prepares PS snapshots and validates them against final soft-dirty/PFN information. `sb-stage.c` installs valid snapshots in a parent staging process for inheritance/remapping. `sb-vma-cache.c` and `sb-vma-monitor.bpf.c` implement PS-time VMA collection with mutation monitoring and final checks.
 
-`sb-transfer.c`, `sb-sched.c`, `sb-lifecycle.c` and the associated headers coordinate separate demand, prefetch, and background paths. Per-page states and lifecycle synchronization prevent duplicate ownership and handle mapping changes. The accepted profile uses one demand worker, one prefetch worker, a bounded prefetch window, parallel background copies/installers, and NUMA placement. Timing traces are buffered and emitted after the transfer stage rather than synchronously logged on each fault.
+`sb-transfer.c`, `sb-sched.c`, `sb-lifecycle.c` and the associated headers coordinate separate demand, prefetch, and background paths. Per-page states and lifecycle synchronization prevent duplicate ownership and handle mapping changes. The reference profile uses one demand worker, one prefetch worker, a bounded prefetch window, parallel background copies/installers, and NUMA placement. Timing traces are buffered and emitted after the transfer stage rather than synchronously logged on each fault.
 
 ## SwiftBaton-K
 
@@ -23,7 +23,7 @@ NUMA affinity and bounded BG4 are retained to favor demand latency. Increasing b
 
 ## Current source paths and optional acceleration
 
-The latest U/K drivers use `scripts/ae/{u,k}/buffered_cutover.py`,
+The current U/K drivers use `scripts/ae/{u,k}/buffered_cutover.py`,
 `packet_gate.py`, `conntrack_gate.py`, and `nat_bindings.py` to coordinate
 client traffic while changing the destination. The network lock is selected
 by the run profile; reviewers can inspect a case's exact options with

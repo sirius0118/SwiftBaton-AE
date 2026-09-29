@@ -19,7 +19,5 @@ still retains the fixture module. The ordinary SwiftBaton suite separately tests
 actual data fetching, fork/COW, mremap, protection, background installation,
 pretransfer, drain and cancellation.
 
-The first fixture revision incorrectly used bare ioctl numbers 1/2, which
-collided with filesystem commands handled before the driver's ioctl. Those
-runs failed the fixture and are retained as diagnostics; the current fixture
-uses typed `_IOW/_IOR` commands and is rerun against both kernels.
+The fixture uses typed `_IOW/_IOR` ioctl commands so they do not collide
+with filesystem commands dispatched before the driver's ioctl.

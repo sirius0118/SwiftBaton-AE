@@ -2,7 +2,7 @@
 # Full Redis container checkpoint/restore over a cross-host rsocket RDMA link.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TARGET=${TARGET:-knode3}
+TARGET=${TARGET:-node3}
 STOCK=${STOCK_CRIU:-$ROOT/native-criu/.build/upstream-criu/criu/criu}
 IMAGE=${SB_REDIS_IMAGE:-m.daocloud.io/docker.io/library/redis:latest}
 WORK=${SB_AE_WORK_ROOT:-$(cd "$ROOT/.." && pwd)-work}

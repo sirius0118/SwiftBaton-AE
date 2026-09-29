@@ -81,10 +81,10 @@ def build(mode):
     jobs = os.environ.get('SB_BUILD_JOBS', '12')
     subprocess.run(['make', '-C', str(output), '-j' + jobs, 'criu'], check=True)
     binary = output / 'criu/criu'
-    subprocess.run(['ssh', '-oBatchMode=yes', 'knode3',
+    subprocess.run(['ssh', '-oBatchMode=yes', 'node3',
                     'mkdir -p ' + str(binary.parent)], check=True)
-    subprocess.run(['rsync', '-az', str(binary), 'knode3:' + str(binary)], check=True)
-    subprocess.run(['ssh', '-oBatchMode=yes', 'knode3',
+    subprocess.run(['rsync', '-az', str(binary), 'node3:' + str(binary)], check=True)
+    subprocess.run(['ssh', '-oBatchMode=yes', 'node3',
                     'sha256sum ' + str(binary)], check=True)
     subprocess.run(['sha256sum', str(binary)], check=True)
 

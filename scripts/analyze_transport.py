@@ -19,7 +19,7 @@ catalog,start=record(source,'SB_TRANSFER catalog ')
 done,end=record(source,'SB_TRANSFER complete ')
 installed,_=record(target,'SB_TRANSFER installed ')
 assert state['parameters']['parallel_transfer']
-assert state['criu_sha256']['knode2']==state['criu_sha256']['knode3']
+assert state['criu_sha256']['node2']==state['criu_sha256']['node3']
 assert done['pages']==done['committed']==catalog['pages']
 assert done['precopy']==catalog['precopy_pending']
 assert sum(done[x] for x in ('precopy','demand','prefetch','background'))==done['pages']
@@ -29,7 +29,7 @@ if installed['existing']==0 and installed.get('discarded',0)==0:
 result={'source':done,'target':installed,'accounting_consistent':True,
         'all_three_lanes_exercised':all(done[x]>0 for x in ('demand','prefetch','background')),
         'catalog_to_final_ack_ms':(end-start)*1000 if end is not None and start is not None else None,
-        'binary_sha256':state['criu_sha256']['knode2'],
+        'binary_sha256':state['criu_sha256']['node2'],
         'note':'Counts are unique source ownership claims and target installation or lifecycle retirement outcomes. Fork fanout may install one received page in several descendant mappings; those copies are counted separately in lifecycle accounting. This is not per-fault latency, proof of hot-first speedup, or validation of dynamic VMAs or general multiprocess restore.'}
 if 'SB_TRANSFER prefetch_pipeline ' in source:
     pipeline,_=record(source,'SB_TRANSFER prefetch_pipeline ')

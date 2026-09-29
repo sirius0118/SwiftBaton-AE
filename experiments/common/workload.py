@@ -113,7 +113,7 @@ def wait_tcp(host, port, seconds=90):
     raise TimeoutError(f'{host}:{port} was not ready within {seconds}s')
 
 
-def prepare_database(kind, name, cmd, host='knode2'):
+def prepare_database(kind, name, cmd, host='node2'):
     if kind == 'mysql':
         sql = ('CREATE DATABASE IF NOT EXISTS ycsb; USE ycsb; '
                'CREATE TABLE IF NOT EXISTS usertable '
@@ -142,7 +142,7 @@ def stage_runtime_files(kind, name):
              'mysql': ['/var/lib/mysql']}.get(kind, [])
     for path in paths:
         source = subprocess.Popen(['docker', 'cp', name + ':' + path + '/.', '-'], stdout=subprocess.PIPE)
-        target = subprocess.Popen(['ssh', '-oBatchMode=yes', 'knode3',
+        target = subprocess.Popen(['ssh', '-oBatchMode=yes', 'node3',
                                    shlex.join(['docker', 'cp', '-', name + ':' + path])],
                                   stdin=source.stdout)
         source.stdout.close()

@@ -116,7 +116,7 @@ def analyze(root, reference_event='source_retired'):
     if reference_event != 'source_retired':
         references['target_final_10s']['reference_event_elapsed_seconds'] = \
             references['target_final_10s'].pop('migration_complete_elapsed_seconds')
-    result={'run':root.name,'binary':state['criu_sha256']['knode2'],'parameters':state['parameters'],
+    result={'run':root.name,'binary':state['criu_sha256']['node2'],'parameters':state['parameters'],
         'service_anchor_elapsed_seconds':anchor,'anchor_definition':'End of first positive operation-count interval following the recorded migration zero run. Client-observed service, not exact Tasks resumed or first request completion.',
         'zero_run_elapsed_seconds':[z0,z1],'same_timestamp_samples_coalesced':duplicates,'references':references,'recovery':{},'first_windows':{},'relapses':{},
         'primary_reference':'target_final_10s','ttr_valid':references['target_final_10s']['stable'],

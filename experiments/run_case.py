@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one experiment directory on knode2; keep every trial independently auditable."""
+"""Run one experiment directory on Node 2; keep every trial independently auditable."""
 from __future__ import annotations
 
 import argparse
@@ -40,7 +40,7 @@ def run(argv, **kwargs):
 
 
 def remote(host, argv, check=True, timeout=120):
-    command = argv if host == 'knode2' else ['ssh', '-oBatchMode=yes', host, shlex.join(argv)]
+    command = argv if host == 'node2' else ['ssh', '-oBatchMode=yes', host, shlex.join(argv)]
     p = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
     if check and p.returncode:
         raise RuntimeError(f'{host}: {shlex.join(argv)}: {p.stderr or p.stdout}')
@@ -50,21 +50,21 @@ def remote(host, argv, check=True, timeout=120):
 def ensure_build_path(mode, kind):
     if kind in ('mysql', 'voltdb'):
         binary = ROOT / 'build' / ('criu-' + mode.upper() + '-filelocks') / 'criu/criu'
-        target_ready = remote('knode3', ['sh', '-c',
+        target_ready = remote('node3', ['sh', '-c',
                                        'test -x ' + shlex.quote(str(binary)) + ' && echo yes'], check=False)
         if not binary.is_file() or target_ready != 'yes':
             run([sys.executable, str(EXPERIMENTS / 'build_filelocks_criu.py'), mode], timeout=1800)
-        hashes = {h: remote(h, ['sha256sum', str(binary)]).split()[0] for h in ('knode2', 'knode3')}
+        hashes = {h: remote(h, ['sha256sum', str(binary)]).split()[0] for h in ('node2', 'node3')}
         if len(set(hashes.values())) != 1:
             raise RuntimeError('Database CRIU binaries differ across hosts')
-        return str(binary), hashes['knode2']
+        return str(binary), hashes['node2']
     binary = ROOT / 'build' / ('criu-' + mode.upper()) / 'criu/criu'
     if not binary.is_file():
         raise RuntimeError('Build the repository source first: bash scripts/build.sh ' + mode.upper())
     local_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
-    target_hash = remote('knode3', ['sha256sum', str(binary)], check=False)
+    target_hash = remote('node3', ['sha256sum', str(binary)], check=False)
     if not target_hash or target_hash.split()[0] != local_hash:
-        raise RuntimeError('Stage the matching CRIU binary on knode3: python3 scripts/deploy.py --execute')
+        raise RuntimeError('Stage the matching CRIU binary on node3: python3 scripts/deploy.py --execute')
     return str(binary), local_hash
 
 
@@ -80,7 +80,7 @@ def swap_criu_link(host, binary):
 def select_criu(binary, expected):
     """Select a reviewed binary on both hosts and return exact old symlink targets."""
     before = {}
-    for host in ('knode2', 'knode3'):
+    for host in ('node2', 'node3'):
         current = remote(host, ['readlink', '/usr/bin/criu'])
         if not current: raise RuntimeError(host + ' CRIU is not a symlink')
         before[host] = current
@@ -110,7 +110,7 @@ def ensure_image(kind, dry_run=False):
     from common.workload import image
     ref = image(kind)
     if dry_run: return ref
-    if not remote('knode2', ['docker', 'image', 'inspect', '--format', '{{.Id}}', ref], check=False):
+    if not remote('node2', ['docker', 'image', 'inspect', '--format', '{{.Id}}', ref], check=False):
         dockerfile = EXPERIMENTS / 'real_world' / kind / 'Dockerfile'
         if not dockerfile.exists(): raise RuntimeError(f'No image {ref} and no Dockerfile {dockerfile}')
         if kind == 'largecontainer':
@@ -118,15 +118,15 @@ def ensure_image(kind, dry_run=False):
                  str(dockerfile.parent / 'largecontainer.c'), '-lm',
                  '-o', str(dockerfile.parent / 'largecontainer-static')], timeout=120)
         run(['docker', 'build', '-t', ref, '-f', str(dockerfile), str(dockerfile.parent)], timeout=1800)
-    source_id = remote('knode2', ['docker', 'image', 'inspect', '--format', '{{.Id}}', ref])
-    target_id = remote('knode3', ['docker', 'image', 'inspect', '--format', '{{.Id}}', ref], check=False)
+    source_id = remote('node2', ['docker', 'image', 'inspect', '--format', '{{.Id}}', ref])
+    target_id = remote('node3', ['docker', 'image', 'inspect', '--format', '{{.Id}}', ref], check=False)
     if target_id != source_id:
-        # Stream directly: Node3 /home is nearly full, while Docker's root is on /.
+        # Stream directly to avoid a large intermediate image file on Node 3.
         producer = subprocess.Popen(['docker', 'save', ref], stdout=subprocess.PIPE)
-        consumer = subprocess.Popen(['ssh', '-oBatchMode=yes', 'knode3', 'docker load'], stdin=producer.stdout)
+        consumer = subprocess.Popen(['ssh', '-oBatchMode=yes', 'node3', 'docker load'], stdin=producer.stdout)
         producer.stdout.close()
         if consumer.wait() or producer.wait(): raise RuntimeError('Image transfer failed: ' + ref)
-    if remote('knode3', ['docker', 'image', 'inspect', '--format', '{{.Id}}', ref]) != source_id:
+    if remote('node3', ['docker', 'image', 'inspect', '--format', '{{.Id}}', ref]) != source_id:
         raise RuntimeError('Source/target image ID mismatch: ' + ref)
     return ref
 
@@ -135,8 +135,8 @@ def stage_client(kind):
     if kind != 'largecontainer': return
     source = EXPERIMENTS / 'real_world' / kind / 'client.py'
     dest = str(source)
-    remote('knode1', ['mkdir', '-p', str(source.parent)])
-    run(['rsync', '-az', str(source), 'knode1:' + dest])
+    remote('node1', ['mkdir', '-p', str(source.parent)])
+    run(['rsync', '-az', str(source), 'node1:' + dest])
 
 
 def ensure_client_binding(kind):
@@ -176,15 +176,15 @@ def ensure_client_binding(kind):
             version_file.parent.mkdir(parents=True, exist_ok=True)
             version_file.write_text(source_hash + '\n')
     if not marker.exists(): raise RuntimeError('YCSB binding build did not produce ' + str(marker))
-    remote('knode1', ['mkdir', '-p', str(destination)])
+    remote('node1', ['mkdir', '-p', str(destination)])
     run(['rsync', '-az', str(destination / 'core'), str(destination / module),
          *([str(destination / 'mysql-connector-java.jar')] if kind == 'mysql' else []),
-         'knode1:' + str(destination) + '/'])
+         'node1:' + str(destination) + '/'])
 
 
 def stage_helpers(mode):
     source = ROOT / 'scripts/ae' / mode
-    for host in ('knode1', 'knode3'):
+    for host in ('node1', 'node3'):
         remote(host, ['mkdir', '-p', str(source)])
         run(['rsync', '-az', '--exclude=__pycache__', str(source) + '/', host + ':' + str(source) + '/'])
 
@@ -275,13 +275,14 @@ def main():
     if args.dry_run:
         print(json.dumps({'case': case['name'], 'image': ensure_image(case['workload'], True),
                           'commands': [c for _,_,c in commands]}, indent=2)); return
-    if os.uname().nodename.split('.')[0] != 'skv-node2':
-        raise SystemExit('Run the one-click script on knode2')
+    expected_host = os.environ.get('SB_AE_NODE2_HOSTNAME')
+    if expected_host and os.uname().nodename.split('.')[0] != expected_host:
+        raise SystemExit('This command must run on Node 2 (source/coordinator)')
     WORK.mkdir(parents=True, exist_ok=True)
     lock = (WORK / 'cluster.lock').open('w')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     image_ref = ensure_image(case['workload'])
-    image_id = remote('knode2', ['docker', 'image', 'inspect', '--format', '{{.Id}}', image_ref])
+    image_id = remote('node2', ['docker', 'image', 'inspect', '--format', '{{.Id}}', image_ref])
     case_sha256 = hashlib.sha256(case_file.read_bytes()).hexdigest()
     source_revision = run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True).stdout.strip()
     source_dirty = bool(run(['git', 'status', '--porcelain'], cwd=ROOT,
@@ -308,7 +309,7 @@ def main():
             state = None
             try:
                 requested_qos = float(variant.get('options', {}).get('qos_gbps', 25))
-                prior_qos = {host: qos_rate(host) for host in ('knode2', 'knode3')}
+                prior_qos = {host: qos_rate(host) for host in ('node2', 'node3')}
                 record['qos_before_gbps'] = prior_qos
                 record['qos_requested_gbps'] = requested_qos
                 for host in prior_qos: set_qos(host, requested_qos)

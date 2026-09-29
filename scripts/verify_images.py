@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run on knode2 after an RDMA-image migration, before cleanup."""
+"""Run on node2 after an RDMA-image migration, before cleanup."""
 import json
 import shlex
 import subprocess
@@ -15,14 +15,14 @@ files={{f.name:{{'bytes':f.stat().st_size,'sha256':hashlib.sha256(f.read_bytes()
 print(json.dumps({{'files':files,'filesystem':subprocess.check_output(['stat','-f','-c','%T',str(p)],text=True).strip()}}))
 '''
 result = {}
-for host in ['knode2', 'knode3']:
+for host in ['node2', 'node3']:
     args = ['sudo', '-n', 'python3', '-c', script]
-    if host != 'knode2':
+    if host != 'node2':
         args = ['ssh', '-oBatchMode=yes', host, shlex.join(args)]
     result[host] = json.loads(subprocess.check_output(args, text=True))
-result['equal'] = result['knode2']['files'] == result['knode3']['files']
-result['files_checked'] = len(result['knode2']['files'])
+result['equal'] = result['node2']['files'] == result['node3']['files']
+result['files_checked'] = len(result['node2']['files'])
 result['note'] = 'Byte checksums for CRIU input images; excludes diagnostic stats images generated after transfer.'
 print(json.dumps(result, indent=2))
 assert result['equal'] and result['files_checked'] > 0
-assert all(result[host]['filesystem'] == 'tmpfs' for host in ['knode2', 'knode3'])
+assert all(result[host]['filesystem'] == 'tmpfs' for host in ['node2', 'node3'])

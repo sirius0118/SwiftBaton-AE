@@ -1,7 +1,6 @@
 # Migration baselines
 
-These are runnable algorithm profiles and helpers for the prepared three-node
-cluster. They reuse the artifact's CRIU orchestration and Redis/YCSB workload;
+These are runnable algorithm profiles and helpers for the three-node testbed described in the [main README](../README.md). They reuse the artifact's CRIU orchestration and Redis/YCSB workload;
 they are prototypes of the listed algorithms, not independent ports of the
 original systems.
 
@@ -29,7 +28,7 @@ python3 baseline/native-criu/run_redis.py --help
 ```
 
 Remote-fork also requires the matching K module with the rsocket-proxy UAPI
-feature on knode3; `--check` reports if it is absent. No baseline script
+feature on Node 3; `--check` reports if it is absent. No baseline script
 loads or replaces a kernel module.
 
 The corresponding source and build scripts are under each profile directory.

@@ -2,9 +2,11 @@
 
 Source code for **SwiftBaton: Dependency-Aware Staged Reconstruction for Live Migration of Stateful Containers**, ACM ATC 2026.
 
-This artifact migrates a running Redis container from **knode2 to knode3**, while the modified YCSB client on **knode1** continues issuing requests. It includes both **SwiftBaton-U** and **SwiftBaton-K**, with pre-transfer, demand-fault transfer, adjacent prefetch, and hot-first background batch transfer. K uses a patched host kernel and a loadable module for direct RDMA reads and anonymous-page installation.
+The experiment uses three machines: **Node 1** runs the workload client, **Node 2** hosts the source container and coordinates the run, and **Node 3** receives the container. This is a role-based naming scheme; the machines can have any DNS names. The artifact includes **SwiftBaton-U** (userspace page installation) and **SwiftBaton-K** (kernel-assisted page installation). Both use pre-transfer, demand fetches, adjacent prefetch, and hot-first background batches. K also needs a patched kernel on Node 3 and a matching module on Nodes 2 and 3.
 
-The repository contains source and instructions. It does not contain precompiled programs, historical measurements, checkpoint images, or development reports. Build products are generated under `build/` and ignored by Git. Run results are written **outside the repository**, by default to `/home/k8s/SwiftBaton-AE-work/`.
+Only source and reproduction instructions belong in Git. Compiled programs, checkpoint images, logs, figures, and measurements are generated outside the tracked source. By default, a checkout named `SwiftBaton-AE` writes run data to its sibling directory `SwiftBaton-AE-work`.
+
+**Terms used below:** PS is the preparation stage while the source still runs; CT is the final checkpoint/cutover interval; AS is the stage after the destination resumes service. RDMA MR means a registered memory region, and TTR means time to recover application throughput.
 
 ## 1. Contents
 
@@ -19,52 +21,97 @@ The repository contains source and instructions. It does not contain precompiled
 | `experiments/` | One-command paper workloads, robustness/breakdown cases, and plotter |
 | `baseline/` | Native CRIU and four algorithm-profile baselines |
 | `tests/`, `kernel/tests/` | Source-level correctness and safety checks |
-| `configs/` | Accepted profiles and the prepared-cluster topology |
+| `configs/` | Reference experiment profiles and the provided testbed configuration |
 | `dependencies/` | Custom Docker and runtime source trees required for new-host provisioning |
 | `Fluid/` | Original management-plane source; the AE runner uses SSH instead |
 
-The two CRIU trees intentionally remain separate: the U implementation stays unchanged while K adds its own coordinator and MM integration. Do not mix binaries from different trees or builds between hosts. See [implementation details](docs/IMPLEMENTATION.md), [kernel setup](docs/KERNEL.md), and [component licenses](THIRD_PARTY.md).
+The U and K CRIU trees are built separately because K adds its own coordinator and memory-management integration. Use the same binary for a mode on Nodes 2 and 3. See [implementation details](docs/IMPLEMENTATION.md), [kernel setup](docs/KERNEL.md), and [component licenses](THIRD_PARTY.md).
 
-## 2. Prepared cluster
+## 2. Three-node setup
 
-Request access and a reserved three-node time window through the artifact submission's private discussion channel. Run the following coordinator commands on **knode2** as the prepared `k8s` account.
+The following names identify **roles**, not a particular cluster's hostnames.
+All commands in this guide run on **Node 2**, unless stated otherwise.
 
-| Role | SSH alias | Address | Current kernel |
+| Node | Role | Address in the provided AE testbed | Kernel requirement |
 | --- | --- | --- | --- |
-| Client | `knode1` | `10.0.0.61` | Java workload host |
-| Source | `knode2` | `10.0.0.62` | `5.15.167` |
-| Destination | `knode3` | `10.0.0.63` | `5.15.167-swiftbaton-k1` |
+| Node 1 | YCSB or other workload client | `10.0.0.61` | Java and client tools |
+| Node 2 | Source container and experiment coordinator | `10.0.0.62` | Linux 5.15.167 in the provided testbed |
+| Node 3 | Destination container | `10.0.0.63` | Patched `5.15.167-swiftbaton-k1` for K |
 
-The current setup has two NUMA nodes and ConnectX-6 RDMA, device `mlx5_1`, port 1, GID index 3, interface `ens4f1`. The driver and parts of U's transport use this fixed lab topology; editing `configs/lab.json` alone does not port the implementation. Both migration hosts need the same container image and the same CRIU binary for the selected mode.
+On Node 2, configure SSH aliases for the *roles* using your own hostnames or
+addresses. The scripts treat Node 2 as the local machine; they SSH to Node 1
+and Node 3. For example, add this to `~/.ssh/config` and replace the bracketed
+values:
 
-Prerequisites:
+```sshconfig
+Host node1
+    HostName <NODE_1_ADDRESS>
+    User <SSH_USER>
 
-- Noninteractive SSH from knode2 to knode1/knode3, known host keys, `sudo -n`, and Docker access.
-- The prepared custom Docker/containerd/runc stack and Docker experimental checkpoint support. Do not replace the shared services for a reviewer run.
-- For U: userfaultfd, privileged pagemap/soft-dirty access, page-idle tracking, and BPF syscall tracepoints for the selected VMA-cache profile. The older AccessCollector module is not required by this profile.
-- For K: the patched destination kernel and matching, already-loaded `swiftbaton_k` module on both migration hosts, with `session_dispatch=1`. The source may retain its stock kernel. [Kernel setup](docs/KERNEL.md) is an administrator provisioning step.
-- Python 3.8+, NumPy/Matplotlib, GCC, make, Java 8, Maven, rsync, numactl, redis-cli, iptables, conntrack, RDMA tools and `mlnx_qos`.
-- Ports 6390, 12346 and 4568, Docker subnet `172.30.52.0/24`, and container IP `172.30.52.3`; an ephemeral client cutover port is also used. Run one experiment at a time.
-- For the large profile, reserve at least 16 GiB available RAM per migration host and adequate tmpfs space. Keep at least 10 GiB free for local build/results; building a complete kernel/OFED tree needs substantially more disk space.
+Host node3
+    HostName <NODE_3_ADDRESS>
+    User <SSH_USER>
+```
 
-The prepared hosts use containerd 1.5.8 and runc 1.0.3. The development runtime source baselines included by the original artifact are not exact reconstructions of every installed daemon. The **supported reviewer quickstart is the prepared cluster**. For a new cluster, see [runtime provisioning](docs/RUNTIME.md); fresh-cluster installation is not an automatically validated path.
+Set up key-based authentication and known host keys, then confirm that both
+`ssh -o BatchMode=yes node1 true` and `ssh -o BatchMode=yes node3 true`
+succeed from Node 2. The account on each node must be able to use Docker and
+`sudo -n` for the commands in the runner. Choose an account and checkout
+location that resolves to the **same absolute path on all three nodes**; the deployment script stages Nodes 1 and 3.
+
+Nodes 2 and 3 in the provided AE testbed have two NUMA nodes and ConnectX-6
+RDMA (device `mlx5_1`, port 1, GID index 3, interface `ens4f1`). The IPs and
+device selection are reference settings, not meanings of the Node numbers. The
+current migration driver and parts of CRIU use these addresses and RDMA
+settings directly. A different cluster needs corresponding code/configuration
+changes as well as matching hardware; editing `configs/lab.json` alone is
+insufficient. [Runtime provisioning](docs/RUNTIME.md) explains the other
+host-level requirements.
+
+Before running, verify:
+
+- Nodes 2 and 3 have the same container image and the same CRIU binary for
+  the selected U or K mode.
+- Docker experimental checkpoint support and the matching custom
+  Docker/containerd/runc stack are available. On the provided testbed, keep
+  the existing services; the reviewer scripts do not replace them.
+- U has userfaultfd, pagemap/soft-dirty access, page-idle tracking, and BPF
+  syscall tracepoints for VMA monitoring.
+- K has the patched destination kernel and matching loaded `swiftbaton_k`
+  modules on Nodes 2 and 3, with `session_dispatch=1`. Node 2 can keep its
+  stock kernel. See [kernel setup](docs/KERNEL.md).
+- Python 3.8+, NumPy/Matplotlib, GCC, make, Java 8, Maven, rsync, numactl,
+  redis-cli, iptables, conntrack, RDMA tools, and `mlnx_qos` are available.
+- Ports 6390, 12346, and 4568 are free. The reference profile uses Docker
+  subnet `172.30.52.0/24` and container IP `172.30.52.3`; it also allocates
+  an ephemeral client-cutover port. Run only one experiment at a time.
+- For the larger Redis profile, reserve at least 16 GiB available RAM per
+  migration host, adequate tmpfs, and 10 GiB free for builds/results.
+  Building a kernel and OFED needs substantially more disk space.
+
+The supported quickstart uses the **provided, provisioned AE testbed**.
+Reviewers can request access through the artifact submission discussion.
+The included runtime source snapshots are not bit-for-bit reconstructions of
+every installed service (the provided hosts use containerd 1.5.8 and runc
+1.0.3). Provisioning a different cluster is a separate administrator task
+and has not been validated as a one-command installation path.
 
 ## 3. Clone and compile
 
 ```bash
-cd /home/k8s
+cd "$HOME"
 git clone https://github.com/sirius0118/SwiftBaton-AE.git
 cd SwiftBaton-AE
 ```
 
-If the prepared directory already exists, use it instead of cloning over it. For a new Ubuntu 20.04 build host, inspect the package installation commands and run them if needed:
+If the checkout already exists, use it instead of cloning over it. For a new Ubuntu 20.04 build host, inspect the package installation commands and run them if needed:
 
 ```bash
 bash scripts/install-build-deps.sh
 bash scripts/install-build-deps.sh --execute
 ```
 
-Build from source on knode2:
+Build from source on Node 2:
 
 ```bash
 bash scripts/build.sh U
@@ -79,7 +126,7 @@ Kernel/module builds, including the optional prepared-ARM and batch-accounting p
 
 ## 4. Stage and inspect
 
-Use the same absolute repository path on all three hosts. Preview, then copy source and locally compiled programs to knode1 and knode3:
+Preview deployment, then stage source and locally built programs from Node 2 to Nodes 1 and 3:
 
 ```bash
 python3 scripts/deploy.py
@@ -88,7 +135,7 @@ python3 scripts/deploy.py --execute
 
 Deployment checks that the migration hosts are idle. It leaves daemon services and installed CRIU symlinks unchanged. It copies built programs directly between machines; these files are never added to Git.
 
-The prepared Redis image is selected by its immutable local image ID in `configs/lab.json`. If using another compatible image, place the same image on both hosts and set `SB_REDIS_IMAGE` to its immutable ID or digest. The runner checks that it resolves to the same image ID on both hosts. It does not silently pull `latest`.
+The reference Redis image is selected by its immutable local image ID in `configs/lab.json`. If using another compatible image, place the same image on both hosts and set `SB_REDIS_IMAGE` to its immutable ID or digest. The runner checks that it resolves to the same image ID on both hosts. It does not silently pull `latest`.
 
 Check both modes without starting a workload or changing the CRIU selection:
 
@@ -115,22 +162,22 @@ python3 scripts/run.py U --profile smoke --execute
 python3 scripts/run.py K --profile smoke --execute
 ```
 
-The smoke profile uses 100,000 records with a 1,024-byte value, 16 clients, a 45-second workload, a 10-second warmup before migration, and an 8 MiB immutable canary. Reads/updates are each 50%, with the configured YCSB request distribution. Allow several minutes for loading, post-migration measurement, and validation.
+The smoke profile uses 100,000 records with a 1,024-byte value, 16 clients, a 75-second workload, a 10-second warmup before migration, and an 8 MiB immutable canary. Reads/updates are each 50%, with the configured YCSB request distribution. Allow several minutes for loading, post-migration measurement, and validation.
 
 The runner:
 
 1. Acquires the local experiment lock and confirms both hosts are idle.
 2. Temporarily selects the newly built U or K CRIU on both hosts, then verifies root/Docker/containerd resolve that exact binary.
-3. Creates labelled Redis containers, loads data, and starts YCSB on knode1.
-4. Prepares PS state, checkpoints on knode2, transfers CRIU images through RAM/RDMA, restores on knode3, and redirects client traffic with an experiment-specific iptables rule.
+3. Creates labelled Redis containers, loads data, and starts YCSB on Node 1.
+4. Prepares PS state, checkpoints on Node 2, transfers CRIU images through RAM/RDMA, restores on Node 3, and redirects client traffic with an experiment-specific iptables rule.
 5. Completes page transfer, retires the source, verifies records/sentinel/canary, and analyzes throughput/recovery. K requires all remote PTE markers and background work to drain before source retirement.
 6. Verifies image checksums while checkpoint images still exist, cleans the experiment, and restores the previous CRIU symlinks.
 
 Success ends with `SWIFTBATON_AE_PASS mode=U` or `mode=K`. The command prints both:
 
 ```text
-STATE=/home/k8s/SwiftBaton-AE-work/sb_ae_YYYYMMDD_HHMMSS/state.json
-RESULT=/home/k8s/SwiftBaton-AE-work/driver-U-YYYYMMDD_HHMMSS/result.json
+STATE=<checkout-parent>/SwiftBaton-AE-work/sb_ae_YYYYMMDD_HHMMSS/state.json
+RESULT=<checkout-parent>/SwiftBaton-AE-work/driver-U-YYYYMMDD_HHMMSS/result.json
 ```
 
 A printed state path alone does not indicate success. `result.json` must contain `success: true`, zero driver/analysis/cleanup return codes, and successful restoration on both hosts. The corresponding state must report successful migration, source retirement, and data checks. Keep results outside the source repository.
@@ -155,7 +202,7 @@ This uses **500,000 records × 10 KiB**, 32 clients, a 90-second workload, and a
 | PS budget | 8 GiB | 2 GiB; 64 MiB PS chunks |
 | Final MR registration | U path | 4 workers |
 
-These retain each implementation's accepted configuration and favor lower fault latency. They are **not a controlled U-versus-K comparison**: NUMA placement, PS budget, and timing boundaries differ. For a controlled comparison, equalize those settings and report the actual parameters. Do not claim a speedup from the default profiles alone.
+These are the current implementation defaults and favor lower fault latency. They are **not a controlled U-versus-K comparison**: NUMA placement, PS budget, and timing boundaries differ. For a controlled comparison, equalize those settings and report the actual parameters. Do not claim a speedup from the default profiles alone.
 
 To change a profile, edit `configs/profiles.json`, stage again, and retain that configuration alongside the generated results. Individual driver options are listed by `python3 scripts/ae/u/run_ae.py --help` and the corresponding K command. The main wrapper provides locking, binary selection, validation and cleanup; invoking a driver directly bypasses that wrapper.
 
@@ -175,17 +222,17 @@ python3 experiments/plot_all.py
 
 Each case's `case.json` sets the paper-scale parameters; `--smoke` is a
 smaller functional check. Missing service images are built from the included
-Dockerfiles and copied to knode3. The scripts use CRIU built from **this
+Dockerfiles on Node 2 and copied to Node 3. The scripts use CRIU built from **this
 checkout**; VoltDB/MySQL build an isolated variant from the same source for
 their file-lock and VMA requirements. Results and figures go to
-`/home/k8s/SwiftBaton-AE-benchmark-results/` by default, never inside Git.
+a sibling directory named `SwiftBaton-AE-benchmark-results/` by default, never inside Git.
 The case runner records its source revision, options, hashes, and validations.
 Run one case at a time. The [baseline guide](baseline/README.md) describes
 native CRIU, PCLive, post-copy, hybrid-copy, and remote-fork profiles.
 
 ## 8. RDMA bandwidth limit
 
-The prepared cluster uses a 25 Gbps hardware transmit cap on both hosts. An administrator can inspect or change it with:
+The provided testbed uses a 25 Gbps hardware transmit cap on Nodes 2 and 3. An administrator can inspect or change it with:
 
 ```bash
 sudo mlnx_qos -i ens4f1 -a
@@ -199,7 +246,7 @@ Apply the configuration on both migration hosts. The physical link remains 100 G
 The wrapper runs the analyzers automatically. To reanalyze a saved run:
 
 ```bash
-RUN=/home/k8s/SwiftBaton-AE-work/sb_ae_YYYYMMDD_HHMMSS
+RUN="$(dirname "$PWD")/SwiftBaton-AE-work/sb_ae_YYYYMMDD_HHMMSS"
 python3 scripts/analyze_run.py "$RUN"
 python3 scripts/analyze_recovery.py "$RUN"
 # U transport and fault timing:
@@ -222,7 +269,7 @@ No historical measurements are bundled or substituted for new runs.
 The wrapper attempts scoped cleanup and restoration even when analysis fails. Inspect its `result.json` and `cleanup.log`. If a run is interrupted before that cleanup finishes, use only its exact state path:
 
 ```bash
-python3 scripts/ae/u/cleanup_ae.py /home/k8s/SwiftBaton-AE-work/sb_ae_YYYYMMDD_HHMMSS/state.json
+python3 scripts/ae/u/cleanup_ae.py "$(dirname "$PWD")/SwiftBaton-AE-work/sb_ae_YYYYMMDD_HHMMSS/state.json"
 # Use scripts/ae/k/cleanup_ae.py for a K run.
 ```
 
@@ -232,6 +279,6 @@ If `restored` reports an error, inspect `/usr/bin/criu` on both hosts and compar
 
 ## 11. Current scope
 
-The implementation includes all four page-transfer paths and host K migration. The source also includes PS source-MR reuse, batched catalog/ARM work, rsocket proxy transport for a remote-fork baseline, and optional prepared-ARM kernel patches. The prepared reviewer cluster uses its installed kernel/module; building and booting the optional kernel series is a separate administrator path. It does not yet provide NIC hardware demand priority, K adjacent prefetch across MR boundaries, arbitrary FD semantics (including the documented EFD_SEMAPHORE/queued UDP/timerfd restrictions), or automatic source recovery after a fatal migration-controller failure. The K source-retirement protections prevent unsafe reuse of exposed source pages; a fatal controller failure may terminate the source process.
+The implementation includes all four page-transfer paths and host K migration. The source also includes PS source-MR reuse, batched catalog/ARM work, rsocket proxy transport for a remote-fork baseline, and optional prepared-ARM kernel patches. The provided AE testbed uses its installed kernel/module; building and booting the optional kernel series is a separate administrator path. It does not yet provide NIC hardware demand priority, K adjacent prefetch across MR boundaries, arbitrary FD semantics (including the documented EFD_SEMAPHORE/queued UDP/timerfd restrictions), or automatic source recovery after a fatal migration-controller failure. The K source-retirement protections prevent unsafe reuse of exposed source pages; a fatal controller failure may terminate the source process.
 
 This workflow reproduces the implementation and collects the required metrics. It does not promise every paper figure, a fixed downtime threshold, or a theoretical minimum fault latency. Use the private AE discussion for access or support; provide the failing command and the generated state/result files privately rather than committing them to the repository.

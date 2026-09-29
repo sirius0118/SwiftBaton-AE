@@ -58,7 +58,7 @@ static void *change_after_restore(void *unused)
 {
     uint64_t epoch=0,bad=0;
     (void)unused;
-    /* This test-only bind-mounted marker exists exclusively on knode3. It
+    /* This test-only bind-mounted marker exists exclusively on node3. It
      * triggers real application syscalls after the restored threads run. */
     while(access("/ae-control/target",F_OK)) {
         for(uint64_t p=0;p<DYNAMIC_PAGES;p++)dynamic_memory[p*512]=++epoch;

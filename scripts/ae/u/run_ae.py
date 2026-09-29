@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run on knode2. Reproduce and validate one SwiftBaton Redis migration."""
+"""Run on node2. Reproduce and validate one SwiftBaton Redis migration."""
 import argparse
 import os
 import json
@@ -204,7 +204,7 @@ def event(kind, event_time_ns=None, **kw):
     print(json.dumps(row), flush=True)
 
 def cmd(host, args, timeout=30, check=True):
-    command = args if host == 'knode2' else ['ssh', '-oBatchMode=yes', '-oConnectTimeout=8', host, shlex.join(args)]
+    command = args if host == 'node2' else ['ssh', '-oBatchMode=yes', '-oConnectTimeout=8', host, shlex.join(args)]
     p = subprocess.run(command, text=True, errors="replace", capture_output=True, timeout=timeout)
     if check and p.returncode:
         raise RuntimeError(f'{host}: {shlex.join(args)}: {p.stdout}\n{p.stderr}')
@@ -235,7 +235,7 @@ def spawn(host, label, args):
     event('spawn', host=host, label=label, pid=pid)
 
 def check_migration_jobs():
-    for host, label in [('knode2', 'checkpoint'), ('knode3', 'restore'), ('knode3', 'pageclient')]:
+    for host, label in [('node2', 'checkpoint'), ('node3', 'restore'), ('node3', 'pageclient')]:
         if label + '_pid' not in STATE:
             continue
         status = py(host, f'from pathlib import Path;p=Path({str(OUT)!r})/{label + ".status"!r};print(p.read_text() if p.exists() else "running")')
@@ -270,7 +270,7 @@ def canary(mode):
     script = Path(__file__).with_name('canary_redis.py').read_text()
     argv = ['python3', '-', mode, '--host', '10.0.0.62', '--port', str(opts.port),
             '--mib', str(opts.canary_mib), '--seed', NAME]
-    result = subprocess.run(['ssh', '-oBatchMode=yes', 'knode1', shlex.join(argv)],
+    result = subprocess.run(['ssh', '-oBatchMode=yes', 'node1', shlex.join(argv)],
                             input=script, text=True, capture_output=True, timeout=180)
     (OUT / ('canary-' + mode + '.json')).write_text(result.stdout)
     (OUT / ('canary-' + mode + '.stderr')).write_text(result.stderr)
@@ -329,12 +329,12 @@ def job(label, args):
     wrapper = ("import subprocess,pathlib,json,time; "
                f"p=subprocess.Popen({args!r}); rc=p.wait(); "
                f"pathlib.Path({str(OUT / (label + '.exit'))!r}).write_text(str(rc))")
-    spawn('knode1', label, ['python3', '-c', wrapper])
+    spawn('node1', label, ['python3', '-c', wrapper])
 
 def await_job(label, timeout):
-    wait_for('knode1', str(OUT / (label + '.exit')), timeout)
-    result = cmd('knode1', ['sudo', '-n', 'cat', str(OUT / (label + '.exit'))])
-    log = cmd('knode1', ['sudo', '-n', 'cat', str(OUT / (label + '.log'))], timeout=30)
+    wait_for('node1', str(OUT / (label + '.exit')), timeout)
+    result = cmd('node1', ['sudo', '-n', 'cat', str(OUT / (label + '.exit'))])
+    log = cmd('node1', ['sudo', '-n', 'cat', str(OUT / (label + '.log'))], timeout=30)
     (OUT / (label + '.log')).write_text(log + '\n')
     if result != '0':
         raise RuntimeError(label + ' failed, exit=' + result)
@@ -346,17 +346,17 @@ def capture_logs():
         if label + '_pid' not in STATE:
             continue
         try:
-            args = ['ssh', '-oBatchMode=yes', 'knode3', shlex.join(['sudo', '-n', 'cat', str(OUT / (label + '.log'))])]
+            args = ['ssh', '-oBatchMode=yes', 'node3', shlex.join(['sudo', '-n', 'cat', str(OUT / (label + '.log'))])]
             data = subprocess.run(args, capture_output=True, timeout=45, check=True).stdout
             (OUT / (label + '-stdio.log')).write_bytes(data)
         except Exception as e:
             event('collect_log_error', name=label + '-stdio.log', error=str(e))
-    for host, names in [('knode2', ['dump.log', 'score.log']),
-                        ('knode3', ['restore.log', 'pageclient.log'])]:
+    for host, names in [('node2', ['dump.log', 'score.log']),
+                        ('node3', ['restore.log', 'pageclient.log'])]:
         for name in names:
             try:
                 args = ['sudo', '-n', 'cat', '/var/lib/criu/' + name]
-                if host != 'knode2':
+                if host != 'node2':
                     args = ['ssh', '-oBatchMode=yes', host, shlex.join(args)]
                 data = subprocess.run(args, capture_output=True, timeout=45, check=True).stdout
                 (OUT / name).write_bytes(data)
@@ -364,27 +364,27 @@ def capture_logs():
                 event('collect_log_error', name=name, error=str(e))
     if opts.page_trace:
         try:
-            data = subprocess.run(['ssh','-oBatchMode=yes','knode3',shlex.join(['sudo','-n','cat',str(OUT / 'page-trace.csv')])],capture_output=True,timeout=60,check=True).stdout
+            data = subprocess.run(['ssh','-oBatchMode=yes','node3',shlex.join(['sudo','-n','cat',str(OUT / 'page-trace.csv')])],capture_output=True,timeout=60,check=True).stdout
             (OUT / 'page-trace.csv').write_bytes(data)
         except Exception as e:
             event('collect_log_error', name='page-trace.csv', error=str(e))
     if opts.kernel_trace:
         for name in ['kernel-events.bin', 'kernel-observer.json']:
             try:
-                data = subprocess.run(['ssh','-oBatchMode=yes','knode3',shlex.join(['sudo','-n','cat',str(OUT / name)])],capture_output=True,timeout=60,check=True).stdout
+                data = subprocess.run(['ssh','-oBatchMode=yes','node3',shlex.join(['sudo','-n','cat',str(OUT / name)])],capture_output=True,timeout=60,check=True).stdout
                 (OUT / name).write_bytes(data)
             except Exception as e:
                 event('collect_log_error', name=name, error=str(e))
     if opts.buffered_cutover:
         for name in ['cutover-target.json', 'cutover_resume.log', 'cutover-nat-target.json']:
             try:
-                (OUT / name).write_text(cmd('knode3', ['sudo', '-n', 'cat', str(OUT / name)]) + '\n')
+                (OUT / name).write_text(cmd('node3', ['sudo', '-n', 'cat', str(OUT / name)]) + '\n')
             except Exception as e:
                 event('collect_log_error', name=name, error=str(e))
     if opts.fast_cutover:
         for name in ['cutover-client.json', 'cutover_listener.log', 'cutover-nat-client.json'] if opts.buffered_cutover else ['cutover-client.json', 'cutover_listener.log']:
             try:
-                (OUT / name).write_text(cmd('knode1', ['sudo', '-n', 'cat', str(OUT / name)]) + '\n')
+                (OUT / name).write_text(cmd('node1', ['sudo', '-n', 'cat', str(OUT / name)]) + '\n')
             except Exception as e:
                 event('collect_log_error', name=name, error=str(e))
 
@@ -393,22 +393,22 @@ try:
     # A deadlocked/custom-module CRIU task can keep the fixed migration ports,
     # namespaces and memory alive even after the driver has exited.
     preflight = "from pathlib import Path; active=[]\nfor p in Path('/proc').iterdir():\n if not p.name.isdigit():continue\n try:\n  if (p/'comm').read_text().strip()=='criu':active.append(p.name)\n except OSError:pass\nprint(' '.join(active))"
-    for host in ['knode2', 'knode3']:
+    for host in ['node2', 'node3']:
         active = cmd(host, ['python3', '-c', preflight])
         if active:
             raise RuntimeError(f'{host} has existing CRIU tasks {active}; finish or recover them before starting another migration')
     # The baseline runner may temporarily select a dedicated CRIU binary.
     # Record what the daemon will actually execute, not the sealed U build.
     hashes = {host: cmd(host, ['sha256sum', '/usr/bin/criu']).split()[0]
-              for host in ['knode2', 'knode3']}
-    if hashes['knode2'] != hashes['knode3']:
+              for host in ['node2', 'node3']}
+    if hashes['node2'] != hashes['node3']:
         raise RuntimeError('Source and destination CRIU binaries differ')
     STATE['criu_sha256'] = hashes
     if opts.kernel_trace:
         STATE['diagnostic_only'] = True
         STATE['kernel_observer_sha256'] = {}
         for name in ['observe-run', 'observe.bpf.o']:
-            values = {host: cmd(host, ['sha256sum', str(OBSERVER / name)]).split()[0] for host in ['knode2', 'knode3']}
+            values = {host: cmd(host, ['sha256sum', str(OBSERVER / name)]).split()[0] for host in ['node2', 'node3']}
             if len(set(values.values())) != 1:
                 raise RuntimeError('Observer binaries differ')
             STATE['kernel_observer_sha256'][name] = values
@@ -416,7 +416,7 @@ try:
             target = OUT / 'kernel-observer-source' / name
             target.parent.mkdir(exist_ok=True)
             target.write_bytes((OBSERVER / name).read_bytes())
-    STATE['rdma_qos'] = {host: cmd(host, ['sudo','-n','mlnx_qos','-i','ens4f1','-a']) for host in ['knode2','knode3']}
+    STATE['rdma_qos'] = {host: cmd(host, ['sudo','-n','mlnx_qos','-i','ens4f1','-a']) for host in ['node2','node3']}
     revision = subprocess.run(['git', '-C', str(BASE), 'rev-parse', 'HEAD'], capture_output=True, text=True)
     STATE['source_revision'] = revision.stdout.strip() or 'uncommitted source checkout'
     if opts.memory_children:
@@ -424,11 +424,11 @@ try:
         (OUT / 'memory_fixture.c').write_bytes(source.read_bytes())
         (OUT / 'fd_state_fixture.h').write_bytes(source.with_name('fd_state_fixture.h').read_bytes())
         (OUT / 'page_probe_fixture.h').write_bytes(source.with_name('page_probe_fixture.h').read_bytes())
-        STATE['memory_fixture_sha256'] = {host: cmd(host, ['sha256sum', str(BASE / 'build/fixture/memory_fixture')]).split()[0] for host in ['knode2', 'knode3']}
+        STATE['memory_fixture_sha256'] = {host: cmd(host, ['sha256sum', str(BASE / 'build/fixture/memory_fixture')]).split()[0] for host in ['node2', 'node3']}
         if len(set(STATE['memory_fixture_sha256'].values())) != 1:
             raise RuntimeError('Fixture binaries differ')
     save()
-    for host in ['knode2', 'knode3']:
+    for host in ['node2', 'node3']:
         if not cmd(host, ['docker', 'network', 'ls', '-q', '--filter', 'name=^sb-ae-net$']):
             cmd(host, ['docker', 'network', 'create', '--subnet', '172.30.52.0/24', 'sb-ae-net'])
         service_image, command, service_args, service_port = bench_workload.container(opts.ae_workload, opts.port, opts)
@@ -443,7 +443,7 @@ try:
         if opts.dynamic_memory or opts.page_probe:
             control = OUT / 'control'
             py(host, f'from pathlib import Path;p=Path({str(control)!r});p.mkdir(parents=True,exist_ok=True)')
-            if host == 'knode3':
+            if host == 'node3':
                 py(host, f'from pathlib import Path;Path({str(control / "target")!r}).write_text("target AS lifecycle test\\n")')
             mount = f'type=bind,src={control},dst=/ae-control' + ('' if opts.page_probe else ',readonly')
             args += ['--mount', mount, '--env', 'SB_AE_PAGE_PROBE=1' if opts.page_probe else 'SB_AE_DYNAMIC=1']
@@ -464,19 +464,19 @@ try:
         args += [service_image] + command
         STATE[host + '_cid'] = cmd(host, args)
         save()
-    cmd('knode2', ['docker', 'start', NAME])
+    cmd('node2', ['docker', 'start', NAME])
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
-        if (cmd('knode2', ['redis-cli', '-p', str(opts.port), 'PING'], timeout=5, check=False) == 'PONG'
+        if (cmd('node2', ['redis-cli', '-p', str(opts.port), 'PING'], timeout=5, check=False) == 'PONG'
                 if opts.ae_workload == 'redis' else
-                bench_workload.probe(opts.ae_workload, 'knode2', opts.port, NAME, cmd)):
+                bench_workload.probe(opts.ae_workload, 'node2', opts.port, NAME, cmd)):
             break
         time.sleep(.4)
     else:
         raise TimeoutError(opts.ae_workload + ' did not become ready')
     if opts.ae_workload == 'redis':
-        cmd('knode2', ['redis-cli', '-p', str(opts.port), 'SET', 'ae:sentinel', NAME])
-        endpoint = cmd('knode1', ['timeout', '4', 'redis-cli', '-h', '10.0.0.62', '-p', str(opts.port),
+        cmd('node2', ['redis-cli', '-p', str(opts.port), 'SET', 'ae:sentinel', NAME])
+        endpoint = cmd('node1', ['timeout', '4', 'redis-cli', '-h', '10.0.0.62', '-p', str(opts.port),
                                  'GET', 'ae:sentinel'])
         if endpoint != NAME:
             raise RuntimeError('Client does not reach this source container; check retained experiment NAT rules')
@@ -484,7 +484,7 @@ try:
         script = f"import socket; s=socket.create_connection(('10.0.0.62',{opts.port}),3);print('READY')"
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
-            if cmd('knode1', ['python3', '-c', script], timeout=8, check=False) == 'READY':
+            if cmd('node1', ['python3', '-c', script], timeout=8, check=False) == 'READY':
                 break
             time.sleep(.5)
         else:
@@ -492,7 +492,7 @@ try:
     bench_workload.prepare_database(opts.ae_workload, NAME, cmd)
     config_text = bench_workload.properties(opts.ae_workload, opts)
     (OUT / 'workload.properties').write_text(config_text)
-    py('knode1', f'from pathlib import Path;p=Path({str(OUT)!r});p.mkdir(parents=True);(p/"workload.properties").write_text({config_text!r})')
+    py('node1', f'from pathlib import Path;p=Path({str(OUT)!r});p.mkdir(parents=True);(p/"workload.properties").write_text({config_text!r})')
     base_cmd = bench_workload.client_command(BASE, opts.ae_workload, opts, OUT / 'workload.properties')
     if opts.ae_workload != 'largecontainer':
         job('load', base_cmd + ['-load', '-p', 'status.interval=1000', '-p', 'maxexecutiontime=3600'])
@@ -507,25 +507,25 @@ try:
     if opts.canary_mib:
         canary('load')
     if opts.ae_workload == 'redis':
-        count = int(cmd('knode2', ['redis-cli', '-p', str(opts.port), 'DBSIZE']))
+        count = int(cmd('node2', ['redis-cli', '-p', str(opts.port), 'DBSIZE']))
         if count != opts.records + 2 + bool(opts.canary_mib):
             raise RuntimeError('Unexpected key count after load: ' + str(count))
-        STATE['source_memory'] = cmd('knode2', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory'])
+        STATE['source_memory'] = cmd('node2', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory'])
         STATE['source_key_count'] = count
     else:
-        STATE['source_memory'] = cmd('knode2', ['docker', 'stats', '--no-stream', '--format', '{{.MemUsage}}', NAME])
-        STATE['source_validation'] = bench_workload.verify(opts.ae_workload, 'knode2', opts.port, NAME, opts.records, cmd)
+        STATE['source_memory'] = cmd('node2', ['docker', 'stats', '--no-stream', '--format', '{{.MemUsage}}', NAME])
+        STATE['source_validation'] = bench_workload.verify(opts.ae_workload, 'node2', opts.port, NAME, opts.records, cmd)
     save()
-    runtime_snapshot('knode2', 'source-before-workload')
+    runtime_snapshot('node2', 'source-before-workload')
     if opts.ae_workload == 'largecontainer':
-        py('knode1', f'from pathlib import Path;Path({str(OUT / "success-gaps")!r}).mkdir(parents=True,exist_ok=True)')
+        py('node1', f'from pathlib import Path;Path({str(OUT / "success-gaps")!r}).mkdir(parents=True,exist_ok=True)')
         job('run', base_cmd)
     else:
         job('run', base_cmd + ['-t', '-p', 'swiftbaton.success.gaps.dir=' + str(OUT / 'success-gaps')])
     event('workload_started')
     time.sleep(opts.warmup)
-    STATE['source_memory_before_migration'] = (cmd('knode2', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory']) if opts.ae_workload == 'redis' else cmd('knode2', ['docker', 'stats', '--no-stream', '--format', '{{.MemUsage}}', NAME]))
-    pid = int(cmd('knode2', ['docker', 'inspect', '-f', '{{.State.Pid}}', NAME]))
+    STATE['source_memory_before_migration'] = (cmd('node2', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory']) if opts.ae_workload == 'redis' else cmd('node2', ['docker', 'stats', '--no-stream', '--format', '{{.MemUsage}}', NAME]))
+    pid = int(cmd('node2', ['docker', 'inspect', '-f', '{{.State.Pid}}', NAME]))
     STATE['source_pid'] = pid
     mig = f'/var/lib/criu/migrate_{pid}'
     STATE['migration_dir'] = mig
@@ -541,51 +541,51 @@ try:
     if opts.buffered_cutover: config += 'buffered-cutover=yes\n'
     if opts.image_rdma:
         config += 'image-rdma=yes\n'
-    py('knode2', f'from pathlib import Path;p=Path({mig!r});p.mkdir();(p/"imgs_dir").mkdir();(p/"work_dir").mkdir();(p/"config_ck.cfg").write_text({config!r})')
+    py('node2', f'from pathlib import Path;p=Path({mig!r});p.mkdir();(p/"imgs_dir").mkdir();(p/"work_dir").mkdir();(p/"config_ck.cfg").write_text({config!r})')
     if opts.fast_cutover:
         if not opts.image_rdma:
             raise RuntimeError('--fast-cutover currently requires --image-rdma')
         cutover = dict(name=NAME, token=secrets.token_hex(24), port=opts.port, nat_rule=rule, buffered=opts.buffered_cutover,
                        stop_file=f'/dev/shm/swiftbaton-images-{pid}/stop')
         path = str(OUT / 'cutover-config.json')
-        py('knode1', f'from pathlib import Path;p=Path({path!r});p.write_text({json.dumps(cutover)!r});p.chmod(0o600)')
+        py('node1', f'from pathlib import Path;p=Path({path!r});p.write_text({json.dumps(cutover)!r});p.chmod(0o600)')
         helper = str(Path(__file__).with_name('fast_cutover.py'))
-        spawn('knode1', 'cutover_listener', ['python3', helper, 'listen', path])
-        wait_for('knode1', str(OUT / 'cutover.ready'), 10)
-        cutover['listen_port'] = json.loads(cmd('knode1', ['sudo', '-n', 'cat', str(OUT / 'cutover.ready')]))['port']
+        spawn('node1', 'cutover_listener', ['python3', helper, 'listen', path])
+        wait_for('node1', str(OUT / 'cutover.ready'), 10)
+        cutover['listen_port'] = json.loads(cmd('node1', ['sudo', '-n', 'cat', str(OUT / 'cutover.ready')]))['port']
         (OUT / 'cutover-config.json').write_text(json.dumps(cutover))
         (OUT / 'cutover-config.json').chmod(0o600)
-        spawn('knode2', 'cutover_trigger', ['python3', helper, 'trigger', path])
-        wait_for('knode2', str(OUT / 'cutover.connected'), 12)
+        spawn('node2', 'cutover_trigger', ['python3', helper, 'trigger', path])
+        wait_for('node2', str(OUT / 'cutover.connected'), 12)
         event('fast_cutover_armed')
-    check_memory_children('knode2', 'source')
+    check_memory_children('node2', 'source')
     event('checkpoint_start', source_pid=pid)
-    spawn('knode2', 'checkpoint', ['docker', 'checkpoint', 'create', NAME, 'migrate_dir'])
-    wait_for('knode2', mig + '/tmpdir.txt')
-    source_images = py('knode2', f'from pathlib import Path;print(Path({mig + "/tmpdir.txt"!r}).read_text().strip())')
+    spawn('node2', 'checkpoint', ['docker', 'checkpoint', 'create', NAME, 'migrate_dir'])
+    wait_for('node2', mig + '/tmpdir.txt')
+    source_images = py('node2', f'from pathlib import Path;print(Path({mig + "/tmpdir.txt"!r}).read_text().strip())')
     source_bootstrap = source_images
     if opts.image_rdma:
         source_images = f'/dev/shm/swiftbaton-images-{pid}'
-        wait_for('knode2', source_images + '/psroot')
+        wait_for('node2', source_images + '/psroot')
         STATE['ram_images'] = source_images
-        py('knode2', f'from pathlib import Path;Path({source_images + "/ae-owner"!r}).write_text({NAME!r})')
+        py('node2', f'from pathlib import Path;Path({source_images + "/ae-owner"!r}).write_text({NAME!r})')
     STATE['source_images'] = source_images
     save()
-    py('knode3', f'from pathlib import Path;p=Path({mig!r});p.mkdir();(p/"imgs_dir").mkdir();(p/"work_dir").mkdir()')
-    checkpoint_dir = '/var/lib/docker/containers/' + STATE['knode3_cid'] + '/checkpoints/migrate_dir'
+    py('node3', f'from pathlib import Path;p=Path({mig!r});p.mkdir();(p/"imgs_dir").mkdir();(p/"work_dir").mkdir()')
+    checkpoint_dir = '/var/lib/docker/containers/' + STATE['node3_cid'] + '/checkpoints/migrate_dir'
     if opts.image_rdma:
-        py('knode3', f'from pathlib import Path;p=Path({source_images!r});p.mkdir(mode=0o700);link=Path({mig + "/imgs_dir"!r});link.rmdir();link.symlink_to(p);cp=Path({checkpoint_dir!r});cp.mkdir();(cp/"psroot").write_text({str(pid)!r}+"\\n")')
-        py('knode3', f'from pathlib import Path;Path({source_images + "/ae-owner"!r}).write_text({NAME!r})')
+        py('node3', f'from pathlib import Path;p=Path({source_images!r});p.mkdir(mode=0o700);link=Path({mig + "/imgs_dir"!r});link.rmdir();link.symlink_to(p);cp=Path({checkpoint_dir!r});cp.mkdir();(cp/"psroot").write_text({str(pid)!r}+"\\n")')
+        py('node3', f'from pathlib import Path;Path({source_images + "/ae-owner"!r}).write_text({NAME!r})')
         # runc reads this JSON before it launches the CRIU RDMA receiver.
         # It is runtime bootstrap text; every CRIU .img travels through RDMA.
-        descriptors = cmd('knode2', ['sudo', '-n', 'cat', source_bootstrap + '/descriptors.json'])
-        py('knode3', f'from pathlib import Path;Path({checkpoint_dir + "/descriptors.json"!r}).write_text({descriptors!r})')
+        descriptors = cmd('node2', ['sudo', '-n', 'cat', source_bootstrap + '/descriptors.json'])
+        py('node3', f'from pathlib import Path;Path({checkpoint_dir + "/descriptors.json"!r}).write_text({descriptors!r})')
         event('checkpoint_ram_ready', source_images=source_images)
     else:
-        cmd('knode3', ['sudo', '-n', 'sshfs', f'root@10.0.0.62:{source_images}', mig + '/imgs_dir',
+        cmd('node3', ['sudo', '-n', 'sshfs', f'root@10.0.0.62:{source_images}', mig + '/imgs_dir',
                       '-o', 'allow_other,cache=no,entry_timeout=0,attr_timeout=0,negative_timeout=0,ServerAliveInterval=5,ServerAliveCountMax=3'])
         event('checkpoint_mounted', source_images=source_images)
-        cmd('knode3', ['sudo', '-n', 'cp', '-a', mig + '/imgs_dir', checkpoint_dir])
+        cmd('node3', ['sudo', '-n', 'cp', '-a', mig + '/imgs_dir', checkpoint_dir])
     config = f'[criu]\nlazy-pages=yes\naddress=10.0.0.62\nport=12346\nsync_addr=10.0.0.62\nsync_port=4568\nimgs_dir={mig}/imgs_dir\n'
     config += precopy_config
     config += f'network-lock={opts.network_lock}\n'
@@ -593,16 +593,16 @@ try:
     if opts.buffered_cutover: config += 'buffered-cutover=yes\n'
     if opts.image_rdma:
         config += 'image-rdma=yes\n'
-    py('knode3', f'from pathlib import Path;Path({mig + "/config_res.cfg"!r}).write_text({config!r})')
+    py('node3', f'from pathlib import Path;Path({mig + "/config_res.cfg"!r}).write_text({config!r})')
     if opts.buffered_cutover:
         path = str(OUT / 'cutover-config.json')
-        py('knode3', f'from pathlib import Path;p=Path({path!r});p.parent.mkdir(parents=True,exist_ok=True);p.write_text({json.dumps(cutover)!r});p.chmod(0o600)')
-        spawn('knode3', 'cutover_resume', ['python3', str(Path(__file__).with_name('fast_cutover.py')), 'resume', path])
-        wait_for('knode3', str(OUT / 'cutover.target-connected'), 10)
-    spawn('knode3', 'restore', ['docker', 'start', '--checkpoint', 'migrate_dir', NAME])
-    work = '/run/containerd/io.containerd.runtime.v2.task/moby/' + STATE['knode3_cid'] + '/work'
-    wait_for('knode3', work + '/sync.sock')
-    spawn('knode3', 'pageclient', ['criu', 'lazy-pages', '-D', mig + '/imgs_dir', '-W', work,
+        py('node3', f'from pathlib import Path;p=Path({path!r});p.parent.mkdir(parents=True,exist_ok=True);p.write_text({json.dumps(cutover)!r});p.chmod(0o600)')
+        spawn('node3', 'cutover_resume', ['python3', str(Path(__file__).with_name('fast_cutover.py')), 'resume', path])
+        wait_for('node3', str(OUT / 'cutover.target-connected'), 10)
+    spawn('node3', 'restore', ['docker', 'start', '--checkpoint', 'migrate_dir', NAME])
+    work = '/run/containerd/io.containerd.runtime.v2.task/moby/' + STATE['node3_cid'] + '/work'
+    wait_for('node3', work + '/sync.sock')
+    spawn('node3', 'pageclient', ['criu', 'lazy-pages', '-D', mig + '/imgs_dir', '-W', work,
                                  '--page-server', '--address', '10.0.0.62', '--port', '12346', '-v4'] +
           (['--image-rdma'] if opts.image_rdma else []) +
           (['--u-precopy', '--precopy-workers', str(opts.precopy_workers),
@@ -616,10 +616,10 @@ try:
           (['--prefetch-window',str(opts.prefetch_window)] if opts.parallel_transfer else []) +
           (['--page-trace', str(OUT / 'page-trace.csv')] if opts.page_trace else []))
     event('waiting_for_source_stop')
-    wait_for('knode2' if opts.image_rdma else 'knode3', source_images + '/stop' if opts.image_rdma else mig + '/imgs_dir/stop', 60)
+    wait_for('node2' if opts.image_rdma else 'node3', source_images + '/stop' if opts.image_rdma else mig + '/imgs_dir/stop', 60)
     event('source_stop_observed')
     if opts.fast_cutover:
-        wait_for('knode2', str(OUT / 'cutover.result.json'), 30)
+        wait_for('node2', str(OUT / 'cutover.result.json'), 30)
         result = json.loads((OUT / 'cutover.result.json').read_text())
         STATE['nat_installed'] = result.get('nat_installed', False)
         save()
@@ -628,17 +628,17 @@ try:
         event('network_cutover', event_time_ns=result['source_ack_time_ns'],
               client_time_ns=result['completed_time_ns'], trigger_to_ack_ms=result['trigger_to_ack_ms'])
     else:
-        cmd('knode1', ['sudo', '-n', 'iptables', '-w', '10', '-t', 'nat', '-I', 'OUTPUT', '1'] + rule)
+        cmd('node1', ['sudo', '-n', 'iptables', '-w', '10', '-t', 'nat', '-I', 'OUTPUT', '1'] + rule)
         STATE['nat_installed'] = True
         save()
-        cmd('knode1', ['sudo', '-n', 'conntrack', '-D', '-p', 'tcp', '--dst', '10.0.0.62',
+        cmd('node1', ['sudo', '-n', 'conntrack', '-D', '-p', 'tcp', '--dst', '10.0.0.62',
                       '--dport', str(opts.port)], check=False)
-        event('network_cutover', client_time_ns=py('knode1', 'import time;print(time.time_ns())'))
+        event('network_cutover', client_time_ns=py('node1', 'import time;print(time.time_ns())'))
     event('waiting_for_restore')
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         check_migration_jobs()
-        result = bench_workload.probe(opts.ae_workload, 'knode3', opts.port, NAME, cmd)
+        result = bench_workload.probe(opts.ae_workload, 'node3', opts.port, NAME, cmd)
         if result:
             event('sentinel_verified', workload=opts.ae_workload)
             STATE['restore_verified'] = True
@@ -647,13 +647,13 @@ try:
         time.sleep(.5)
     else:
         raise TimeoutError('Restored Redis did not return the source sentinel')
-    wait_for('knode3', work + '/pages.complete', 90)
+    wait_for('node3', work + '/pages.complete', 90)
     event('all_pages_copied')
-    current_pid = int(cmd('knode2', ['docker', 'inspect', '-f', '{{.State.Pid}}', NAME]))
+    current_pid = int(cmd('node2', ['docker', 'inspect', '-f', '{{.State.Pid}}', NAME]))
     if current_pid != pid:
         raise RuntimeError('Source PID changed; refusing to retire an unrecognized process')
-    cmd('knode2', ['sudo', '-n', 'kill', '-KILL', str(pid)])
-    py('knode2', f'''from pathlib import Path
+    cmd('node2', ['sudo', '-n', 'kill', '-KILL', str(pid)])
+    py('node2', f'''from pathlib import Path
 import os,signal
 for p in Path('/proc').iterdir():
  if not p.name.isdigit():continue
@@ -667,8 +667,8 @@ for p in Path('/proc').iterdir():
     save()
     event('source_retired')
     await_job('run', opts.duration + 60)
-    subprocess.run(['rsync', '-az', 'knode1:' + str(OUT / 'success-gaps') + '/', str(OUT / 'success-gaps') + '/'], check=True, timeout=30)
-    runtime_snapshot('knode3', 'target-after-workload')
+    subprocess.run(['rsync', '-az', 'node1:' + str(OUT / 'success-gaps') + '/', str(OUT / 'success-gaps') + '/'], check=True, timeout=30)
+    runtime_snapshot('node3', 'target-after-workload')
     if opts.poststeady_seconds:
         # A separate JVM and log preserve the original recovery measurement.
         post_cmd = (base_cmd[:base_cmd.index('--seconds') + 1] + [str(opts.poststeady_seconds)] + base_cmd[base_cmd.index('--seconds') + 2:]
@@ -676,15 +676,15 @@ for p in Path('/proc').iterdir():
         job('poststeady', post_cmd)
         event('poststeady_started', duration=opts.poststeady_seconds)
         await_job('poststeady', opts.poststeady_seconds + 60)
-        runtime_snapshot('knode3', 'target-after-poststeady')
+        runtime_snapshot('node3', 'target-after-poststeady')
     if opts.ae_workload == 'redis':
-        STATE['destination_key_count'] = int(cmd('knode3', ['redis-cli', '-p', str(opts.port), 'DBSIZE']))
-        STATE['destination_memory'] = cmd('knode3', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory'])
+        STATE['destination_key_count'] = int(cmd('node3', ['redis-cli', '-p', str(opts.port), 'DBSIZE']))
+        STATE['destination_memory'] = cmd('node3', ['redis-cli', '-p', str(opts.port), 'INFO', 'memory'])
         if STATE['destination_key_count'] != opts.records + 2 + bool(opts.canary_mib):
             raise RuntimeError('Key count changed across migration')
         event('key_count_verified', count=STATE['destination_key_count'])
         # Exercise the same address that the YCSB client used after the cutover.
-        actual = cmd('knode1', ['timeout', '5', 'redis-cli', '-h', '10.0.0.62', '-p', str(opts.port),
+        actual = cmd('node1', ['timeout', '5', 'redis-cli', '-h', '10.0.0.62', '-p', str(opts.port),
                               'GET', 'ae:sentinel'])
         if actual != NAME:
             raise RuntimeError('Client endpoint does not reach the migrated Redis')
@@ -696,7 +696,7 @@ for p in Path('/proc').iterdir():
                        '--records', str(opts.records), '--field-length', str(opts.field_length), '--sentinel', NAME,
                        '--extra-keys', str(int(bool(opts.canary_mib)))]
         verification = subprocess.run(
-            ['ssh', '-oBatchMode=yes', 'knode1', shlex.join(verify_args)],
+            ['ssh', '-oBatchMode=yes', 'node1', shlex.join(verify_args)],
             input=verifier, text=True, capture_output=True, timeout=180)
         (OUT / 'validation.json').write_text(verification.stdout)
         (OUT / 'validation.stderr').write_text(verification.stderr)
@@ -705,15 +705,15 @@ for p in Path('/proc').iterdir():
         STATE['validation'] = json.loads(verification.stdout)
         event('all_records_verified', checked=STATE['validation']['checked_records'])
     else:
-        STATE['destination_memory'] = cmd('knode3', ['docker', 'stats', '--no-stream', '--format', '{{.MemUsage}}', NAME])
-        STATE['validation'] = bench_workload.verify(opts.ae_workload, 'knode3', opts.port, NAME, opts.records, cmd)
+        STATE['destination_memory'] = cmd('node3', ['docker', 'stats', '--no-stream', '--format', '{{.MemUsage}}', NAME])
+        STATE['validation'] = bench_workload.verify(opts.ae_workload, 'node3', opts.port, NAME, opts.records, cmd)
         STATE['destination_key_count'] = STATE['validation'].get('records', STATE['validation'].get('items'))
         event('workload_verified', workload=opts.ae_workload, result=STATE['validation'])
         script = f"import socket; s=socket.create_connection(('10.0.0.62',{opts.port}),3);print('READY')"
-        if cmd('knode1', ['python3', '-c', script], timeout=8) != 'READY':
+        if cmd('node1', ['python3', '-c', script], timeout=8) != 'READY':
             raise RuntimeError('Client endpoint does not reach migrated workload')
         event('client_endpoint_verified')
-    check_memory_children('knode3', 'target')
+    check_memory_children('node3', 'target')
     if opts.cow_descendants:
         capture_logs()
         text = (OUT / 'restore.log').read_text(errors='replace')

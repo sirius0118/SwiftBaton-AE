@@ -1,13 +1,14 @@
 # Reproducing the SwiftBaton AE experiments
 
-Run the entry points on knode2 after completing the build, staging, and
-preflight steps in the [main README](../README.md). knode1 runs the client;
-knode2 and knode3 run the source and destination containers. Each case has
+Run these commands on **Node 2** after completing the build, staging, and
+preflight steps in the [main README](../README.md). **Node 1** runs the client;
+**Node 2** and **Node 3** run the source and destination containers. The
+SSH aliases `node1` and `node3` are configured on Node 2 as described there. Each case has
 a `case.json` and an executable `run.sh`. A dry run shows the exact driver
 commands without changing either host.
 
 ```bash
-cd /home/k8s/SwiftBaton-AE
+cd "$HOME/SwiftBaton-AE"
 experiments/real_world/redis/run.sh --dry-run
 experiments/real_world/redis/run.sh --mode u --smoke --trials 1
 experiments/real_world/redis/run.sh --mode k --smoke --trials 1
@@ -23,7 +24,7 @@ this checkout. VoltDB and MySQL build an isolated file-lock-capable U/K CRIU
 variant from the same checkout; that build never replaces the normal U/K
 source or installed binary. The runner checks matching source/target binary
 hashes and image IDs. If an image is missing, it builds the case Dockerfile
-on knode2 and transfers the image to knode3. LargeContainer is compiled
+on Node 2 and transfers the image to Node 3. LargeContainer is compiled
 from `largecontainer.c` during this image build. No image or executable is
 stored in Git.
 
@@ -50,8 +51,8 @@ with `--mode`, `--variant`, or `--trials`. The runner temporarily configures
 ConnectX-6 QoS on both migration hosts, selects CRIU, and restores previous
 QoS and CRIU symlinks after each trial. Do not overlap it with another cluster
 experiment. Results are written outside Git to
-`/home/k8s/SwiftBaton-AE-benchmark-results/` by default, or to
-`SB_BENCH_RESULTS` if set. Each trial records its source revision, image and
+a sibling directory named `SwiftBaton-AE-benchmark-results/` by default,
+or to `SB_BENCH_RESULTS` if set. Each trial records its source revision, image and
 binary hashes, command, state path, validation, and cleanup outcome.
 `plot_all.py` accepts only validated successful trials and writes figures
 beside those results. Never commit the generated data or plots.

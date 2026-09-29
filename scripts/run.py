@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one U or K migration on the prepared cluster; default is a local preview."""
+"""Run one U or K migration on the three-node testbed; default is a local preview."""
 from pathlib import Path
 import argparse,fcntl,hashlib,json,os,re,shlex,subprocess,sys,time
 R=Path(__file__).resolve().parents[1]
@@ -24,7 +24,7 @@ W=Path(os.environ.get('SB_AE_WORK_ROOT',str(R.parent/(R.name+'-work')))).resolve
 if R==W or R in W.parents:raise SystemExit('SB_AE_WORK_ROOT must be outside the source repository')
 profile=json.loads((R/'configs/profiles.json').read_text())[a.mode][:]
 if a.profile=='smoke':
- for key,value in [('--records','100000'),('--field-length','1024'),('--duration','45'),('--warmup','10'),('--threads','16')]:profile[profile.index(key)+1]=value
+ for key,value in [('--records','100000'),('--field-length','1024'),('--duration','75'),('--warmup','10'),('--threads','16')]:profile[profile.index(key)+1]=value
 if a.validation_workers is not None:
  if '--validation-workers' in profile:profile[profile.index('--validation-workers')+1]=str(a.validation_workers)
  else:profile += ['--validation-workers',str(a.validation_workers)]
@@ -63,7 +63,7 @@ binary=R/'build'/('criu-'+a.mode)/'criu/criu'
 sha=hashlib.sha256(binary.read_bytes()).hexdigest()
 def remote(host,program,args=()):
  command=['sudo','-n','python3','-c',program]+list(map(str,args))
- if host!='knode2':command=['ssh','-oBatchMode=yes','-oConnectTimeout=8',host,shlex.join(command)]
+ if host!='node2':command=['ssh','-oBatchMode=yes','-oConnectTimeout=8',host,shlex.join(command)]
  return subprocess.check_output(command,text=True,timeout=45)
 probe=r'''from pathlib import Path
 import os,json,hashlib,subprocess,sys
@@ -113,7 +113,7 @@ for p in Path('/proc').iterdir():
 assert daemons=={'dockerd','containerd'}
 print(json.dumps(seen))
 '''
-previous={h:json.loads(remote(h,probe,[binary,sha,a.mode])) for h in ('knode2','knode3')}
+previous={h:json.loads(remote(h,probe,[binary,sha,a.mode])) for h in ('node2','node3')}
 # Check client classes before creating any workload.
 client=r'''from pathlib import Path
 import subprocess,json,sys
@@ -122,10 +122,10 @@ assert all((r/'build/YCSB'/n).is_file() for n in names),'Build and stage YCSB fi
 assert list((r/'build/YCSB/core/target/dependency').glob('*.jar')),'Missing YCSB runtime dependencies'
 print(json.dumps(names))
 '''
-remote('knode1',client,[R])
+remote('node1',client,[R])
 if a.buffered_cutover:
- remote('knode1', "import ctypes;ctypes.CDLL('libnetfilter_queue.so.1');ctypes.CDLL('libnftables.so.1');ctypes.CDLL('libnetfilter_conntrack.so.3')")
-if a.buffered_cutover:remote('knode3', "import ctypes;ctypes.CDLL('libnetfilter_conntrack.so.3')")
+ remote('node1', "import ctypes;ctypes.CDLL('libnetfilter_queue.so.1');ctypes.CDLL('libnftables.so.1');ctypes.CDLL('libnetfilter_conntrack.so.3')")
+if a.buffered_cutover:remote('node3', "import ctypes;ctypes.CDLL('libnetfilter_conntrack.so.3')")
 image_ref=os.environ.get('SB_REDIS_IMAGE',json.loads((R/'configs/lab.json').read_text())['redis_image'])
 image_ids={}
 for host in previous:

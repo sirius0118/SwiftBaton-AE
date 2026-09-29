@@ -17,9 +17,9 @@ sha256sum "$OUT/criu/criu"
 
 if [ "${1:-}" = --stage-target ]; then
     remote="$OUT/criu/criu"
-    ssh -oBatchMode=yes knode3 "mkdir -p '$OUT/criu'"
-    rsync -a "$remote" "knode3:$remote"
-    ssh -oBatchMode=yes knode3 "sha256sum '$remote'"
+    ssh -oBatchMode=yes node3 "mkdir -p '$OUT/criu'"
+    rsync -a "$remote" "node3:$remote"
+    ssh -oBatchMode=yes node3 "sha256sum '$remote'"
 elif [ "$#" -gt 0 ]; then
     echo "usage: $0 [--stage-target]" >&2
     exit 2

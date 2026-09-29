@@ -72,7 +72,7 @@ binary=R/'build'/('criu-K-rsocket' if a.baseline=='remote-fork' else
 sha=hashlib.sha256(binary.read_bytes()).hexdigest()
 def remote(host,program,args=()):
  command=['sudo','-n','python3','-c',program]+list(map(str,args))
- if host!='knode2':command=['ssh','-oBatchMode=yes','-oConnectTimeout=8',host,shlex.join(command)]
+ if host!='node2':command=['ssh','-oBatchMode=yes','-oConnectTimeout=8',host,shlex.join(command)]
  result=subprocess.run(command,text=True,capture_output=True,timeout=45)
  if result.returncode:raise RuntimeError(host+': '+(result.stderr.strip() or result.stdout.strip()))
  return result.stdout
@@ -132,8 +132,8 @@ for p in Path('/proc').iterdir():
 assert daemons=={'dockerd','containerd'}
 print(json.dumps(seen))
 '''
-def probe_mode(host):return 'K-proxy' if a.baseline=='remote-fork' and host=='knode3' else criu_mode
-previous={h:json.loads(remote(h,probe,[binary,sha,probe_mode(h)])) for h in ('knode2','knode3')}
+def probe_mode(host):return 'K-proxy' if a.baseline=='remote-fork' and host=='node3' else criu_mode
+previous={h:json.loads(remote(h,probe,[binary,sha,probe_mode(h)])) for h in ('node2','node3')}
 # Check client classes before creating any workload.
 client=r'''from pathlib import Path
 import subprocess,json,sys
@@ -142,10 +142,10 @@ assert all((r/'build/YCSB'/n).is_file() for n in names),'Build and stage YCSB fi
 assert list((r/'build/YCSB/core/target/dependency').glob('*.jar')),'Missing YCSB runtime dependencies'
 print(json.dumps(names))
 '''
-remote('knode1',client,[R])
+remote('node1',client,[R])
 if a.buffered_cutover:
- remote('knode1', "import ctypes;ctypes.CDLL('libnetfilter_queue.so.1');ctypes.CDLL('libnftables.so.1');ctypes.CDLL('libnetfilter_conntrack.so.3')")
-if a.buffered_cutover:remote('knode3', "import ctypes;ctypes.CDLL('libnetfilter_conntrack.so.3')")
+ remote('node1', "import ctypes;ctypes.CDLL('libnetfilter_queue.so.1');ctypes.CDLL('libnftables.so.1');ctypes.CDLL('libnetfilter_conntrack.so.3')")
+if a.buffered_cutover:remote('node3', "import ctypes;ctypes.CDLL('libnetfilter_conntrack.so.3')")
 image_ref=os.environ.get('SB_REDIS_IMAGE',json.loads((R/'configs/lab.json').read_text())['redis_image'])
 image_ids={}
 for host in previous:

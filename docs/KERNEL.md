@@ -1,6 +1,7 @@
 # SwiftBaton-K host kernel and module
 
-The prepared destination already boots `5.15.167-swiftbaton-k1`. A reviewer using that cluster starts at the main README's CRIU/YCSB build steps. This document describes the source changes and administrator steps for reproducing the kernel setup. None of the AE scripts installs a kernel or reboots a host.
+In the provided AE testbed, **Node 3** already boots `5.15.167-swiftbaton-k1`.
+A reviewer using those hosts starts at the [main README](../README.md)'s CRIU/YCSB build steps. This document describes the source changes and administrator steps for reproducing the kernel setup. None of the AE scripts installs a kernel or reboots a host.
 
 ## What changed
 
@@ -10,13 +11,13 @@ Two additional patches build on that base, in order:
 `linux-5.15.167-sbk-prepared-arm.patch` adds a prepared PTE plan for
 pre-stop work, and `linux-5.15.167-sbk-arm-batch.patch` batches token
 reference accounting while installing markers. They are **optional** for the
-prepared-cluster quickstart. The module detects the plan API at compile time;
+provided-testbed quickstart. The module detects the plan API at compile time;
 it can also run with the base patch. The base and optimized kernel variants
 have distinct local versions to avoid loading a module against the wrong ABI.
 
 The module is in `kernel/module/`; `kernel/include/sbk_uapi.h` defines the CRIU/module ABI. Its source side exposes frozen application pages through registered RDMA memory regions, with optional PS pre-registration and invalidation checks. The source also includes an optional DMA-key path and an rsocket page proxy for the remote-fork baseline. Its destination side owns PS cache pages, independent demand/FT/BG QP/CQ pools, the session scheduler, and final anonymous-page installation. The MM bridge preserves page permissions, anonymous rmap, memcg/LRU and COW behavior. Marker references track fork and moved aliases; the source cannot retire merely because every unique page was fetched.
 
-The **destination needs the patched kernel**. The source can use stock 5.15.167 because it does not install remote PTE markers, but its module still must be compiled for that source kernel and its RDMA driver ABI. Source and target `.ko` files are not interchangeable.
+The **destination (Node 3) needs the patched kernel**. The source (Node 2) can use stock 5.15.167 because it does not install remote PTE markers, but its module still must be compiled for that source kernel and its RDMA driver ABI. Source and target `.ko` files are not interchangeable.
 
 ## Build the kernel in isolation
 
@@ -35,8 +36,7 @@ python3 kernel/build.py /path/to/linux-5.15.167 --arm-optimizations --jobs 8
 This applies the base, prepared-ARM, then ARM-batch patches in order and
 builds under `build/linux-5.15.167-swiftbaton-k1-arm-batch/` with release
 `5.15.167-swiftbaton-k1-arm-batch`. Build its SwiftBaton module against
-that exact configured tree and matching OFED source; do not use the prepared
-cluster's existing module file for this alternate kernel.
+that exact configured tree and matching OFED source; do not use the provided testbed's existing module file for this alternate kernel.
 
 The helper first checks the version and performs a patch dry run. It creates `build/linux-5.15.167-swiftbaton-k1/`, applies the patch and `kernel/config-5.15.167-swiftbaton-k1`, then builds `bzImage` and modules. It neither alters the input source nor writes `/boot` or `/lib/modules`.
 
@@ -46,7 +46,7 @@ The configuration is the tested x86-64 host configuration, with `CONFIG_SWIFTBAT
 
 The destination uses an OFED driver build matched to this exact patched kernel. A successful module compile against unrelated distro/inbox headers is insufficient: symbol CRCs and the loaded RDMA ABI must match.
 
-The prepared candidate used this source package (extracted for building, not installed as an unreviewed DKMS replacement):
+The tested candidate used this source package (extracted for building, not installed as an unreviewed DKMS replacement):
 
 ```text
 https://linux.mellanox.com/public/repo/mlnx_ofed/5.8-6.0.4.2/ubuntu20.04/x86_64/mlnx-ofed-kernel-dkms_5.8-OFED.5.8.6.0.4.1_all.deb
@@ -92,7 +92,7 @@ SB_OFED_BUILD=/path/to/source-ofed-build \
   bash scripts/build.sh module
 ```
 
-The source OFED tree must match the loaded drivers; do not assume `/usr/src/ofa_kernel/default` is current. In the prepared setup that symlink can point to older 5.4 headers, while the running source RDMA stack uses matching 5.8 headers.
+The source OFED tree must match the loaded drivers; do not assume `/usr/src/ofa_kernel/default` is current. In the provided testbed that symlink can point to older 5.4 headers, while the running source RDMA stack uses matching 5.8 headers.
 
 The module outputs are `build/module-<kernelrelease>/swiftbaton_k.ko`. The script copies module sources to that ignored build directory. It does not call `insmod` or `rmmod`.
 

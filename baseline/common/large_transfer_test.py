@@ -30,7 +30,7 @@ lanes = 8
 
 
 def remote(argv, input_bytes=None, timeout=30):
-    return subprocess.run(['ssh', '-oBatchMode=yes', 'knode3', shlex.join(list(map(str, argv)))],
+    return subprocess.run(['ssh', '-oBatchMode=yes', 'node3', shlex.join(list(map(str, argv)))],
                           input=input_bytes, capture_output=True, check=True,
                           timeout=timeout).stdout.decode().strip()
 
@@ -101,10 +101,10 @@ finally:
         try: source_relay.wait(timeout=3)
         except subprocess.TimeoutExpired: source_relay.kill(); source_relay.wait()
     for pid in target_pids:
-        subprocess.run(['ssh', '-oBatchMode=yes', 'knode3',
+        subprocess.run(['ssh', '-oBatchMode=yes', 'node3',
                         shlex.join(['kill', '-TERM', str(pid)])],
                        capture_output=True, timeout=10)
-    subprocess.run(['ssh', '-oBatchMode=yes', 'knode3',
+    subprocess.run(['ssh', '-oBatchMode=yes', 'node3',
                     shlex.join(['rm', '-rf', '--', str(dst)])],
                    capture_output=True, timeout=60)
     subprocess.run(['rm', '-rf', '--', str(src)], check=True)

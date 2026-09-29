@@ -165,8 +165,8 @@ def host_probe(binary, device, gid):
 def validate_preflight(hosts, export_workers=1, dma_mr=False, ps_arm=False,
                        ps_mr=False, rsocket_proxy=False):
     errors = []
-    reference = hosts.get('knode2', {}).get('binary_sha256')
-    for host in ('knode2', 'knode3'):
+    reference = hosts.get('node2', {}).get('binary_sha256')
+    for host in ('node2', 'node3'):
         row = hosts.get(host, {})
         errors.extend(host + ': ' + msg for msg in row.get('errors', []))
         for key in ('binary_sha256', 'installed_sha256', 'pageclient_sha256'):
@@ -183,15 +183,15 @@ def validate_preflight(hosts, export_workers=1, dma_mr=False, ps_arm=False,
             errors.append(host + ': incompatible K ABI/PS capabilities')
         if dma_mr and not features & DMA_MR:
             errors.append(host + ': DMA MR transport unavailable')
-        if host == 'knode2' and export_workers > 1 and not features & PARALLEL_EXPORT:
+        if host == 'node2' and export_workers > 1 and not features & PARALLEL_EXPORT:
             errors.append(host + ': parallel final MR export unavailable')
-        if host == 'knode2' and ps_mr and not features & REMOTE_PREARM:
+        if host == 'node2' and ps_mr and not features & REMOTE_PREARM:
             errors.append(host + ': source PS MR pre-registration unavailable')
-        if host == 'knode3' and ps_arm and features & (PREPARED_ARM | UNBOUND_REGION) != PREPARED_ARM | UNBOUND_REGION:
+        if host == 'node3' and ps_arm and features & (PREPARED_ARM | UNBOUND_REGION) != PREPARED_ARM | UNBOUND_REGION:
             errors.append(host + ': PS ARM preparation unavailable')
-        if host == 'knode3' and not features & ANONYMOUS_PTE:
+        if host == 'node3' and not features & ANONYMOUS_PTE:
             errors.append(host + ': anonymous PTE bridge unavailable')
-        if host == 'knode3' and rsocket_proxy and not features & RSOCKET_PROXY:
+        if host == 'node3' and rsocket_proxy and not features & RSOCKET_PROXY:
             errors.append(host + ': rsocket proxy bridge unavailable')
         if row.get('rdma_state') != '4: ACTIVE':
             errors.append(host + ': RDMA port is not ACTIVE')

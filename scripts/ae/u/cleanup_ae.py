@@ -15,14 +15,14 @@ if not name.startswith('sb_ae_'):
     raise SystemExit('Not an AE experiment')
 
 def run(host, argv, timeout=30):
-    command = argv if host == 'knode2' else ['ssh', '-oBatchMode=yes', host, shlex.join(argv)]
+    command = argv if host == 'node2' else ['ssh', '-oBatchMode=yes', host, shlex.join(argv)]
     p = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
     print(host, ' '.join(argv[:3]), 'exit=' + str(p.returncode), p.stdout[-1000:].strip(), p.stderr[-1000:].strip())
     return p
 
 # Stop armed cutover helpers first: otherwise one could insert the NAT rule
 # immediately after cleanup removed it.
-for host, key in [('knode1', 'cutover_listener'), ('knode2', 'cutover_trigger'), ('knode3', 'cutover_resume')]:
+for host, key in [('node1', 'cutover_listener'), ('node2', 'cutover_trigger'), ('node3', 'cutover_resume')]:
     pid = s.get(key + '_pid')
     if not pid:
         continue
@@ -37,23 +37,23 @@ if p.exists():
     run(host, ['sudo', '-n', 'python3', '-c', script])
 
 if s.get('parameters', {}).get('buffered_cutover'):
-    result = run('knode1', ['sudo', '-n', 'python3', str(Path(__file__).with_name('packet_gate.py')), 'cleanup', name])
+    result = run('node1', ['sudo', '-n', 'python3', str(Path(__file__).with_name('packet_gate.py')), 'cleanup', name])
     if result.returncode: raise SystemExit('Could not remove owned packet gate/NAT table')
-    for host,side in [('knode1','client'),('knode3','target')]:
+    for host,side in [('node1','client'),('node3','target')]:
         args=['sudo','-n','python3',str(Path(__file__).with_name('nat_bindings.py')),'cleanup',str(state_path.parent/('cutover-nat-'+side+'.json')),name,side,str(s['port'])]
         if run(host,args).returncode:raise SystemExit('Could not remove exact experiment NAT bindings')
 
 
 if s.get('nat_rule'):
     rule = ['sudo', '-n', 'iptables', '-w', '10', '-t', 'nat', '-D', 'OUTPUT'] + s['nat_rule']
-    result = run('knode1', rule)
+    result = run('node1', rule)
     if result.returncode:
-        check = run('knode1', ['sudo', '-n', 'iptables', '-w', '10', '-t', 'nat', '-C', 'OUTPUT'] + s['nat_rule'])
+        check = run('node1', ['sudo', '-n', 'iptables', '-w', '10', '-t', 'nat', '-C', 'OUTPUT'] + s['nat_rule'])
         if check.returncode != 1:
             raise SystemExit('Could not confirm the experiment NAT rule is absent; cleanup stopped')
 
-for host, keys in [('knode1', ['load', 'run', 'poststeady']), ('knode2', ['checkpoint']),
-                   ('knode3', ['restore', 'pageclient'])]:
+for host, keys in [('node1', ['load', 'run', 'poststeady']), ('node2', ['checkpoint']),
+                   ('node3', ['restore', 'pageclient'])]:
     for key in keys:
         pid = s.get(key + '_pid')
         if not pid:
@@ -70,7 +70,7 @@ if p.exists():
 '''
         run(host, ['sudo', '-n', 'python3', '-c', script])
 
-for host in ['knode2', 'knode3']:
+for host in ['node2', 'node3']:
     cid = s.get(host + '_cid', '__not_set__')
     source_pid = s.get('source_pid', -1)
     # runc restore and its descendants are owned by containerd, not docker CLI.
@@ -102,7 +102,7 @@ for pid in roots:
 print('terminated experiment runtime pids',sorted(roots))
 '''
     run(host, ['sudo', '-n', 'python3', '-c', script])
-    if host == 'knode3' and s.get('migration_dir') and not s.get('ram_images'):
+    if host == 'node3' and s.get('migration_dir') and not s.get('ram_images'):
         run(host, ['sudo', '-n', 'umount', s['migration_dir'] + '/imgs_dir'])
     label = run(host, ['docker', 'inspect', '-f', '{{index .Config.Labels "swiftbaton.ae"}}', name])
     if label.returncode == 0 and label.stdout.strip() == 'true':

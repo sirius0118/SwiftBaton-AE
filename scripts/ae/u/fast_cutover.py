@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Arm before checkpoint; signal knode1 directly when CRIU locks source networking."""
+"""Arm before checkpoint; signal node1 directly when CRIU locks source networking."""
 import argparse
 import json
 import os
@@ -49,7 +49,7 @@ def listen(config, out):
         connection, address = server.accept()
         with connection:
             if address[0] != '10.0.0.62':
-                raise ValueError('Control connection must come from knode2')
+                raise ValueError('Control connection must come from node2')
             connection.settimeout(180)
             connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             with connection.makefile('rwb') as stream:

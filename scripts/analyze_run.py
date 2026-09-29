@@ -114,7 +114,7 @@ for axis in axes:
     axis.grid(axis='y', alpha=.2)
 axes[0].set_xlim(0, raw[-1][1])
 axes[0].legend(loc='upper right', ncol=3, framealpha=.95)
-axes[0].set_title('Redis live migration: knode2 → knode3, YCSB on knode1', loc='left', fontweight='bold')
+axes[0].set_title('Redis live migration: node2 → node3, YCSB on node1', loc='left', fontweight='bold')
 if longest:
     axes[1].set_xlim(max(0, zero_start-2), min(raw[-1][1], zero_end+8))
     axes[1].axvspan(zero_start, zero_end, color='#bb3e55', alpha=.1)

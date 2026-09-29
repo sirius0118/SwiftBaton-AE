@@ -18,7 +18,7 @@ for path in a.runs:
     if path.name == 'result.json':
         if not report.get('success') or report.get('cleanup_rc') != 0 or \
                 not all(report.get('restored', {}).get(host) is True
-                        for host in ('knode2', 'knode3')):
+                        for host in ('node2', 'node3')):
             p.error('baseline result is not fully validated and cleaned: ' + str(path))
         state_path = Path(report['state'])
         label = report['baseline']
@@ -28,7 +28,7 @@ for path in a.runs:
         label = report.get('baseline')
         if label != 'native-criu-rsocket' or not report.get('success') or \
                 not all(report.get('selection_rollback', {}).get(host) is True
-                        for host in ('knode2', 'knode3')):
+                        for host in ('node2', 'node3')):
             p.error('native CRIU result is not fully validated and cleaned: ' + str(path))
         transport = 'rsocket relay'
     state = json.loads(state_path.read_text())

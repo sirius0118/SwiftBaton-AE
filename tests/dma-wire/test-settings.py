@@ -35,7 +35,7 @@ class Settings(unittest.TestCase):
             with self.assertRaises(ValueError):validate_dma_config(source,dest,enabled)
     def test_capability_preflight(self):
         hosts={}
-        for host in ('knode2','knode3'):
+        for host in ('node2','node3'):
             hosts[host]={'binary_sha256':'abc','installed_sha256':'abc','pageclient_sha256':'abc',
                 'daemons':[{'name':n,'sha256':'abc'} for n in ('dockerd','containerd')],
                 'capabilities':{'version':1,'features':127},'rdma_state':'4: ACTIVE','rdma_gid':'1234'}

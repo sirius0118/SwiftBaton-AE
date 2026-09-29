@@ -10,9 +10,9 @@ sha256sum "$out/criu/criu"
 case "${1:-}" in
   '') ;;
   --stage-target)
-    ssh -oBatchMode=yes knode3 "mkdir -p '$out/criu'"
-    rsync -a "$out/criu/criu" "knode3:$out/criu/criu"
-    ssh -oBatchMode=yes knode3 "sha256sum '$out/criu/criu'"
+    ssh -oBatchMode=yes node3 "mkdir -p '$out/criu'"
+    rsync -a "$out/criu/criu" "node3:$out/criu/criu"
+    ssh -oBatchMode=yes node3 "sha256sum '$out/criu/criu'"
     ;;
   *) echo "usage: $0 [--stage-target]" >&2; exit 2 ;;
 esac
