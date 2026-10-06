@@ -7,7 +7,7 @@ starts the YCSB client on Node 1 and migrates Redis from Node 2 to Node 3.
 The full dataset is **1,000,000 keys with one 1,024-byte field**, Zipf 0.99,
 YCSB-A (50% reads and 50% updates), 32 client threads, 180 seconds, and a
 20-second warmup before checkpoint preparation. An additional 8 MiB
-immutable canary checks migration integrity. All four groups use NUMA node 0
+immutable canary checks migration integrity. All eight groups use NUMA node 0
 and a 25 Gbps hardware transmit cap on both migration hosts.
 
 | Group | CPU control |
@@ -16,8 +16,10 @@ and a 25 Gbps hardware transmit cap on both migration hosts.
 | SwiftBaton-K, unrestricted | Normal CRIU affinity |
 | SwiftBaton-U, 2core | All CRIU processes on each host share two CPUs |
 | SwiftBaton-K, 2core | Same limit, also inherited by dedicated K export/dispatch workers |
+| SwiftBaton-U/K, 4core | All CRIU processes on each host share four CPUs |
+| SwiftBaton-U/K, 8core | All CRIU processes on each host share eight CPUs |
 
-The two CPUs are one hardware thread from each of two distinct physical
+The selected CPUs are one hardware thread from each of 2, 4 or 8 distinct physical
 cores in the chosen NUMA node. Their numbers are discovered independently
 on each host. This is a shared affinity mask for the entire collection of
 CRIU processes and threads, not a two-CPU allowance for each process and
@@ -36,13 +38,13 @@ the existing acquire-load predicates. Worker counts, transfer ownership and
 installation acknowledgements remain unchanged. Larger CPU masks retain the
 normal spin policy. `SB_IDLE` in the endpoint logs records the selected policy.
 
-Redis container affinity and YCSB resources are unchanged across the four
+Redis container affinity and YCSB resources are unchanged across the eight
 groups. At the final restore transition, every application thread is released
 from the CRIU limit into its configured container CPU set. The runner checks
-source and restored Redis thread affinities and rejects inherited two-CPU
+source and restored Redis thread affinities and rejects inherited CRIU CPU
 limits on Redis. K fault callbacks execute in application context, and NIC interrupts
 and shared kernel housekeeping are also outside the CRIU CPU limit. This
-experiment does not restrict the complete host to two CPUs.
+experiment restricts CRIU resources rather than the complete host.
 
 Rebuild **both** CRIU modes and stage them before the first run; older binaries
 do not implement the startup control and are rejected by the runner's probe.
@@ -62,16 +64,33 @@ experiments/robustness/cpu_limit/run.sh --mode u --variant 2core --trials 1
 # Functionality check; these small runs are excluded from the full plots.
 experiments/robustness/cpu_limit/run.sh --mode both --variant 2core --smoke --trials 1
 # Four groups, three full trials each, with reversed ordering on even rounds.
+experiments/robustness/cpu_limit/run.sh --mode both --variant unrestricted --variant 2core --trials 3
+# Add the four- and eight-core groups, three trials per mode and mask.
+experiments/robustness/cpu_limit/run.sh --mode both --variant 4core --variant 8core --trials 3
+# All eight groups (24 migrations).
 experiments/robustness/cpu_limit/run.sh --mode both --trials 3
 python3 experiments/plot_all.py
 python3 experiments/robustness/cpu_limit/plot.py
 ```
 
-`--mode u|k`, `--variant unrestricted|2core`, and `--trials N` select a subset.
+`--mode u|k`, `--variant unrestricted|2core|4core|8core`, and `--trials N` select a subset.
+Repeat `--variant` to select several groups; omitting it selects all variants.
 `SB_BENCH_RESULTS` overrides the result root; otherwise results are stored
 outside Git in the checkout's sibling `SwiftBaton-AE-benchmark-results/`.
 The dedicated plotter accepts `--results PATH`, `--output PATH`, and
-`--smoke`. It generates PNG/PDF recovery curves, complete workload curves,
+`--smoke`. Repeat `--extra-results PATH` to combine separately collected
+groups with the same binary and workload/migration parameters for each mode.
+For example:
+
+```bash
+python3 experiments/robustness/cpu_limit/plot.py \
+  --results /path/to/new-results --extra-results /path/to/previous-results \
+  --output /path/to/combined-figures
+```
+
+The plotter rejects mixed binary versions or settings within a mode, deduplicates
+manifest paths, and excludes failed or incomplete trials. It generates PNG/PDF
+recovery curves, complete workload curves,
 client interruption detail, and `summary.json`. TTR90 uses a valid final
 destination throughput reference, 100 ms windows and one second of sustained
 recovery. It is measured from the observed client completion-gap start.

@@ -23,7 +23,17 @@
       "name": "2core",
       "parameters": {},
       "options": { "qos_gbps": 25, "criu_cpu_cores": 2 }
+    },
+    {
+      "name": "4core",
+      "parameters": {},
+      "options": { "qos_gbps": 25, "criu_cpu_cores": 4 }
+    },
+    {
+      "name": "8core",
+      "parameters": {},
+      "options": { "qos_gbps": 25, "criu_cpu_cores": 8 }
     }
   ],
-  "note": "Four groups: U/K with default affinity versus all CRIU processes sharing two logical CPUs on distinct physical cores per host. Redis and YCSB CPU resources are unchanged; all groups use NUMA 0 and RDMA 25 Gbps. Dedicated K export/dispatch workers inherit CRIU affinity. Application-context fault callbacks, NIC interrupts and shared kernel services are not capped. U/K retain their normal mode-specific PS budgets and worker counts; compare the CPU effect within each mode."
+  "note": "Eight groups: U/K with default affinity versus all CRIU processes sharing 2, 4 or 8 logical CPUs on distinct physical cores per host. Redis and YCSB CPU resources are unchanged; all groups use NUMA 0 and RDMA 25 Gbps. Dedicated K export/dispatch workers inherit CRIU affinity. Application-context fault callbacks, NIC interrupts and shared kernel services are not capped. U/K retain their normal mode-specific PS budgets and worker counts; compare the CPU effect within each mode."
 }

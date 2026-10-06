@@ -317,13 +317,15 @@ def main():
     parser.add_argument('--trials', type=int, default=5)
     parser.add_argument('--smoke', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
-    parser.add_argument('--variant', help='Run only one named variant')
+    parser.add_argument('--variant', action='append', help='Run a named variant; repeat to select several')
     args = parser.parse_args()
     case_file = args.case.resolve() / 'case.json'
     case = json.loads(case_file.read_text())
     if args.trials < 1: parser.error('--trials must be positive')
     modes = ['k','u'] if args.mode == 'both' else [args.mode]
-    variants = [v for v in case['variants'] if not args.variant or v['name'] == args.variant]
+    unknown = set(args.variant or []) - {v['name'] for v in case['variants']}
+    if unknown: parser.error('Unknown variant(s): ' + ', '.join(sorted(unknown)))
+    variants = [v for v in case['variants'] if not args.variant or v['name'] in args.variant]
     if not variants: parser.error('No matching variant')
     commands = [(v, m, invocation(case, v, m, args.smoke)) for v in variants for m in modes]
     if args.dry_run:

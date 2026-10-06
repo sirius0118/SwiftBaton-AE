@@ -79,7 +79,21 @@ def read_trial(path):
 
 
 def label(key):
-    return 'SwiftBaton-' + key[0].upper() + (' (2 CPUs)' if key[1] == '2core' else ' (default CPUs)')
+    variant = key[1]
+    count = variant[:-4] if variant.endswith('core') else None
+    suffix = 'default CPUs' if variant == 'unrestricted' else (count + ' cores' if count and count.isdigit() else variant)
+    return 'SwiftBaton-' + key[0].upper() + ' (' + suffix + ')'
+
+
+def style(key):
+    return {'unrestricted': '-', '2core': '--', '4core': '-.', '8core': ':'}.get(key[1], '-')
+
+
+def key_order(key):
+    variant = key[1]
+    count = variant[:-4] if variant.endswith('core') else ''
+    rank = 0 if variant == 'unrestricted' else int(count) if count.isdigit() else float('inf')
+    return (['u', 'k'].index(key[0]), rank, variant)
 
 
 def main():
@@ -87,12 +101,17 @@ def main():
     p.add_argument('--results', type=Path, default=Path(os.environ.get(
         'SB_BENCH_RESULTS', ROOT.parent / (ROOT.name + '-benchmark-results'))))
     p.add_argument('--output', type=Path)
+    p.add_argument('--extra-results', type=Path, action='append', default=[],
+                   help='Merge another result root; repeat to include several')
     p.add_argument('--smoke', action='store_true')
     a = p.parse_args()
     out = a.output or a.results / 'plots' / ('cpu-limit-smoke' if a.smoke else 'cpu-limit')
     out.mkdir(parents=True, exist_ok=True)
     groups, skipped = defaultdict(list), []
-    for path in sorted((a.results / 'robustness-cpu-limit').glob('*/experiment.json')):
+    roots = [a.results] + a.extra_results
+    paths = sorted({path.resolve() for root in roots
+                    for path in (root / 'robustness-cpu-limit').glob('*/experiment.json')})
+    for path in paths:
         info = json.loads(path.read_text())
         if bool(info.get('smoke')) != a.smoke: continue
         try: t = read_trial(path)
@@ -103,8 +122,13 @@ def main():
     if not groups:
         print(json.dumps({'skipped': skipped}, indent=2))
         raise SystemExit('No validated CPU-limit trials')
-    keys = [key for key in [('u', 'unrestricted'), ('u', '2core'),
-                             ('k', 'unrestricted'), ('k', '2core')] if key in groups]
+    keys = sorted(groups, key=key_order)
+    for mode in {key[0] for key in keys}:
+        trials = [t['summary'] for key in keys if key[0] == mode for t in groups[key]]
+        if len({t['binary_sha256'] for t in trials}) != 1:
+            raise SystemExit('Refusing to combine different CRIU binaries for mode ' + mode)
+        if len({json.dumps(t['parameters'], sort_keys=True) for t in trials}) != 1:
+            raise SystemExit('Refusing to combine different workload/migration parameters for mode ' + mode)
     chosen = {key: sorted(groups[key], key=lambda t: t['summary']['downtime_ms'])[len(groups[key]) // 2]
               for key in keys}
     colors = {'u': '#2166ac', 'k': '#d66028'}
@@ -114,32 +138,34 @@ def main():
         selected = chosen[key]
         for t in groups[key]:
             axes[0].plot(t['t100'] - t['origin'], t['r100'] / 1000,
-                         color=colors[key[0]], ls='--' if key[1] == '2core' else '-',
+                         color=colors[key[0]], ls=style(key),
                          alpha=.15, lw=.7)
         x = selected['t100'] - selected['origin']
         axes[0].plot(x, selected['r100'] / 1000, color=colors[key[0]],
-                     ls='--' if key[1] == '2core' else '-', lw=1.5, label=label(key))
+                     ls=style(key), lw=1.5, label=label(key))
         reference = selected['summary']['destination_ops_s']
         axes[1].plot(x, selected['r100'] / reference, color=colors[key[0]],
-                     ls='--' if key[1] == '2core' else '-', lw=1.5, label=label(key))
+                     ls=style(key), lw=1.5, label=label(key))
     recovery_window = max(12, max(t['summary']['downtime_ms'] / 1000 + 5
                                   for items in groups.values() for t in items))
     for ax in axes:
         ax.set_xlim(-1, recovery_window); ax.set_ylim(bottom=0); ax.grid(axis='y', alpha=.2)
         ax.axvline(0, color='#555555', ls=':', lw=.8)
         ax.set_xlabel('Time from measured client completion-gap start (s)')
-        ax.legend(fontsize=9, ncol=2)
+        ax.legend(fontsize=9, ncol=2 if len(keys) <= 4 else 4)
     axes[0].set_ylabel('Throughput (thousand ops/s)')
     axes[1].set_ylabel('Throughput / final destination mean')
     axes[1].axhline(.9, color='#888888', ls=':', lw=.8)
     parameters = chosen[keys[0]]['summary']['parameters']
-    fig.suptitle('Redis migration: default CPUs versus 2 CPUs for CRIU\n'
+    fig.suptitle('Redis migration with shared CRIU CPU affinity\n'
                  f"{parameters['records']:,} keys x {parameters['field_length']/1024:g} KiB; YCSB-A; "
                  f"Zipf {parameters['zipf_zeta']}; {parameters['threads']} YCSB threads; RDMA 25 Gbps"
                  + (' [SMOKE DATASET]' if a.smoke else ''))
     fig.savefig(out / 'cpu-limit-recovery.png', dpi=180)
     fig.savefig(out / 'cpu-limit-recovery.pdf'); plt.close(fig)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 7), constrained_layout=True)
+    rows = math.ceil(len(keys) / 2)
+    fig, axes = plt.subplots(rows, 2, figsize=(12, 3.5 * rows), squeeze=False, constrained_layout=True)
+    for ax in list(axes.flat)[len(keys):]: ax.set_visible(False)
     for ax, key in zip(axes.flat, keys):
         t = chosen[key]; s = t['summary']
         ax.plot(t['t100'], t['r100'] / 1000, color=colors[key[0]], lw=1)
@@ -151,7 +177,8 @@ def main():
         ax.grid(axis='y', alpha=.2); ax.legend(fontsize=8)
     fig.savefig(out / 'cpu-limit-full-workload.png', dpi=180)
     fig.savefig(out / 'cpu-limit-full-workload.pdf'); plt.close(fig)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 7), constrained_layout=True)
+    fig, axes = plt.subplots(rows, 2, figsize=(12, 3.5 * rows), squeeze=False, constrained_layout=True)
+    for ax in list(axes.flat)[len(keys):]: ax.set_visible(False)
     for ax, key in zip(axes.flat, keys):
         t = chosen[key]; s = t['summary']
         ax.step((t['time'] - t['origin']) * 1000, t['rate'] / 1000,
@@ -168,7 +195,8 @@ def main():
         'selection': 'All trials shown faintly; highlighted trial has the middle downtime in each group. This is a real trial, not an averaged synthetic curve.',
         'downtime': 'Largest all-client successful-operation gap in the cutover window, measured in client monotonic time.',
         'ttr90': '100 ms rolling throughput >=90% of the valid final destination mean, sustained 1 s; start time measured from completion-gap start.',
-        'scope': 'CRIU and dedicated K dispatch/export workers share two selected CPUs per host. Redis, YCSB, application-context K fault callbacks and NIC IRQs are not capped.'},
+        'scope': 'CRIU and dedicated K dispatch/export workers share the selected CPUs on distinct physical cores per host. Redis, YCSB, application-context K fault callbacks and NIC IRQs are not capped.'},
+        'result_roots': [str(root.resolve()) for root in roots],
         'groups': {}, 'runs': [], 'skipped': skipped}
     for key in keys:
         stats = {'count': len(groups[key]), 'selected_trial': chosen[key]['summary']['trial']}
