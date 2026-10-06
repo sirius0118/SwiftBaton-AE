@@ -23,6 +23,11 @@ The **destination (Node 3) needs the patched kernel**. The source (Node 2) can u
 
 ## Build the kernel in isolation
 
+Install the packages listed by `bash scripts/install-build-deps.sh` on the
+build host first. In addition to the compiler, the supplied kernel configuration
+needs `flex`, `bison`, `bc`, `libelf-dev`, `libssl-dev`, `cpio` and `xz-utils`;
+`kmod` supplies `modinfo` and `modprobe` for the subsequent module checks.
+
 Obtain the upstream Linux 5.15.167 source from [kernel.org](https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.15.167.tar.xz), verifying the upstream signature according to the kernel release instructions. Keep a pristine extracted tree outside this checkout, then run:
 
 ```bash

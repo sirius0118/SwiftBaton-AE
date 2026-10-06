@@ -134,6 +134,12 @@ The list includes `libprotobuf-c-dev`, `protobuf-c-compiler`,
 `protobuf-compiler`, `python3-protobuf`, and `uthash-dev`, as well as the
 BSD, nftables, AIO, TLS, and RDMA development libraries. These are build
 dependencies; installing them does not establish runtime/kernel compatibility.
+The script also installs the runner's SSH, process, network and module tools,
+plus `libnetfilter-queue1` and `libnetfilter-conntrack3` for buffered cutover.
+On newly provisioned hosts, install these prerequisites on all three nodes;
+copying the checkout or compiled files does not install peer dependencies.
+Run the installer as root or through an account with working `sudo` access.
+Docker and the matching kernel/OFED setup remain separate provisioning steps.
 Both CRIU trees have been clean-built with GCC 11.4 on Ubuntu 22.04, including
 from a Git-free archive with flattened symlinks and removed executable modes.
 This validates compilation and source recovery, not migration on every Ubuntu
