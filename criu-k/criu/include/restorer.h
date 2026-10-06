@@ -131,6 +131,10 @@ struct thread_restore_args {
 	char comm[TASK_COMM_LEN];
 	int cg_set;
 	int cgroupd_sk;
+
+	/* Opt-in AE limit applies to CRIU, not the restored application. */
+	unsigned long sb_cpu_app_mask[128 / sizeof(unsigned long)];
+	unsigned int sb_cpu_app_mask_bytes;
 } __aligned(64);
 
 typedef long (*thread_restore_fcall_t)(struct thread_restore_args *args);

@@ -297,6 +297,19 @@ def finish_cpu_trial(hosts, dest):
     return not errors and all(info['result']['ok'] for info in hosts.values())
 
 
+def validate_application_cpus(raw):
+    from common.cpu_limit import cpulist
+    result = {}
+    for phase in ('source-before-workload', 'target-after-workload'):
+        data = json.loads((raw / ('runtime-' + phase + '.json')).read_text())
+        expected = cpulist(data['host_config']['CpusetCpus'])
+        masks = {tid: sorted(row['affinity']) for tid, row in data['tasks'].items()}
+        if not masks or any(set(mask) != expected for mask in masks.values()):
+            raise RuntimeError('Redis inherited a migration CPU limit: ' + phase + ' ' + str(masks))
+        result[phase] = {'container_cpus': sorted(expected), 'task_affinities': masks}
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case', type=Path, required=True)
@@ -378,6 +391,9 @@ def main():
                 driver_state = json.loads(state.read_text())
                 if rc or not driver_state.get('success'):
                     raise RuntimeError('Migration failed; see ' + str(dest / 'driver.log'))
+                if case.get('observe_criu_cpus'):
+                    record['application_cpu_validation'] = validate_application_cpus(state.parent)
+                    record['application_cpu_validation_ok'] = True
                 if case['workload'] != 'largecontainer':
                     record['client_result'] = client_result(state.parent / 'run.log')
                     record['poststeady_result'] = client_result(state.parent / 'poststeady.log')

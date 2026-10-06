@@ -1,3 +1,4 @@
+#include <sched.h>
 #include "sb-cutover.h"
 #include "sb-kernel-transfer.h"
 #include "sb-images.h"
@@ -143,6 +144,9 @@ extern uint64_t pidset[MAX_PROCESS];    // pidset用的是容器内的virt pid
 #endif
 
 struct pstree_item *current;
+
+extern cpu_set_t sb_cpu_app_mask;
+extern unsigned int sb_cpu_app_mask_bytes;
 
 static int restore_task_with_children(void *);
 static int sigreturn_restore(pid_t pid, struct task_restore_args *ta, unsigned long alen, CoreEntry *core);
@@ -3767,6 +3771,10 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 
 #endif
 (void)0; /* Remove legacy hot-path probe. */
+		BUILD_BUG_ON(sizeof(sb_cpu_app_mask) > sizeof(thread_args[i].sb_cpu_app_mask));
+		thread_args[i].sb_cpu_app_mask_bytes = sb_cpu_app_mask_bytes;
+		if (sb_cpu_app_mask_bytes)
+			memcpy(thread_args[i].sb_cpu_app_mask, &sb_cpu_app_mask, sb_cpu_app_mask_bytes);
 		thread_args[i].pid = current->threads[i].ns[0].virt;
 		thread_args[i].siginfo_n = siginfo_priv_nr[i];
 		thread_args[i].siginfo = task_args->siginfo;

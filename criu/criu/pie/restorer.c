@@ -613,6 +613,19 @@ static int restore_robust_futex(struct thread_restore_args *args)
 	return ret;
 }
 
+static int restore_application_cpu_affinity(struct thread_restore_args *args)
+{
+	int ret;
+	if (!args->sb_cpu_app_mask_bytes)
+		return 0;
+	/* The restored cgroup clips this pre-limit host mask to the container's
+	 * configured CPUs. Keep CRIU coordinators/workers on their limited mask. */
+	ret = sys_sched_setaffinity(0, args->sb_cpu_app_mask_bytes, args->sb_cpu_app_mask);
+	if (ret)
+		pr_err("Cannot release application from AE CPU limit: %d\n", ret);
+	return ret;
+}
+
 static int restore_thread_common(struct thread_restore_args *args)
 {
 	sys_set_tid_address((int *)decode_pointer(args->clear_tid_addr));
@@ -797,6 +810,9 @@ __visible long __export_restore_thread(struct thread_restore_args *args)
 	 * Make sure it's before creds, since it's privileged
 	 * operation bound to uid 0 in current user ns.
 	 */
+	if (restore_application_cpu_affinity(args))
+		goto core_restore_end;
+
 	if (restore_seccomp(args))
 		BUG();
 
@@ -2254,6 +2270,9 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	 * Make sure it's before creds, since it's privileged
 	 * operation bound to uid 0 in current user ns.
 	 */
+	if (restore_application_cpu_affinity(args->t))
+		goto core_restore_end;
+
 	if (restore_seccomp(args->t))
 		goto core_restore_end;
 

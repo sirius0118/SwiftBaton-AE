@@ -22,7 +22,7 @@ from plot_all import load_trial
 
 def read_trial(path):
     t = load_trial(path)
-    if not t or not t.get('cpu_validation_ok'): return None
+    if not t or not t.get('cpu_validation_ok') or not t.get('application_cpu_validation_ok'): return None
     gaps = t['gaps'].get('cutover_window_gaps', [])
     if not gaps: raise ValueError('No measured cutover completion gap')
     gap = max(gaps, key=lambda g: g['duration_ms'])

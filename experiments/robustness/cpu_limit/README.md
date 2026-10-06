@@ -27,7 +27,10 @@ worker configurations remain mode-specific; use the within-mode comparisons
 to assess CPU sensitivity.
 
 Redis container affinity and YCSB resources are unchanged across the four
-groups. K fault callbacks execute in application context, and NIC interrupts
+groups. At the final restore transition, every application thread is released
+from the CRIU limit into its configured container CPU set. The runner checks
+source and restored Redis thread affinities and rejects inherited two-CPU
+limits on Redis. K fault callbacks execute in application context, and NIC interrupts
 and shared kernel housekeeping are also outside the CRIU CPU limit. This
 experiment does not restrict the complete host to two CPUs.
 

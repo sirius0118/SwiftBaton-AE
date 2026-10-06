@@ -16,6 +16,9 @@
 #define SB_CPU_CONTROL "/run/swiftbaton-ae/criu-cpus"
 #define SB_CPU_AUDIT "/run/swiftbaton-ae/criu-cpu-audit.jsonl"
 
+cpu_set_t sb_cpu_app_mask;
+unsigned int sb_cpu_app_mask_bytes;
+
 static int sb_cpu_limit(void)
 {
 	char text[4096], record[4300], *p, *end;
@@ -56,6 +59,8 @@ static int sb_cpu_limit(void)
 		if (*end != ',' || !end[1]) goto invalid;
 		p = end + 1;
 	} while (1);
+	if (sched_getaffinity(0, sizeof(sb_cpu_app_mask), &sb_cpu_app_mask)) return -1;
+	sb_cpu_app_mask_bytes = sizeof(sb_cpu_app_mask);
 	if (sched_setaffinity(0, sizeof(wanted), &wanted) ||
 	    sched_getaffinity(0, sizeof(actual), &actual)) return -1;
 	for (i = 0; i < CPU_SETSIZE; i++)
