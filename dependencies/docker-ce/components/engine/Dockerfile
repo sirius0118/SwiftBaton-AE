@@ -24,7 +24,8 @@ ADD --chmod=0644 https://download.opensuse.org/repositories/devel:/tools:/criu/D
 RUN --mount=type=cache,sharing=locked,id=moby-criu-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-criu-aptcache,target=/var/cache/apt \
         echo 'deb https://download.opensuse.org/repositories/devel:/tools:/criu/Debian_11/ /' > /etc/apt/sources.list.d/criu.list \
-        && apt-get update \
+        && rm -rf /var/lib/apt/lists/* \
+        && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update \
         && apt-get install -y --no-install-recommends criu \
         && install -D /usr/sbin/criu /build/criu
 
@@ -80,7 +81,8 @@ FROM debian:${BASE_DEBIAN_DISTRO} AS frozen-images
 ARG DEBIAN_FRONTEND
 RUN --mount=type=cache,sharing=locked,id=moby-frozen-images-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-frozen-images-aptcache,target=/var/cache/apt \
-       apt-get update && apt-get install -y --no-install-recommends \
+       rm -rf /var/lib/apt/lists/* \
+        && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
            ca-certificates \
            curl \
            jq
@@ -106,7 +108,8 @@ RUN dpkg --add-architecture ppc64el
 RUN dpkg --add-architecture s390x
 RUN --mount=type=cache,sharing=locked,id=moby-cross-true-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-cross-true-aptcache,target=/var/cache/apt \
-        apt-get update && apt-get install -y --no-install-recommends \
+        rm -rf /var/lib/apt/lists/* \
+        && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
             crossbuild-essential-arm64 \
             crossbuild-essential-armel \
             crossbuild-essential-armhf \
@@ -119,7 +122,8 @@ FROM dev-base AS runtime-dev-cross-false
 ARG DEBIAN_FRONTEND
 RUN --mount=type=cache,sharing=locked,id=moby-cross-false-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-cross-false-aptcache,target=/var/cache/apt \
-        apt-get update && apt-get install -y --no-install-recommends \
+        rm -rf /var/lib/apt/lists/* \
+        && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
             binutils-mingw-w64 \
             g++-mingw-w64-x86-64 \
             libapparmor-dev \
@@ -135,7 +139,8 @@ ARG DEBIAN_FRONTEND
 # on non-amd64 systems, so other architectures cannnot crossbuild amd64.
 RUN --mount=type=cache,sharing=locked,id=moby-cross-true-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-cross-true-aptcache,target=/var/cache/apt \
-        apt-get update && apt-get install -y --no-install-recommends \
+        rm -rf /var/lib/apt/lists/* \
+        && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
             libapparmor-dev:arm64 \
             libapparmor-dev:armel \
             libapparmor-dev:armhf \
@@ -179,7 +184,8 @@ FROM dev-base AS containerd
 ARG DEBIAN_FRONTEND
 RUN --mount=type=cache,sharing=locked,id=moby-containerd-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-containerd-aptcache,target=/var/cache/apt \
-        apt-get update && apt-get install -y --no-install-recommends \
+        rm -rf /var/lib/apt/lists/* \
+        && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
             libbtrfs-dev
 ARG CONTAINERD_VERSION
 COPY /hack/dockerfile/install/install.sh /hack/dockerfile/install/containerd.installer /
@@ -229,7 +235,8 @@ ARG DEBIAN_FRONTEND
 ARG TINI_VERSION
 RUN --mount=type=cache,sharing=locked,id=moby-tini-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-tini-aptcache,target=/var/cache/apt \
-        apt-get update && apt-get install -y --no-install-recommends \
+        rm -rf /var/lib/apt/lists/* \
+        && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
             cmake \
             vim-common
 COPY /hack/dockerfile/install/install.sh /hack/dockerfile/install/tini.installer /
@@ -274,7 +281,8 @@ RUN ldconfig
 # Do you really need to add another package here? Can it be done in a different build stage?
 RUN --mount=type=cache,sharing=locked,id=moby-dev-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-dev-aptcache,target=/var/cache/apt \
-        apt-get update && apt-get install -y --no-install-recommends \
+        rm -rf /var/lib/apt/lists/* \
+        && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
             apparmor \
             bash-completion \
             bzip2 \
@@ -338,7 +346,8 @@ ENTRYPOINT ["hack/dind"]
 FROM dev-systemd-false AS dev-systemd-true
 RUN --mount=type=cache,sharing=locked,id=moby-dev-aptlib,target=/var/lib/apt \
     --mount=type=cache,sharing=locked,id=moby-dev-aptcache,target=/var/cache/apt \
-        apt-get update && apt-get install -y --no-install-recommends \
+        rm -rf /var/lib/apt/lists/* \
+        && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
             dbus \
             dbus-user-session \
             systemd \

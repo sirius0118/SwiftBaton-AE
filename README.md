@@ -104,12 +104,38 @@ git clone https://github.com/sirius0118/SwiftBaton-AE.git
 cd SwiftBaton-AE
 ```
 
-If the checkout already exists, use it instead of cloning over it. For a new Ubuntu 20.04 build host, inspect the package installation commands and run them if needed:
+If the checkout already exists, use it instead of cloning over it. A Git clone or
+`git archive` preserves source symlinks and executable modes. If an anonymous
+download flattened these into text files or removed executable bits, restore
+the recorded metadata before building:
+
+```bash
+python3 scripts/restore-source-metadata.py --repair
+python3 scripts/restore-source-metadata.py
+```
+
+The second command must report zero errors and zero entries needing repair.
+This works without Git and refuses to overwrite an edited file with a symlink.
+The CRIU build entry point also performs this repair. Its x86 build rules create
+the generated `compel/plugins/include/uapi/std/asm` directory when needed.
+
+For an Ubuntu build host, inspect the package installation commands and run them if needed:
 
 ```bash
 bash scripts/install-build-deps.sh
 bash scripts/install-build-deps.sh --execute
 ```
+
+The list includes `libprotobuf-c-dev`, `protobuf-c-compiler`,
+`protobuf-compiler`, `python3-protobuf`, and `uthash-dev`, as well as the
+BSD, nftables, AIO, TLS, and RDMA development libraries. These are build
+dependencies; installing them does not establish runtime/kernel compatibility.
+The reference testbed runs Ubuntu 20.04. A clean Ubuntu 22.04/GCC 11 build and
+an end-to-end run on another kernel are separate validation steps.
+
+Earlier artifact snapshots used `ArtifactEvalution/run_migration.sh` and a Fluid
+workflow. That script is not the entry point for this repository. Follow the
+commands matching the snapshot you downloaded; do not mix the two workflows.
 
 Build from source on Node 2:
 

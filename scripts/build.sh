@@ -5,6 +5,7 @@ sb_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 sb_jobs=${SB_BUILD_JOBS:-12}
 case "${1:-help}" in
   U|K)
+    python3 "$sb_root/scripts/restore-source-metadata.py" --repair
     sb_mode=$1; sb_src=criu
     if [[ $sb_mode == K ]]; then sb_src=criu-k; fi
     mkdir -p "$sb_root/build/criu-$sb_mode"

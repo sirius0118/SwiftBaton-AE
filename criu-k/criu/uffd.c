@@ -2186,7 +2186,7 @@ pid_t get_container_pid(const char *container_name)
 	// 跳过第一行（表头）
 	if (fgets(buffer, sizeof(buffer), fp) == NULL) {
 		perror("fgets failed");
-		fclose(fp);
+		pclose(fp);
 		return -1;
 	}
 
@@ -2198,16 +2198,16 @@ pid_t get_container_pid(const char *container_name)
 
 		if (token != NULL) {
 			pid_t pid = atoi(token); // 将 PID 转换为整数
-			fclose(fp);
+			pclose(fp);
 			return pid;
 		} else {
 			printf("PID not found\n");
-			fclose(fp);
+			pclose(fp);
 			return -1;
 		}
 	}
 
-	fclose(fp);
+	pclose(fp);
 	return -1;
 }
 
