@@ -10,7 +10,7 @@ The source comes from the previously published artifact's recovered engine tree;
 
 ## Independent host provisioning
 
-The engine Dockerfile provides an `ae-runtime` BuildKit target. To
+The engine's `Dockerfile.ae` provides an `ae-runtime` BuildKit target. To
 export a candidate bundle without installing programs on the host:
 
 ```bash
@@ -25,14 +25,15 @@ separate development snapshots. Compilation/export of this bundle still needs
 validation on a clean build host, followed by checkpoint/restore validation
 before treating it as a replacement for the provisioned runtime.
 
-This native rootful target exports the required programs explicitly. It skips
-`frozen-images` and the upstream builder's rootless desktop/vpnkit dependencies;
-these are not used by the AE migration workflow. APT operations clear cached package indexes,
-retry downloads and fail if an index update fails, instead of proceeding with
-old indexes. If a package still returns HTTP 404, retain the complete update
-log and inspect the configured Debian mirror/proxy. That error alone does not
-identify an Ubuntu host or GCC incompatibility. Do not disable signature
-verification or silently change the distribution to bypass it.
+This native rootful target uses Ubuntu 22.04 packages and the engine's original
+Go 1.17.4 toolchain. It avoids the legacy Debian bullseye package repositories,
+frozen test images and rootless desktop/vpnkit dependencies. Programs are exported
+explicitly. APT downloads fresh indexes and fails if an update fails; package
+signature verification remains enabled.
+
+Extra script arguments are passed to `docker build`. If the Docker bridge cannot
+resolve/reach package servers but the host can, build with
+`bash scripts/build-runtime.sh --network host`. No daemon configuration is changed.
 
 Build entry points for the included projects are:
 

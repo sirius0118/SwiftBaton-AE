@@ -409,24 +409,5 @@ COPY --from=build-dynbinary /build/bundles/ /
 FROM scratch AS cross
 COPY --from=build-cross /build/bundles/ /
 
-# Native, rootful runtime used by the AE workflow. Export dependencies explicitly
-# instead of pulling the upstream development/test and rootless desktop images.
-FROM runtime-dev AS ae-engine
-ARG DOCKER_GITCOMMIT=source-archive
-ARG VERSION=dev
-ARG DOCKER_BUILDTAGS
-ENV DOCKER_GITCOMMIT=${DOCKER_GITCOMMIT} VERSION=${VERSION} \
-    DOCKER_BUILDTAGS=${DOCKER_BUILDTAGS} PREFIX=/build
-WORKDIR /go/src/github.com/docker/docker
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=bind,target=/go/src/github.com/docker/docker \
-        hack/make.sh binary
-
-FROM scratch AS ae-runtime
-COPY --from=ae-engine /build/bundles/binary-daemon/ /binary-daemon/
-COPY --from=runc /build/runc /binary-daemon/runc
-COPY --from=containerd /build/containerd /build/containerd-shim /build/containerd-shim-runc-v2 /build/ctr /binary-daemon/
-COPY --from=tini /build/docker-init /binary-daemon/docker-init
-
 FROM dev AS final
 COPY . /go/src/github.com/docker/docker

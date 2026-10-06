@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1.3
+
+# Keep the engine's Go toolchain, but obtain OS packages from Ubuntu 22.04.
+# The legacy bullseye security indexes can refer to removed package files.
+ARG GOLANG_IMAGE=golang:1.17.4-bullseye
+ARG BUILD_IMAGE=ubuntu:22.04
+FROM ${GOLANG_IMAGE} AS go-toolchain
+
+FROM ${BUILD_IMAGE} AS build-base
+ENV DEBIAN_FRONTEND=noninteractive
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+ENV PATH=/usr/local/go/bin:${PATH} GOPATH=/go GO111MODULE=off
+RUN rm -rf /var/lib/apt/lists/* \
+    && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update \
+    && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates git pkg-config cmake \
+        libapparmor-dev libbtrfs-dev libdevmapper-dev libseccomp-dev \
+        libsystemd-dev libudev-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM build-base AS engine
+ARG DOCKER_GITCOMMIT=source-archive
+ARG VERSION=dev
+ENV DOCKER_GITCOMMIT=${DOCKER_GITCOMMIT} VERSION=${VERSION} \
+    DOCKER_BUILDTAGS="apparmor seccomp" PREFIX=/build
+WORKDIR /go/src/github.com/docker/docker
+COPY . .
+RUN hack/make.sh binary
+
+FROM build-base AS runc
+COPY hack/dockerfile/install/ /install/
+RUN PREFIX=/build /install/install.sh runc
+
+FROM build-base AS containerd
+COPY hack/dockerfile/install/ /install/
+RUN PREFIX=/build /install/install.sh containerd
+
+FROM build-base AS tini
+COPY hack/dockerfile/install/ /install/
+RUN PREFIX=/build /install/install.sh tini
+
+FROM scratch AS ae-runtime
+COPY --from=engine /build/bundles/binary-daemon/ /binary-daemon/
+COPY --from=runc /build/runc /binary-daemon/runc
+COPY --from=containerd /build/containerd /build/containerd-shim /build/containerd-shim-runc-v2 /build/ctr /binary-daemon/
+COPY --from=tini /build/docker-init /binary-daemon/docker-init
