@@ -317,6 +317,8 @@ def main():
     parser.add_argument('--trials', type=int, default=5)
     parser.add_argument('--smoke', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--resume', action='store_true',
+                        help='Keep matching validated trials and run only missing repetitions')
     parser.add_argument('--variant', action='append', help='Run a named variant; repeat to select several')
     args = parser.parse_args()
     case_file = args.case.resolve() / 'case.json'
@@ -349,6 +351,30 @@ def main():
                     for v, m, c in (commands if trial % 2 else list(reversed(commands)))]
     else:
         schedule = [(v, m, c, trial) for v, m, c in commands for trial in range(1, args.trials + 1)]
+    if args.resume:
+        planned = {(m, v['name'], trial): c for v, m, c, trial in schedule}
+        hashes = {m: ensure_build_path(m, case['workload'])[1] for m in modes}
+        completed = set()
+        name = re.sub(r'[^a-z0-9_-]+', '-', case['name'].lower())
+        for path in sorted((WORK / name).glob('*/experiment.json')):
+            saved = json.loads(path.read_text())
+            if not saved.get('success'): continue
+            key = (saved.get('mode'), saved.get('variant'), saved.get('trial'))
+            if key not in planned: continue
+            required = {'case_sha256': case_sha256, 'image_id': image_id,
+                        'binary_sha256': hashes[key[0]], 'command': planned[key],
+                        'smoke': args.smoke, 'driver_rc': 0, 'cleanup_rc': 0,
+                        'criu_restored': True, 'qos_restored': True, 'source_dirty': False}
+            if case.get('observe_criu_cpus'):
+                required.update(cpu_validation_ok=True, application_cpu_validation_ok=True)
+            if any(saved.get(field) != value for field, value in required.items()):
+                raise SystemExit('Cannot resume with incompatible or unvalidated trial: ' + str(path))
+            if key in completed:
+                raise SystemExit('Duplicate successful repetition: ' + str(path))
+            completed.add(key)
+        schedule = [(v, m, c, trial) for v, m, c, trial in schedule
+                    if (m, v['name'], trial) not in completed]
+        print('BENCH_RESUME=' + json.dumps({'completed': len(completed), 'remaining': len(schedule)}), flush=True)
     for variant, mode, command, trial in schedule:
         stage_helpers(mode)
         binary, digest = ensure_build_path(mode, case['workload'])

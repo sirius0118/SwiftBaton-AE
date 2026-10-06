@@ -75,6 +75,12 @@ python3 experiments/robustness/cpu_limit/plot.py
 
 `--mode u|k`, `--variant unrestricted|2core|4core|8core`, and `--trials N` select a subset.
 Repeat `--variant` to select several groups; omitting it selects all variants.
+After an aborted run has finished its cleanup, repeat the same command and
+result root with `--resume` to run only missing successful repetitions.
+The runner verifies the saved case, image, binary, invocation and cleanup/CPU
+checks before reusing a trial. Failed attempts remain in the result directory
+and are listed as skipped by the plotter. Do not use resume to mix different
+binary versions or change the workload parameters.
 `SB_BENCH_RESULTS` overrides the result root; otherwise results are stored
 outside Git in the checkout's sibling `SwiftBaton-AE-benchmark-results/`.
 The dedicated plotter accepts `--results PATH`, `--output PATH`, and
