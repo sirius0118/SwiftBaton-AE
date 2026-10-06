@@ -8,10 +8,11 @@ mkdir -p "$sb_out"
 sb_out=$(cd -- "$sb_out" && pwd)
 sb_engine="$sb_root/dependencies/docker-ce/components/engine"
 test -f "$sb_engine/hack/make/binary-daemon"
-# The binary target skips the unrelated frozen test-image/CRIU stages in final.
-DOCKER_BUILDKIT=1 docker build --pull --no-cache --target binary \
+# The AE target excludes test fixtures and rootless desktop dependencies.
+# Extra arguments, e.g. --build-arg GOLANG_IMAGE=..., are passed to Docker.
+DOCKER_BUILDKIT=1 docker build --pull --no-cache --target ae-runtime \
   --build-arg "DOCKER_GITCOMMIT=${SB_SOURCE_REVISION:-source-archive}" \
-  --output "type=local,dest=$sb_out" -f "$sb_engine/Dockerfile" "$sb_engine"
+  --output "type=local,dest=$sb_out" -f "$sb_engine/Dockerfile" "$@" "$sb_engine"
 for sb_binary in dockerd docker-proxy runc containerd containerd-shim containerd-shim-runc-v2 ctr docker-init; do
   test -x "$sb_out/binary-daemon/$sb_binary" || {
     echo "Missing runtime build output: $sb_out/binary-daemon/$sb_binary" >&2

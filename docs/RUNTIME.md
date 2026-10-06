@@ -10,7 +10,7 @@ The source comes from the previously published artifact's recovered engine tree;
 
 ## Independent host provisioning
 
-The recovered engine build scripts provide a `binary` BuildKit target. To
+The engine Dockerfile provides an `ae-runtime` BuildKit target. To
 export a candidate bundle without installing programs on the host:
 
 ```bash
@@ -25,8 +25,9 @@ separate development snapshots. Compilation/export of this bundle still needs
 validation on a clean build host, followed by checkpoint/restore validation
 before treating it as a replacement for the provisioned runtime.
 
-The binary target skips `frozen-images`, a test-fixture stage reached by the
-old default Dockerfile target. APT operations clear cached package indexes,
+This native rootful target exports the required programs explicitly. It skips
+`frozen-images` and the upstream builder's rootless desktop/vpnkit dependencies;
+these are not used by the AE migration workflow. APT operations clear cached package indexes,
 retry downloads and fail if an index update fails, instead of proceeding with
 old indexes. If a package still returns HTTP 404, retain the complete update
 log and inspect the configured Debian mirror/proxy. That error alone does not
