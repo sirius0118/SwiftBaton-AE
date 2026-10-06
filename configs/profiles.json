@@ -85,8 +85,20 @@
     "--kernel-ps-chunk-mb",
     "64",
     "--kernel-export-workers",
-    "4",
+    "16",
     "--kernel-export-chunk-mb",
-    "0"
+    "64",
+    "--kernel-catalog-workers",
+    "16",
+    "--validation-workers",
+    "16",
+    "--kernel-ps-arm",
+    "--kernel-ps-mr",
+    "--precopy-limit-mb",
+    "64",
+    "--buffered-cutover",
+    "--network-lock",
+    "nftables",
+    "--vma-cache"
   ]
 }

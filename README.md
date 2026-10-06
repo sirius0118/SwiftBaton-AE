@@ -122,7 +122,7 @@ bash scripts/build.sh fixture
 
 These commands compile in separate copies under `build/`. They do not install system programs, load modules, start containers, or reboot. `SB_BUILD_JOBS` controls compiler parallelism (default 12). Maven needs access to its dependencies on the first build. The client classpath includes `core/target/classes`, `redis/target/classes`, and the dependency JAR directories produced by Maven. Do not substitute upstream YCSB.
 
-Kernel/module builds, including the optional prepared-ARM and batch-accounting patch series, are documented separately in [docs/KERNEL.md](docs/KERNEL.md). They are unnecessary for a reviewer using the already-provisioned K hosts; the module source in this checkout also supports the existing host ABI.
+Kernel/module builds are documented separately in [docs/KERNEL.md](docs/KERNEL.md). The default K profile requires the prepared-ARM and batch-accounting kernel patches, destination token preparation and unbound-region support, and source PS memory pre-registration. The provided hosts already have the required kernel; their loaded modules must also provide these features. A module with only base K support can complete migration but cannot reproduce this profile's short downtime.
 
 ## 4. Stage and inspect
 
@@ -144,7 +144,7 @@ python3 scripts/run.py U --check
 python3 scripts/run.py K --check
 ```
 
-Each command must exit zero and report `"ok": true`. This checks binary equality, basic host readiness, client build products, image identity, and module availability. At actual K startup, the driver additionally checks the kernel UAPI/features, RDMA device/GID and loaded mode. Resolve errors before running an experiment.
+Each command must exit zero and report `"ok": true`. This checks binary equality, basic host readiness, client build products, image identity, and the loaded module's ABI and capabilities required by the selected profile. The K result includes both module build IDs and capability masks. At actual K startup, the driver additionally checks RDMA device/GID, daemon CRIU resolution and loaded mode. Resolve errors before running an experiment. Rebuilding CRIU or seeing the expected `uname -r` alone does not update or verify the loaded module.
 
 ## 5. Minimal end-to-end run
 
@@ -169,7 +169,7 @@ The runner:
 1. Acquires the local experiment lock and confirms both hosts are idle.
 2. Temporarily selects the newly built U or K CRIU on both hosts, then verifies root/Docker/containerd resolve that exact binary.
 3. Creates labelled Redis containers, loads data, and starts YCSB on Node 1.
-4. Prepares PS state, checkpoints on Node 2, transfers CRIU images through RAM/RDMA, restores on Node 3, and redirects client traffic with an experiment-specific iptables rule.
+4. Prepares PS state, checkpoints on Node 2, transfers CRIU images through RAM/RDMA, restores on Node 3, and redirects client traffic using experiment-specific rules. K buffers client packets during cutover and uses nftables for the CRIU network lock.
 5. Completes page transfer, retires the source, verifies records/sentinel/canary, and analyzes throughput/recovery. K requires all remote PTE markers and background work to drain before source retirement.
 6. Verifies image checksums while checkpoint images still exist, cleans the experiment, and restores the previous CRIU symlinks.
 
@@ -199,12 +199,28 @@ This uses **500,000 records × 10 KiB**, 32 clients, a 90-second workload, and a
 | Demand | 1 worker | 2 independent QP/CQ slots |
 | Prefetch | 1 worker, window 4 | 2 session workers |
 | Background | 4 copy / 4 install workers, 16-page batches | 4 session workers, 32-page RDMA batches |
-| PS budget | 8 GiB | 2 GiB; 64 MiB PS chunks |
-| Final MR registration | U path | 4 workers |
+| PS budget | 8 GiB | 64 MiB; 64 MiB PS chunks |
+| Source memory registration | U path | PS pre-registration with invalidation checks; 16 workers for final fallback, 64 MiB chunks |
+| Destination preparation | U path | PS token/PTE preparation and early region import; 16 catalog workers |
+| Final page validation | 8 workers | 16 workers |
+| Cutover | Driver defaults | Buffered client packets, nftables network lock, monitored VMA cache |
 
 These are the current implementation defaults and favor lower fault latency. They are **not a controlled U-versus-K comparison**: NUMA placement, PS budget, and timing boundaries differ. For a controlled comparison, equalize those settings and report the actual parameters. Do not claim a speedup from the default profiles alone.
 
 To change a profile, edit `configs/profiles.json`, stage again, and retain that configuration alongside the generated results. Individual driver options are listed by `python3 scripts/ae/u/run_ae.py --help` and the corresponding K command. The main wrapper provides locking, binary selection, validation and cleanup; invoking a driver directly bypasses that wrapper.
+
+The K profile enables `--kernel-ps-arm --kernel-ps-mr` together. Source mappings are reused only while their invalidation/PFN checks remain valid; changed mappings fall back to final registration. Destination preparation moves allocation and PTE planning into PS. Logs must show `ps_arm_mode ... enabled=1`, `final_prearm ... enabled=1`, and successful prepared target setup. Do not silently disable these options to bypass a module capability error. The separate `--kernel-dma-mr` experiment selects the DMA-key path and disables source PS MR, since those two registration modes are mutually exclusive.
+
+The ordinary K final catalog also coalesces TCP writes and narrows hot-page indices to 16 or 32 bits according to each region's size. The destination restores the same 64-bit index sequence before validation and installation; hint order and dirty-page checks remain unchanged. Both hosts must use matching CRIU binaries. `SB_KERNEL final_wire` records the encoding, byte count and send time. DMA and rsocket catalogs retain their existing wire format.
+
+The hot-index codec has a standalone boundary and malformed-input check that needs no module or container:
+
+```bash
+mkdir -p build/tests
+gcc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -iquote criu-k/criu/include tests/test_k_hot_wire.c -o build/tests/test_k_hot_wire
+./build/tests/test_k_hot_wire
+```
 
 ## 7. Paper workload and baseline entry points
 

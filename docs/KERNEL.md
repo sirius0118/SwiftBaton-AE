@@ -10,10 +10,12 @@ A reviewer using those hosts starts at the [main README](../README.md)'s CRIU/YC
 Two additional patches build on that base, in order:
 `linux-5.15.167-sbk-prepared-arm.patch` adds a prepared PTE plan for
 pre-stop work, and `linux-5.15.167-sbk-arm-batch.patch` batches token
-reference accounting while installing markers. They are **optional** for the
-provided-testbed quickstart. The module detects the plan API at compile time;
-it can also run with the base patch. The base and optimized kernel variants
-have distinct local versions to avoid loading a module against the wrong ABI.
+reference accounting while installing markers. Both are required for the
+default K profile's PS preparation. The module detects the plan API at compile
+time. Base-only builds support a separate, slower K configuration with PS ARM
+disabled; they do not satisfy the default profile's capability check. Fresh
+base and optimized builds have distinct local versions. On an existing host,
+verify the loaded capabilities as well as the release string.
 
 The module is in `kernel/module/`; `kernel/include/sbk_uapi.h` defines the CRIU/module ABI. Its source side exposes frozen application pages through registered RDMA memory regions, with optional PS pre-registration and invalidation checks. The source also includes an optional DMA-key path and an rsocket page proxy for the remote-fork baseline. Its destination side owns PS cache pages, independent demand/FT/BG QP/CQ pools, the session scheduler, and final anonymous-page installation. The MM bridge preserves page permissions, anonymous rmap, memcg/LRU and COW behavior. Marker references track fork and moved aliases; the source cannot retire merely because every unique page was fetched.
 
@@ -24,12 +26,6 @@ The **destination (Node 3) needs the patched kernel**. The source (Node 2) can u
 Obtain the upstream Linux 5.15.167 source from [kernel.org](https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.15.167.tar.xz), verifying the upstream signature according to the kernel release instructions. Keep a pristine extracted tree outside this checkout, then run:
 
 ```bash
-python3 kernel/build.py /path/to/linux-5.15.167 --jobs 8
-```
-
-To build the optional prepared-ARM kernel source instead, run:
-
-```bash
 python3 kernel/build.py /path/to/linux-5.15.167 --arm-optimizations --jobs 8
 ```
 
@@ -38,7 +34,7 @@ builds under `build/linux-5.15.167-swiftbaton-k1-arm-batch/` with release
 `5.15.167-swiftbaton-k1-arm-batch`. Build its SwiftBaton module against
 that exact configured tree and matching OFED source; do not use the provided testbed's existing module file for this alternate kernel.
 
-The helper first checks the version and performs a patch dry run. It creates `build/linux-5.15.167-swiftbaton-k1/`, applies the patch and `kernel/config-5.15.167-swiftbaton-k1`, then builds `bzImage` and modules. It neither alters the input source nor writes `/boot` or `/lib/modules`.
+The helper first checks the version and performs a patch dry run, copies the source into `build/`, applies the patches and `kernel/config-5.15.167-swiftbaton-k1`, then builds `bzImage` and modules. It neither alters the input source nor writes `/boot` or `/lib/modules`. Omitting `--arm-optimizations` builds the base-only variant under `build/linux-5.15.167-swiftbaton-k1/`; use it only with a profile that disables prepared PS ARM and source PS MR.
 
 The configuration is the tested x86-64 host configuration, with `CONFIG_SWIFTBATON_PTE=y`, local version `-swiftbaton-k1`, and performance builds without KASAN/lockdep. Confirm storage, network and console drivers fit any different hardware. Retain the prior bootable kernel and console access when provisioning another machine.
 
@@ -56,9 +52,9 @@ SHA256 716f23f1e94526019d8b14f90d8d9c945a5ebbb3eda1810b85630bf0327a8dd2
 Extract it with `dpkg-deb -x`, copy `usr/src/mlnx-ofed-kernel-5.8` into `build/ofed-target`, and build against the kernel tree above. The configuration used for the matching candidate is:
 
 ```bash
-SB_KERNEL_BUILD=$PWD/build/linux-5.15.167-swiftbaton-k1
+SB_KERNEL_BUILD=$PWD/build/linux-5.15.167-swiftbaton-k1-arm-batch
 cd build/ofed-target
-./configure --kernel-version=5.15.167-swiftbaton-k1 \
+./configure --kernel-version="$(make -s -C "$SB_KERNEL_BUILD" kernelrelease)" \
   --kernel-sources="$SB_KERNEL_BUILD" --with-linux="$SB_KERNEL_BUILD" \
   --with-linux-obj="$SB_KERNEL_BUILD" \
   --with-core-mod --with-user_access-mod --with-user_mad-mod \
@@ -79,7 +75,7 @@ For an independently managed host, the administrator must install the kernel, it
 From the AE repository, build the target module:
 
 ```bash
-SB_KERNEL_BUILD=$PWD/build/linux-5.15.167-swiftbaton-k1 \
+SB_KERNEL_BUILD=$PWD/build/linux-5.15.167-swiftbaton-k1-arm-batch \
 SB_OFED_BUILD=$PWD/build/ofed-target \
   bash scripts/build.sh module
 ```
@@ -109,4 +105,4 @@ cat /sys/module/swiftbaton_k/refcnt
 ls -l /dev/swiftbaton_k
 ```
 
-The expected dispatcher value is `Y`; reference count is `0` before migration. Do not unload a module with live sessions or unresolved destination markers. Use the main README's `run.py K --check` and the driver's K preflight for feature/transport readiness. Kernel/module builds are local outputs and must not be committed to the source repository.
+The expected dispatcher value is `Y`; reference count is `0` before migration. Do not unload a module with live sessions or unresolved destination markers. Use the main README's `run.py K --check` and the driver's K preflight for feature/transport readiness. The default profile requires source remote pre-registration and parallel export, plus destination prepared ARM and unbound-region support. Loading an older `.ko` under the same kernel release can remove these capabilities. Keep the matched modules installed for their respective kernels and check the loaded build IDs after a reboot or module replacement. Kernel/module builds are local outputs and must not be committed to the source repository.

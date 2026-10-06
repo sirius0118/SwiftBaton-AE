@@ -9,6 +9,7 @@
 #include "sb-kernel-sparse.h"
 #include "sb-kernel-final-gate.h"
 #include "sb-kernel-hot.h"
+#include "sb-kernel-hot-wire.h"
 #include "sb-kernel-work.h"
 #include "sb-kernel-dma-wire.h"
 #include "sb-kernel-layout.h"
@@ -19,6 +20,8 @@
 #include "uffd.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -1127,9 +1130,15 @@ fail:
 
 int sb_kernel_send_final(int socket_fd) {
   struct dma_phase_stats dma = {};
+  bool corked = false;
+  int cork = 1;
+  uint64_t wire_begin = kernel_now_ns();
   int ret = sbk_final_seal(&final_gate);
   if (ret) return ret;
   struct sbk_wire_header h = {SBK_WIRE_MAGIC, sbk_dma_final_version(opts.sb_kernel_dma_mr), nr_final, 0};
+  bool compact_hot = !opts.sb_kernel_dma_mr && !opts.sb_kernel_rsocket_proxy;
+  uint64_t hot_wire_bytes = 0;
+  if (compact_hot) h.reserved = SBK_WIRE_COMPACT_HOT;
   ret = -EIO;
   if (!nr_final) goto out;
   if (opts.sb_kernel_rsocket_proxy) {
@@ -1142,15 +1151,25 @@ int sb_kernel_send_final(int socket_fd) {
    * Preserve this fence across close: resuming the source after this point
    * requires an external proof that the destination has been destroyed. */
   source_final_exposed = true;
+  /* The ordinary catalog is a one-way stream. Coalesce its small records
+   * without changing wire bytes or publication fences. DMA maps and the
+   * proxy protocol can wait for peer replies, so retain their uncorked path.
+   * Non-TCP transports simply keep the existing send behavior. */
+  if (!opts.sb_kernel_dma_mr && !opts.sb_kernel_rsocket_proxy &&
+      !setsockopt(socket_fd, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork)))
+    corked = true;
   if (sync_transfer(socket_fd, &h, sizeof(h), true))
     goto out;
   for (unsigned int i = 0; i < nr_final; i++) {
     struct sbk_wire_region w = {.record = final_regions[i].record,
                                 .hot_count = final_regions[i].hot_count,
                                 .dirty_count = final_regions[i].dirty_count};
+    hot_wire_bytes += w.hot_count * (compact_hot ? sbk_hot_wire_width(w.record.remote.pages) : sizeof(uint64_t));
     if (sync_transfer(socket_fd, &w, sizeof(w), true) ||
-        sync_transfer(socket_fd, (void *)final_regions[i].hot,
-                      w.hot_count * sizeof(uint64_t), true) ||
+        (compact_hot ? sbk_hot_wire_transfer(socket_fd, (uint64_t *)final_regions[i].hot,
+                                            w.hot_count, w.record.remote.pages, true, sync_transfer) :
+                       sync_transfer(socket_fd, (void *)final_regions[i].hot,
+                                     w.hot_count * sizeof(uint64_t), true)) ||
         sync_transfer(socket_fd, (void *)final_regions[i].dirty,
                       w.dirty_count * sizeof(uint64_t), true))
       goto out;
@@ -1160,6 +1179,14 @@ int sb_kernel_send_final(int socket_fd) {
   report_dma_phase("final", true, &dma);
   ret = 0;
 out:
+  if (corked) {
+    cork = 0;
+    if (setsockopt(socket_fd, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork)) && !ret)
+      ret = -errno;
+  }
+  pr_info("SB_KERNEL final_wire regions=%u corked=%u compact_hot=%u hot_bytes=%llu elapsed_us=%llu result=%d\n",
+          nr_final, corked, compact_hot, (unsigned long long)hot_wire_bytes,
+          (unsigned long long)((kernel_now_ns() - wire_begin) / 1000), ret);
   pthread_mutex_unlock(&final_gate.lock);
   return ret;
 }
@@ -1168,7 +1195,9 @@ int sb_kernel_client_receive(int socket_fd) {
   struct sbk_wire_header h;
   int ret = -EPROTO;
   if (!destination || sync_transfer(socket_fd, &h, sizeof(h), false) ||
-      h.magic != SBK_WIRE_MAGIC || h.version != sbk_dma_final_version(opts.sb_kernel_dma_mr) || h.reserved || !h.count ||
+      h.magic != SBK_WIRE_MAGIC || h.version != sbk_dma_final_version(opts.sb_kernel_dma_mr) ||
+      (h.reserved & ~SBK_WIRE_COMPACT_HOT) ||
+      (h.reserved && (opts.sb_kernel_dma_mr || opts.sb_kernel_rsocket_proxy)) || !h.count ||
       h.count > SBK_MAX_REGIONS)
     return -EPROTO;
   final_regions = calloc(h.count, sizeof(*final_regions));
@@ -1191,8 +1220,11 @@ int sb_kernel_client_receive(int socket_fd) {
         ret = -ENOMEM;
         goto out;
       }
-      if (sync_transfer(socket_fd, (void *)f->hot,
-                        w.hot_count * sizeof(uint64_t), false))
+      if (h.reserved & SBK_WIRE_COMPACT_HOT ?
+            sbk_hot_wire_transfer(socket_fd, (uint64_t *)f->hot, w.hot_count,
+                                  w.record.remote.pages, false, sync_transfer) :
+            sync_transfer(socket_fd, (void *)f->hot,
+                          w.hot_count * sizeof(uint64_t), false))
         goto out;
     }
     if (w.dirty_count) {

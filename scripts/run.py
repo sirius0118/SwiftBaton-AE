@@ -36,25 +36,41 @@ for key,value in (('--kernel-catalog-workers',a.kernel_catalog_workers),('--kern
   else:profile += [key,str(value)]
 if a.kernel_ps_arm:
  if a.mode!='K':raise SystemExit('--kernel-ps-arm requires K mode')
- profile += ['--kernel-ps-arm']
+ if '--kernel-ps-arm' not in profile:profile += ['--kernel-ps-arm']
 if a.kernel_ps_mr:
  if a.mode!='K' or not (a.kernel_ps_arm or '--kernel-ps-arm' in profile):raise SystemExit('--kernel-ps-mr requires K and --kernel-ps-arm')
- profile += ['--kernel-ps-mr']
+ if '--kernel-ps-mr' not in profile:profile += ['--kernel-ps-mr']
 if a.kernel_ps_mr_all:
- if not a.kernel_ps_mr:raise SystemExit('--kernel-ps-mr-all requires --kernel-ps-mr')
+ if not (a.kernel_ps_mr or '--kernel-ps-mr' in profile):raise SystemExit('--kernel-ps-mr-all requires --kernel-ps-mr')
  profile += ['--kernel-ps-mr-all']
 if a.kernel_dma_mr:
  if a.mode!='K':raise SystemExit('--kernel-dma-mr requires K mode')
+ if a.kernel_ps_mr or a.kernel_ps_mr_all:raise SystemExit('DMA MR and source PS MR are mutually exclusive')
+ profile=[v for v in profile if v not in ('--kernel-ps-mr','--kernel-ps-mr-all')]
  profile += ['--kernel-dma-mr']
 if a.precopy_limit_mb is not None:
  if not 1 <= a.precopy_limit_mb <= 65536:raise SystemExit('precopy-limit-mb must be 1..65536')
  if '--precopy-limit-mb' in profile:profile[profile.index('--precopy-limit-mb')+1]=str(a.precopy_limit_mb)
  else:profile += ['--precopy-limit-mb',str(a.precopy_limit_mb)]
 if a.stage_max_mb is not None:profile += ['--stage-max-mb', str(a.stage_max_mb)]
-if a.buffered_cutover:profile += ['--buffered-cutover']
-if a.network_lock:profile += ['--network-lock',a.network_lock]
+if a.buffered_cutover and '--buffered-cutover' not in profile:profile += ['--buffered-cutover']
+if a.network_lock:
+ if '--network-lock' in profile:profile[profile.index('--network-lock')+1]=a.network_lock
+ else:profile += ['--network-lock',a.network_lock]
 if a.vma_cache and '--vma-cache' not in profile:profile += ['--vma-cache']
 argv=[sys.executable,str(R/'scripts/ae'/a.mode.lower()/'run_ae.py')]+profile
+buffered='--buffered-cutover' in profile
+def required_features(host):
+ if a.mode!='K':return 0
+ required=2|4|16  # parallel PS, PS slices, session dispatcher
+ if '--kernel-dma-mr' in profile:required|=64
+ if host=='node2':
+  if int(profile[profile.index('--kernel-export-workers')+1])>1:required|=8
+  if '--kernel-ps-mr' in profile:required|=512
+ else:
+  required|=1  # anonymous PTE faults
+  if '--kernel-ps-arm' in profile:required|=32|128|256
+ return required
 if not (a.execute or a.check):
  print(json.dumps(dict(mode=a.mode,profile=a.profile,command=argv,results=str(W),mutates_hosts=False),indent=2));sys.exit(0)
 W.mkdir(parents=True,exist_ok=True)
@@ -66,8 +82,8 @@ def remote(host,program,args=()):
  if host!='node2':command=['ssh','-oBatchMode=yes','-oConnectTimeout=8',host,shlex.join(command)]
  return subprocess.check_output(command,text=True,timeout=45)
 probe=r'''from pathlib import Path
-import os,json,hashlib,subprocess,sys
-binary,expected,mode=sys.argv[1:]
+import os,json,hashlib,subprocess,sys,fcntl,struct
+binary,expected,mode,required=sys.argv[1:]
 active=[]
 for p in Path('/proc').iterdir():
  if p.name.isdigit():
@@ -81,10 +97,19 @@ p=Path('/usr/bin/criu');assert p.is_symlink(),'Administrator must provision /usr
 assert p.is_file(),'Installed CRIU symlink is broken'
 ref=Path('/sys/module/swiftbaton_k/refcnt')
 if ref.exists():assert ref.read_text().strip()=='0','K module is busy'
+caps=None;note=None
 if mode=='K':
  assert ref.exists(),'The reviewed K module must already be loaded on both hosts'
  assert Path('/sys/module/swiftbaton_k/parameters/session_dispatch').read_text().strip()=='Y'
-print(json.dumps(dict(installed=os.readlink(p),kernel=os.uname().release)))
+ fd=os.open('/dev/swiftbaton_k',os.O_RDWR|os.O_CLOEXEC)
+ try:
+  data=bytearray(16);fcntl.ioctl(fd,0x80104211,data,True)
+  caps=dict(zip(('version','features','max_regions','max_pages'),struct.unpack('=4I',data)))
+ finally:os.close(fd)
+ required=int(required)
+ assert caps['version']==1 and caps['features']&required==required,('Loaded K module lacks profile capabilities; build/load the matching current module before running',caps,required)
+ note=Path('/sys/module/swiftbaton_k/notes/.note.gnu.build-id').read_bytes().hex()
+print(json.dumps(dict(installed=os.readlink(p),kernel=os.uname().release,capabilities=caps,module_build_id_note=note)))
 '''
 switch=r'''from pathlib import Path
 import os,sys,uuid
@@ -113,7 +138,7 @@ for p in Path('/proc').iterdir():
 assert daemons=={'dockerd','containerd'}
 print(json.dumps(seen))
 '''
-previous={h:json.loads(remote(h,probe,[binary,sha,a.mode])) for h in ('node2','node3')}
+previous={h:json.loads(remote(h,probe,[binary,sha,a.mode,required_features(h)])) for h in ('node2','node3')}
 # Check client classes before creating any workload.
 client=r'''from pathlib import Path
 import subprocess,json,sys
@@ -123,9 +148,9 @@ assert list((r/'build/YCSB/core/target/dependency').glob('*.jar')),'Missing YCSB
 print(json.dumps(names))
 '''
 remote('node1',client,[R])
-if a.buffered_cutover:
+if buffered:
  remote('node1', "import ctypes;ctypes.CDLL('libnetfilter_queue.so.1');ctypes.CDLL('libnftables.so.1');ctypes.CDLL('libnetfilter_conntrack.so.3')")
-if a.buffered_cutover:remote('node3', "import ctypes;ctypes.CDLL('libnetfilter_conntrack.so.3')")
+if buffered:remote('node3', "import ctypes;ctypes.CDLL('libnetfilter_conntrack.so.3')")
 image_ref=os.environ.get('SB_REDIS_IMAGE',json.loads((R/'configs/lab.json').read_text())['redis_image'])
 image_ids={}
 for host in previous:
@@ -168,7 +193,7 @@ finally:
  result['restored']={}
  for host in reversed(changed):
   try:
-   remote(host,probe,[binary,sha,a.mode]);remote(host,switch,[binary,previous[host]['installed']]);result['restored'][host]=True
+   remote(host,probe,[binary,sha,a.mode,required_features(host)]);remote(host,switch,[binary,previous[host]['installed']]);result['restored'][host]=True
   except Exception as e:result['restored'][host]=str(e);result['success']=False
  (out/'result.json').write_text(json.dumps(result,indent=2)+'\n')
  print('RESULT='+str(out/'result.json'),flush=True)
