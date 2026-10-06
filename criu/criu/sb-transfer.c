@@ -35,6 +35,7 @@
 #include "sb-bg-install.h"
 #include "sb-lifecycle.h"
 #include "sb-pf-install.h"
+#include "sb-idle.h"
 
 #define P 4096ULL
 #define MAX_BATCH 256U
@@ -137,7 +138,10 @@ static struct bg_worker { struct fault_trace trace; uint64_t installed; unsigned
 static bool bg_workers_stop;
 static unsigned bg_oldest;
 
-static void relax_cpu(void) { __asm__ volatile("pause" ::: "memory"); }
+static __thread struct sb_idle idle_wait;
+static void relax_cpu(void) { sb_idle_poll(&idle_wait, false); }
+static void progress_cpu(void) { sb_idle_poll(&idle_wait, true); }
+static void poll_cpu(bool progress) { sb_idle_poll(&idle_wait, progress); }
 static __attribute__((noreturn)) void die(const char *why)
 { pr_perror("SB_TRANSFER %s", why); exit(EXIT_FAILURE); }
 static uint64_t now_ns(void)
@@ -296,6 +300,7 @@ static void putv(struct resources *r, const struct write_part *parts, unsigned c
         if (!(++spins & 1023) && now_ns() - started > UINT64_C(15000000000)) die("RDMA completion timeout");
     }
     if (rc < 0 || wc.status != IBV_WC_SUCCESS || wc.wr_id != PROTOCOL_MAGIC) die("RDMA completion");
+    progress_cpu();
 }
 static void put(struct resources *r, struct ibv_mr *m1, const void *a1, unsigned n1, uint64_t o1,
                 struct ibv_mr *m2, const void *a2, unsigned n2, uint64_t o2)
@@ -571,8 +576,10 @@ static void *source_demand(void *unused)
     if (opts.sb_defer_fault_credits && opts.sb_sync_fault_transport) die("deferred credit requires asynchronous transport");
     fault_trace_bind(&source_trace,"source_demand",0);
     while (!__atomic_load_n(&source_done, __ATOMIC_ACQUIRE)) {
+        bool progress = false;
         if (!opts.sb_sync_fault_transport) {
             int n = fault_poll(&tx,cookies,&polls);
+            progress |= n > 0;
             for (int i=0;i<n;i++) if (cookies[i]) {
                 unsigned p=(cookies[i]-1)/SB_FAST_SLOTS, c=(cookies[i]-1)%SB_FAST_SLOTS;
                 struct sb_job *job=&pending[p].fast.copying[c];
@@ -592,6 +599,7 @@ static void *source_demand(void *unused)
             unsigned ack = __atomic_load_n(&wire->response_tail[p], __ATOMIC_ACQUIRE);
             if (ack >= MAX_THREADS) die("demand response credit");
             while (q->acknowledged != ack) {
+                progress = true;
                 commit(&q->sent[q->acknowledged]);
                 q->acknowledged = (q->acknowledged + 1) % MAX_THREADS;
             }
@@ -616,6 +624,7 @@ static void *source_demand(void *unused)
                 if (rc != -EAGAIN) {
                     if (rc < 0) die("demand address/queue");
                     fault_trace_note(&source_trace,PF_SOURCE_RECEIVE,vpidset[p],address);
+                    progress = true;
                     consumed++; admitted_without_tx += !tx_available;
                     if (q->request_observed) { accepted++; q->request_observed = false; }
                     seen_state[state]++;
@@ -658,6 +667,7 @@ static void *source_demand(void *unused)
                 struct span *s = job_span(&job);
                 if (data->pid != vpidset[p] || data->address != job_address(&job,s)) die("fast demand response");
                 fault_trace_note(&source_trace,PF_SOURCE_READY,vpidset[p],data->address);
+                progress = true;
                 q->sent[slot] = job;
                 wire->local_head[p] = next;
                 fault_trace_note(&source_trace,PF_SOURCE_POST,vpidset[p],data->address);
@@ -678,8 +688,10 @@ static void *source_demand(void *unused)
             }
             /* Ready demand data has first use of SQ space. The single SQ owner
              * can advertise several consumed requests in one inline write. */
-            if (opts.sb_defer_fault_credits)
-                credit_updates += post_request_credit(&tx,wire,q,p);
+            if (opts.sb_defer_fault_credits) {
+                bool posted = post_request_credit(&tx,wire,q,p);
+                credit_updates += posted; progress |= posted;
+            }
         }
         first_process=(first_process+1)%item_num;
         for (unsigned issued = 0; issued < SB_FAST_SLOTS; issued++) {
@@ -691,9 +703,9 @@ static void *source_demand(void *unused)
             if (!holding) break;
             struct span *s = job_span(&held);
             if (!fast_submit(&pending[s->process].fast, s->process, 0, &held)) break;
-            holding = false;
+            holding = false; progress = true;
         }
-        relax_cpu();
+        poll_cpu(progress);
     }
     while (!opts.sb_sync_fault_transport && (sb_rdma_tx_pending(&tx) || request_credit_due(wire,pending))) {
         int n=fault_poll(&tx,cookies,&polls);
@@ -747,9 +759,10 @@ static void *source_prefetch(void *unused)
     if (!pending) die("prefetch bookkeeping");
     fault_trace_bind(&source_ft_trace,"source_prefetch",0);
     while (!__atomic_load_n(&source_done, __ATOMIC_ACQUIRE)) {
+        bool progress = false;
         unsigned tail = __atomic_load_n(&ring->tail, __ATOMIC_ACQUIRE);
         if (tail >= PREFETCH_BUFFER_SIZE) die("prefetch credit");
-        while (acknowledged != tail) { commit(&sent[acknowledged]); acknowledged = (acknowledged + 1) % PREFETCH_BUFFER_SIZE; }
+        while (acknowledged != tail) { progress = true; commit(&sent[acknowledged]); acknowledged = (acknowledged + 1) % PREFETCH_BUFFER_SIZE; }
         for (unsigned issued = 0; issued < SB_FAST_SLOTS; issued++) {
             /* A claimed FT page cannot be promoted until install ACK. Bound
              * all such pages, including the remote ring, to keep speculative
@@ -769,7 +782,7 @@ static void *source_prefetch(void *unused)
             if (!holding) break;
             struct span *s = job_span(&held);
             if (!fast_submit(&pending[s->process], s->process, 1, &held)) break;
-            holding = false; inflight++;
+            holding = false; inflight++; progress = true;
             if (inflight > maximum) maximum = inflight;
             if (active + 1 > active_maximum) active_maximum = active + 1;
         }
@@ -818,7 +831,7 @@ static void *source_prefetch(void *unused)
             }
             inflight -= count; completions++; transmitted += count;
         }
-        relax_cpu();
+        poll_cpu(progress || count);
     }
     pr_info("SB_TRANSFER prefetch_pipeline pages=%llu completions=%llu max_copy_inflight=%u\n",
         (unsigned long long)transmitted,(unsigned long long)completions,maximum);
@@ -960,6 +973,10 @@ static void *source_background(void *unused)
 
 int sb_parallel_server(int socket)
 {
+    struct sb_idle policy = {0};
+    sb_idle_init(&policy);
+    pr_info("SB_IDLE endpoint=source cooperative=%u spins=%u sleep_ns=%ld max_sleep_ns=%ld\n",
+            policy.cooperative, SB_IDLE_SPINS, SB_IDLE_SLEEP_NS, SB_IDLE_MAX_SLEEP_NS);
     pthread_t feeder, demand, prefetch, background, precopy_ack;
     uint32_t count = item_num;
     batch_pages = opts.sb_batch_pages ? opts.sb_batch_pages : 64;
@@ -1124,6 +1141,7 @@ static void *client_fault_dispatch(void *unused)
     unsigned start=0;
     (void)unused;
     while (!__atomic_load_n(&client_done,__ATOMIC_ACQUIRE)) {
+        bool progress = false;
         for (unsigned k=0;k<(unsigned)item_num;k++) {
             unsigned p=(start+k)%item_num,peer=pf_installers[p][0].peer;
             struct sb_pf_queue *q=&pf_processes[p].queue;
@@ -1131,6 +1149,7 @@ static void *client_fault_dispatch(void *unused)
             unsigned head=__atomic_load_n(&wire->head[peer],__ATOMIC_ACQUIRE);
             if (head>=MAX_THREADS) die("PF response head");
             while (slot!=head) {
+                progress = true;
                 uint64_t address;
                 memcpy(&address,(const void *)wire->data[peer][slot],sizeof(address));
                 fault_trace_note(&target_pf_dispatch_trace,PF_TARGET_DISPATCH,pidset[p],address);
@@ -1140,6 +1159,7 @@ static void *client_fault_dispatch(void *unused)
             bool changed=false;
             while (sb_pf_retire(q)) changed=true;
             if (changed) {
+                progress = true;
                 __atomic_store_n(&wire->tail[peer],q->retired%MAX_THREADS,__ATOMIC_RELEASE);
                 if (opts.sb_sync_fault_transport) {
                     pthread_mutex_lock(&pf_client_lock);
@@ -1150,7 +1170,7 @@ static void *client_fault_dispatch(void *unused)
             }
         }
         start=(start+1)%item_num;
-        relax_cpu();
+        poll_cpu(progress);
     }
     for (int p=0;p<item_num;p++) {
         struct sb_pf_queue *q=&pf_processes[p].queue;
@@ -1204,6 +1224,7 @@ static void *client_fault_install(void *opaque)
             }
         }
         __atomic_store_n(&worker->active,0,__ATOMIC_RELEASE);
+        progress_cpu();
     }
     return NULL;
 }
@@ -1242,8 +1263,10 @@ static void *client_demand(void *opaque)
         if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK)) die("UFFD nonblocking");
     }
     while (!__atomic_load_n(&client_done, __ATOMIC_ACQUIRE)) {
+        bool progress = false;
         unsigned tail = __atomic_load_n(&wire->tail[peer],__ATOMIC_ACQUIRE);
         if (!opts.sb_fault_install_workers && tail != __atomic_load_n(&wire->head[peer], __ATOMIC_ACQUIRE)) {
+            progress = true;
             uint64_t address;
             memcpy(&address, (const void *)wire->data[peer][tail], sizeof(address));
             fault_trace_note(&target_trace[local],PF_TARGET_DISPATCH,pidset[local],address);
@@ -1262,17 +1285,18 @@ static void *client_demand(void *opaque)
             (opts.sb_fault_install_workers || __atomic_load_n(&wire->tail[peer],__ATOMIC_ACQUIRE)==__atomic_load_n(&wire->head[peer],__ATOMIC_ACQUIRE))) {
             uint64_t handle;
             if (sb_bg_assist_pop(&bg_directories[local].assists,&handle)) {
+                progress = true;
                 if (opts.sb_fault_install_workers) pf_aux_enqueue(local,SB_PF_AUX_BG_QUEUED,handle);
                 else if (bg_take(handle,pidset[local],&target_trace[local],true)) bg_directories[local].queued++;
             }
         }
         unsigned head = wire->local_head[peer], next = (head + 1) % MAX_THREADS;
-        if (next == __atomic_load_n(&wire->request_tail[peer], __ATOMIC_ACQUIRE)) { relax_cpu(); continue; }
+        if (next == __atomic_load_n(&wire->request_tail[peer], __ATOMIC_ACQUIRE)) { poll_cpu(progress); continue; }
         uint64_t addresses[64];
         unsigned available=(__atomic_load_n(&wire->request_tail[peer],__ATOMIC_ACQUIRE)+MAX_THREADS-head-1)%MAX_THREADS;
         unsigned capacity=opts.sb_fault_install_workers ? opts.sb_fault_read_batch : 1;
         if (capacity>available) capacity=available;
-        if (!capacity) { relax_cpu();continue; }
+        if (!capacity) { poll_cpu(progress);continue; }
         int events=sb_uffd_lifecycle_next_batch(pidset[local],addresses,capacity);
         if (events<0) { errno=-events;die("UFFD lifecycle event"); }
         for (int i=0;i<events;i++) {
@@ -1304,7 +1328,7 @@ static void *client_demand(void *opaque)
             }
             head=next;next=(head+1)%MAX_THREADS;
         }
-        relax_cpu();
+        poll_cpu(progress || events > 0);
     }
     return NULL;
 }
@@ -1324,7 +1348,7 @@ static void *client_fault_tx(void *unused)
     (void)unused;
     for (;;) {
         bool pending=false;
-        fault_poll(&tx,cookies,&polls);
+        bool progress = fault_poll(&tx,cookies,&polls) > 0;
         for (unsigned k=0;k<(unsigned)item_num;k++) {
             unsigned p=(start+k)%item_num;
             unsigned head=__atomic_load_n(&wire->local_head[p],__ATOMIC_ACQUIRE);
@@ -1338,14 +1362,14 @@ static void *client_fault_tx(void *unused)
                     struct sb_rdma_part parts[2]={
                         {NULL,&addr,sizeof(addr),offsetof(struct page_request_set_t,addr)+((uint64_t)p*MAX_THREADS+sent[p])*sizeof(addr)},
                         {NULL,&next,sizeof(next),offsetof(struct page_request_set_t,head)+p*sizeof(int)}};
-                    fault_post(&tx,parts,2,0);sent[p]=next;
+                    fault_post(&tx,parts,2,0);sent[p]=next;progress=true;
                 }
             }
             if (acked[p]!=tail) {
                 pending=true;
                 if (sb_rdma_tx_pending(&tx)<SB_RDMA_TX_DEPTH) {
                     struct sb_rdma_part part={NULL,&tail,sizeof(tail),offsetof(struct page_request_set_t,response_tail)+p*sizeof(int)};
-                    fault_post(&tx,&part,1,0);acked[p]=tail;
+                    fault_post(&tx,&part,1,0);acked[p]=tail;progress=true;
                 }
             }
         }
@@ -1354,12 +1378,12 @@ static void *client_fault_tx(void *unused)
             pending=true;
             if (sb_rdma_tx_pending(&tx)<SB_RDMA_TX_DEPTH) {
                 struct sb_rdma_part part={NULL,&seed,sizeof(seed),offsetof(struct page_request_set_t,precopy_done)};
-                fault_post(&tx,&part,1,0);seed_sent=true;
+                fault_post(&tx,&part,1,0);seed_sent=true;progress=true;
             }
         }
         start=(start+1)%item_num;
         if (__atomic_load_n(&client_producers_done,__ATOMIC_ACQUIRE) && !pending && !sb_rdma_tx_pending(&tx)) break;
-        relax_cpu();
+        poll_cpu(progress);
     }
     fault_stats("target",&tx);
     return NULL;
@@ -1385,6 +1409,7 @@ static void *client_prefetch_install(void *opaque)
         /* No remote DMA reuse until the sole ACK coordinator sees this store.
          * Popping the descriptor above never returns source ring credit. */
         if (!sb_install_done(&ft_completed[slot])) die("duplicate prefetch install completion");
+        progress_cpu();
     }
     return NULL;
 }
@@ -1465,6 +1490,7 @@ static void *install_worker(void *opaque)
         }
         observed = epoch;
         __atomic_fetch_add(&installers.done, 1, __ATOMIC_RELEASE);
+        progress_cpu();
     }
     return NULL;
 }
@@ -1528,7 +1554,7 @@ static void *bg_pipeline_worker(void *opaque)
             start=(slot+1)%SB_BG_SLOTS;
             break;
         }
-        if (!found) relax_cpu();
+        poll_cpu(found);
     }
     return NULL;
 }
@@ -1547,9 +1573,11 @@ static void *client_background(void *unused)
     for (unsigned i=0;i<workers;i++)
         if (pthread_create(&threads[i],NULL,bg_pipeline_worker,&bg_workers[i])) die("BG pipeline worker");
     while (!final) {
+        bool progress = false;
         unsigned head=__atomic_load_n(&ring->head,__ATOMIC_ACQUIRE);
         if (head>=SB_BG_SLOTS) die("BG incoming head");
         while (receive!=head) {
+            progress = true;
             struct transfer_t *batch=bg_batch(receive);
             if (batch->nr_pi<0 || batch->nr_pi>MAX_BATCH || batch->nr_page!=batch->nr_pi) die("BG pipeline frame");
             if (batch->id==-1) {
@@ -1585,13 +1613,14 @@ static void *client_background(void *unused)
             retire=(retire+1)%SB_BG_SLOTS;active--;
         }
         if ((unsigned)ring->tail!=retire) {
+            progress = true;
             __atomic_store_n(&bg_oldest,retire,__ATOMIC_RELEASE);
             uint64_t started=now_ns();
             ring->tail=retire;
             PUT(&TS_res,TS_res.mr_buf,&ring->tail,sizeof(int),sizeof(int));
             ack_ns+=now_ns()-started;
         }
-        relax_cpu();
+        poll_cpu(progress);
     }
     __atomic_store_n(&bg_workers_stop,true,__ATOMIC_RELEASE);
     for (unsigned i=0;i<workers;i++) pthread_join(threads[i],NULL);
@@ -1618,6 +1647,10 @@ static void *client_precopy_ack(void *unused)
 }
 int sb_parallel_client(int socket)
 {
+    struct sb_idle policy = {0};
+    sb_idle_init(&policy);
+    pr_info("SB_IDLE endpoint=target cooperative=%u spins=%u sleep_ns=%ld max_sleep_ns=%ld\n",
+            policy.cooperative, SB_IDLE_SPINS, SB_IDLE_SLEEP_NS, SB_IDLE_MAX_SLEEP_NS);
     uint32_t count;
     uint64_t peers[MAX_PROCESS];
     struct client_process process[MAX_PROCESS];

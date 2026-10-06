@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include "log.h"
 #include "sb-precopy.h"
+#include "sb-idle.h"
 #include "common/sb-stage-commit.h"
 
 #define SB_PAGE 4096ULL
@@ -912,12 +913,14 @@ int sb_precopy_client_fault(pid_t pid, uint64_t address)
 
 static void *client_copy_worker(void *unused)
 {
+    struct sb_idle idle = {0};
     size_t next;
     (void)unused;
     while ((next = __atomic_fetch_add(&client_next, 1, __ATOMIC_RELAXED)) < client_view.count) {
         if (!(client_valid[next / 8] & (1U << (next % 8)))) continue;
-        while (__atomic_load_n(&demand_active, __ATOMIC_ACQUIRE)) __asm__ volatile("pause" ::: "memory");
+        while (__atomic_load_n(&demand_active, __ATOMIC_ACQUIRE)) sb_idle_poll(&idle, false);
         install_cached(&cached_pages[next]);
+        sb_idle_poll(&idle, true);
     }
     return NULL;
 }
@@ -934,12 +937,13 @@ int sb_precopy_client_start(unsigned workers)
 
 int sb_precopy_client_wait(void)
 {
+    struct sb_idle idle = {0};
     if (!install_page) return 0;
     for (unsigned i = 0; i < client_threads; i++) pthread_join(client_workers[i], NULL);
     client_threads = 0;
     for (size_t i = 0; i < client_view.count; i++) {
         if (!(client_valid[i / 8] & (1U << (i % 8)))) continue;
-        while (__atomic_load_n(&cached_pages[i].state, __ATOMIC_ACQUIRE) == 1) __asm__ volatile("pause" ::: "memory");
+        while (__atomic_load_n(&cached_pages[i].state, __ATOMIC_ACQUIRE) == 1) sb_idle_poll(&idle, false);
         if (__atomic_load_n(&cached_pages[i].state, __ATOMIC_ACQUIRE) != 2) return -1;
     }
     pr_info("SB_PRECOPY complete installed=%lu demand_hits=%lu parent_adopted=%lu discarded=%lu\n", installed, demand_hits, adopted_pages, discarded_pages);

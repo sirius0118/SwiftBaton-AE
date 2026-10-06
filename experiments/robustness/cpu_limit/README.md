@@ -26,6 +26,16 @@ the only changed setting within each mode. The normal U/K PS budgets and
 worker configurations remain mode-specific; use the within-mode comparisons
 to assess CPU sensitivity.
 
+SwiftBaton-U detects the worker's effective CPU affinity. With at most two
+CPUs, empty queues and unchanged ring heads use adaptive cooperative polling:
+32 short spins, followed by a 10–100 microsecond sleep. Actual progress resets
+the wait immediately. This also applies to pre-copy workers waiting for an
+active demand installation, source credit waits and completion polling.
+RDMA memory writes do not provide futex wakeups, so the bounded waits recheck
+the existing acquire-load predicates. Worker counts, transfer ownership and
+installation acknowledgements remain unchanged. Larger CPU masks retain the
+normal spin policy. `SB_IDLE` in the endpoint logs records the selected policy.
+
 Redis container affinity and YCSB resources are unchanged across the four
 groups. At the final restore transition, every application thread is released
 from the CRIU limit into its configured container CPU set. The runner checks
@@ -47,6 +57,8 @@ python3 scripts/run.py U --check
 python3 scripts/run.py K --check
 
 experiments/robustness/cpu_limit/run.sh --dry-run
+# Fast iteration: one full U two-core trial only.
+experiments/robustness/cpu_limit/run.sh --mode u --variant 2core --trials 1
 # Functionality check; these small runs are excluded from the full plots.
 experiments/robustness/cpu_limit/run.sh --mode both --variant 2core --smoke --trials 1
 # Four groups, three full trials each, with reversed ordering on even rounds.
@@ -84,3 +96,13 @@ directories identify the controls to remove with
 `sudo python3 experiments/common/cpu_limit.py finish --cpus <SAVED_CPUS> --out <SAVED_OBSERVER_DIRECTORY>`
 on each host. The helper refuses to remove a control while CRIU is running
 or when its mask was changed by another owner.
+
+The cooperative polling regression test requires only Linux and a C compiler.
+It checks queue publication without wake syscalls while twelve pollers share
+two CPUs, as well as the unchanged policy for a larger CPU mask:
+
+```bash
+gcc -O2 -Wall -Wextra -Werror -pthread -iquote criu/criu/include \
+  tests/test_u_idle_wait.c -o /tmp/sb-u-idle-test
+/tmp/sb-u-idle-test
+```
