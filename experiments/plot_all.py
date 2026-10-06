@@ -6,6 +6,8 @@ import json
 import math
 import os
 import re
+import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 from statistics import median
@@ -222,6 +224,11 @@ def main():
         plot_metrics(label, trials, path)
         plot_breakdown(label, trials, path)
         plot_faults(label, trials, path)
+        if case == 'robustness-cpu-limit':
+            command = [sys.executable, str(ROOT / 'experiments/robustness/cpu_limit/plot.py'),
+                       '--results', str(a.results), '--output', str(path)]
+            if smoke: command.append('--smoke')
+            subprocess.run(command, check=True)
         summary['cases'][label] = [{'variant': t['variant'], 'mode': t['mode'], 'trial': t['trial'],
                                     'smoke': smoke,
                                     'raw_result': str(t['raw']), 'downtime_ms': downtime(t),

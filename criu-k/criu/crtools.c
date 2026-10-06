@@ -43,6 +43,7 @@
 #include "fault-injection.h"
 #include "proc_parse.h"
 #include "kerndat.h"
+#include "sb-cpu-limit.h"
 
 #include "setproctitle.h"
 #include "sysctl.h"
@@ -121,6 +122,11 @@ int main(int argc, char *argv[], char *envp[])
 	bool has_exec_cmd = false;
 	bool has_sub_command;
 	int state = PARSING_GLOBAL_CONF;
+
+	if (sb_cpu_limit()) {
+		perror("SwiftBaton CRIU CPU limit");
+		return 1;
+	}
 	
 #ifdef PARALLEL_DUMP
 	mutex_init(&mutex_proc);

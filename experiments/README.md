@@ -38,6 +38,7 @@ stored in Git.
 | `robustness/zipf` | Redis access skew |
 | `robustness/value_size` | Redis value length |
 | `robustness/write_ratio` | Redis read/write ratio |
+| `robustness/cpu_limit` | Redis U/K, normal CRIU affinity versus two shared CPUs per migration host |
 | `breakdown/downtime_components` | Client interruption and migration phases |
 | `breakdown/substate_scaling` | Extra memory and file-descriptor stress |
 | `breakdown/pretransfer` | Pre-transfer toggle |
@@ -63,3 +64,5 @@ their paper stressors; inspect `case.json` and the generated trial metadata
 before mapping a figure to a claim. The page-completion case still permits
 address-order background copy. Use `baseline/` for the separate native CRIU,
 PCLive, post-copy, hybrid, and remote-fork algorithm profiles.
+
+For the four-group Redis CPU-resource comparison, see [cpu_limit/README.md](robustness/cpu_limit/README.md). Its default is three trials per group and it includes a dedicated plotter. K benchmark runs enable PS ARM and source PS MR with the current optimized profile.

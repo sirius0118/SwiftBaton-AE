@@ -21,7 +21,7 @@ COMMON = ['--image-rdma', '--u-precopy', '--fast-cutover', '--buffered-cutover',
           '--network-lock', 'nftables', '--runtime-snapshot', '--numa-node', '0',
           '--poststeady-seconds', '30', '--vma-cache']
 MODE_ARGS = {
-    'k': ['--kernel-transfer',
+    'k': ['--kernel-transfer', '--kernel-ps-arm', '--kernel-ps-mr',
           '--kernel-export-workers', '16', '--kernel-catalog-workers', '16',
           '--validation-workers', '16', '--kernel-export-chunk-mb', '64',
           '--precopy-limit-mb', '64', '--fault-workers', '2',
@@ -251,9 +251,50 @@ def invocation(case, variant, mode, smoke):
                     large_mib=128, large_workers=4, threads=4)
     args = COMMON + MODE_ARGS[mode]
     args = replace_flags(args, base)
-    args = replace_flags(args, {k:v for k,v in variant.get('options', {}).items() if k != 'qos_gbps'})
+    args = replace_flags(args, {k:v for k,v in variant.get('options', {}).items() if k not in ('qos_gbps', 'criu_cpu_cores')})
     args += ['--ae-workload', kind]
     return [sys.executable, str(ROOT / 'scripts/ae' / mode / 'run_ae.py')] + args
+
+
+def start_cpu_trial(case, variant, command, binary, dest, hosts, record):
+    if not case.get('observe_criu_cpus'): return
+    helper = ROOT / 'experiments/common/cpu_limit.py'
+    remote('node3', ['mkdir', '-p', str(helper.parent)])
+    run(['rsync', '-az', str(helper), 'node3:' + str(helper)])
+    cores = int(variant.get('options', {}).get('criu_cpu_cores', 0))
+    numa = int(command[command.index('--numa-node') + 1]) if '--numa-node' in command else None
+    for host in ('node2', 'node3'):
+        topology = json.loads(remote(host, ['sudo', '-n', 'python3', str(helper), 'choose',
+                              '--cores', str(cores or 2)] + ([] if numa is None else ['--numa', str(numa)])))
+        cpus = topology['cpus'] if cores else []
+        out = dest / ('cpu-' + host)
+        remote(host, ['mkdir', '-p', str(out)])
+        cpus_text = ','.join(map(str, cpus))
+        hosts[host] = dict(cpus=cpus, topology=topology, out=str(out))
+        # Persist the selected mask before installing the host control.
+        (dest / 'experiment.json').write_text(json.dumps(record, indent=2) + '\n')
+        if cores:
+            hosts[host]['installation'] = json.loads(remote(host,
+                ['sudo', '-n', 'python3', str(helper), 'install', '--cpus', cpus_text, '--binary', binary]))
+        hosts[host]['observer'] = json.loads(remote(host,
+            ['sudo', '-n', 'python3', str(helper), 'start', '--cpus', cpus_text, '--out', str(out)]))
+        (dest / 'experiment.json').write_text(json.dumps(record, indent=2) + '\n')
+
+
+def finish_cpu_trial(hosts, dest):
+    helper = ROOT / 'experiments/common/cpu_limit.py'
+    errors = []
+    for host, info in hosts.items():
+        try:
+            info['result'] = json.loads(remote(host,
+                ['sudo', '-n', 'python3', str(helper), 'finish', '--cpus', ','.join(map(str, info['cpus'])),
+                 '--out', info['out']]))
+            if host != 'node2':
+                run(['rsync', '-az', host + ':' + info['out'] + '/', info['out'] + '/'])
+        except Exception as error:
+            info['finish_error'] = str(error)
+            errors.append(host)
+    return not errors and all(info['result']['ok'] for info in hosts.values())
 
 
 def main():
@@ -288,87 +329,101 @@ def main():
     source_dirty = bool(run(['git', 'status', '--porcelain'], cwd=ROOT,
                             capture_output=True).stdout.strip())
     ensure_client_binding(case['workload'])
-    for variant, mode, command in commands:
+    if case.get('observe_criu_cpus'):
+        schedule = [(v, m, c, trial) for trial in range(1, args.trials + 1)
+                    for v, m, c in (commands if trial % 2 else list(reversed(commands)))]
+    else:
+        schedule = [(v, m, c, trial) for v, m, c in commands for trial in range(1, args.trials + 1)]
+    for variant, mode, command, trial in schedule:
         stage_helpers(mode)
         binary, digest = ensure_build_path(mode, case['workload'])
-        for trial in range(1, args.trials + 1):
-            name = re.sub(r'[^a-z0-9_-]+', '-', case['name'].lower())
-            tag = time.strftime('%Y%m%d_%H%M%S') + f'-{mode}-{variant["name"]}-{trial}'
-            dest = WORK / name / tag
-            dest.mkdir(parents=True)
-            record = {'case': case['name'], 'workload': case['workload'], 'variant': variant['name'],
-                      'mode': mode, 'trial': trial, 'smoke': args.smoke,
-                      'command': command, 'binary_sha256': digest,
-                      'image': image_ref, 'image_id': image_id,
-                      'case_sha256': case_sha256, 'source_revision': source_revision,
-                      'source_dirty': source_dirty,
-                      'success': False}
+        name = re.sub(r'[^a-z0-9_-]+', '-', case['name'].lower())
+        tag = time.strftime('%Y%m%d_%H%M%S') + f'-{mode}-{variant["name"]}-{trial}'
+        dest = WORK / name / tag
+        dest.mkdir(parents=True)
+        record = {'case': case['name'], 'workload': case['workload'], 'variant': variant['name'],
+                  'mode': mode, 'trial': trial, 'smoke': args.smoke,
+                  'command': command, 'binary_sha256': digest,
+                  'image': image_ref, 'image_id': image_id,
+                  'case_sha256': case_sha256, 'source_revision': source_revision,
+                  'source_dirty': source_dirty,
+                  'success': False}
+        (dest / 'experiment.json').write_text(json.dumps(record, indent=2) + '\n')
+        before = None
+        prior_qos = None
+        state = None
+        cpu_hosts = {}
+        try:
+            requested_qos = float(variant.get('options', {}).get('qos_gbps', 25))
+            prior_qos = {host: qos_rate(host) for host in ('node2', 'node3')}
+            record['qos_before_gbps'] = prior_qos
+            record['qos_requested_gbps'] = requested_qos
+            for host in prior_qos: set_qos(host, requested_qos)
+            before = select_criu(binary, digest)
+            record['cpu_restriction'] = cpu_hosts
+            start_cpu_trial(case, variant, command, binary, dest, cpu_hosts, record)
+            env = dict(os.environ, SB_AE_WORK_ROOT=str(WORK / '_driver'),
+                       SB_AE_IMAGE=ensure_image(case['workload']),
+                       SB_AE_CRIU_ROOT=str(Path(binary).parent.parent))
+            with (dest / 'driver.log').open('w') as output:
+                proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True)
+                for line in proc.stdout:
+                    output.write(line); output.flush(); print(line, end='', flush=True)
+                    if line.startswith('STATE='): state = Path(line.strip().split('=',1)[1])
+                rc = proc.wait()
+            record['driver_rc'] = rc
+            if state:
+                record['state'] = str(state)
+                driver_state = json.loads(state.read_text())
+                if rc or not driver_state.get('success'):
+                    raise RuntimeError('Migration failed; see ' + str(dest / 'driver.log'))
+                if case['workload'] != 'largecontainer':
+                    record['client_result'] = client_result(state.parent / 'run.log')
+                    record['poststeady_result'] = client_result(state.parent / 'poststeady.log')
+                    if record['client_result']['failure_fraction'] > .01:
+                        raise RuntimeError('YCSB client operation failure rate exceeds 1%')
+                    if record['poststeady_result']['failure_fraction'] > .001:
+                        raise RuntimeError('YCSB fresh-client failure rate exceeds 0.1%')
+                scripts = ['analyze_run.py', 'analyze_recovery.py']
+                if case['workload'] != 'largecontainer': scripts.append('analyze_success_gaps.py')
+                for script in scripts:
+                    out = dest / (script + '.log')
+                    with out.open('w') as f:
+                        p = subprocess.run([sys.executable, str(ROOT / 'scripts' / script), str(state.parent)],
+                                           stdout=f, stderr=subprocess.STDOUT)
+                    if p.returncode: raise RuntimeError(script + ' failed; see ' + str(out))
+                record['raw_result'] = str(state.parent)
+            else: raise RuntimeError('Driver did not emit STATE path')
+            record['success'] = True
+        except BaseException as exc:
+            record['error'] = str(exc)
+            raise
+        finally:
+            if state:
+                cleanup = ROOT / 'scripts/ae' / mode / 'cleanup_ae.py'
+                with (dest / 'cleanup.log').open('w') as out:
+                    p = subprocess.run([sys.executable, str(cleanup), str(state)], stdout=out, stderr=subprocess.STDOUT)
+                record['cleanup_rc'] = p.returncode
+                if p.returncode: record['success'] = False
+            if cpu_hosts:
+                try:
+                    record['cpu_validation_ok'] = finish_cpu_trial(cpu_hosts, dest)
+                    if not record['cpu_validation_ok']: record['success'] = False
+                except Exception as e:
+                    record['cpu_validation_error'] = str(e)
+                    record['success'] = False
+            if before:
+                try: restore_criu(before); record['criu_restored'] = True
+                except Exception as e: record['criu_restored'] = str(e); record['success'] = False
+            if prior_qos:
+                try:
+                    for host, limit in prior_qos.items(): set_qos(host, limit)
+                    record['qos_restored'] = True
+                except Exception as e: record['qos_restored'] = str(e); record['success'] = False
             (dest / 'experiment.json').write_text(json.dumps(record, indent=2) + '\n')
-            before = None
-            prior_qos = None
-            state = None
-            try:
-                requested_qos = float(variant.get('options', {}).get('qos_gbps', 25))
-                prior_qos = {host: qos_rate(host) for host in ('node2', 'node3')}
-                record['qos_before_gbps'] = prior_qos
-                record['qos_requested_gbps'] = requested_qos
-                for host in prior_qos: set_qos(host, requested_qos)
-                before = select_criu(binary, digest)
-                env = dict(os.environ, SB_AE_WORK_ROOT=str(WORK / '_driver'),
-                           SB_AE_IMAGE=ensure_image(case['workload']),
-                           SB_AE_CRIU_ROOT=str(Path(binary).parent.parent))
-                with (dest / 'driver.log').open('w') as output:
-                    proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
-                                            stderr=subprocess.STDOUT, text=True)
-                    for line in proc.stdout:
-                        output.write(line); output.flush(); print(line, end='', flush=True)
-                        if line.startswith('STATE='): state = Path(line.strip().split('=',1)[1])
-                    rc = proc.wait()
-                record['driver_rc'] = rc
-                if state:
-                    record['state'] = str(state)
-                    driver_state = json.loads(state.read_text())
-                    if rc or not driver_state.get('success'):
-                        raise RuntimeError('Migration failed; see ' + str(dest / 'driver.log'))
-                    if case['workload'] != 'largecontainer':
-                        record['client_result'] = client_result(state.parent / 'run.log')
-                        record['poststeady_result'] = client_result(state.parent / 'poststeady.log')
-                        if record['client_result']['failure_fraction'] > .01:
-                            raise RuntimeError('YCSB client operation failure rate exceeds 1%')
-                        if record['poststeady_result']['failure_fraction'] > .001:
-                            raise RuntimeError('YCSB fresh-client failure rate exceeds 0.1%')
-                    scripts = ['analyze_run.py', 'analyze_recovery.py']
-                    if case['workload'] != 'largecontainer': scripts.append('analyze_success_gaps.py')
-                    for script in scripts:
-                        out = dest / (script + '.log')
-                        with out.open('w') as f:
-                            p = subprocess.run([sys.executable, str(ROOT / 'scripts' / script), str(state.parent)],
-                                               stdout=f, stderr=subprocess.STDOUT)
-                        if p.returncode: raise RuntimeError(script + ' failed; see ' + str(out))
-                    record['raw_result'] = str(state.parent)
-                else: raise RuntimeError('Driver did not emit STATE path')
-                record['success'] = True
-            except BaseException as exc:
-                record['error'] = str(exc)
-                raise
-            finally:
-                if state:
-                    cleanup = ROOT / 'scripts/ae' / mode / 'cleanup_ae.py'
-                    with (dest / 'cleanup.log').open('w') as out:
-                        p = subprocess.run([sys.executable, str(cleanup), str(state)], stdout=out, stderr=subprocess.STDOUT)
-                    record['cleanup_rc'] = p.returncode
-                    if p.returncode: record['success'] = False
-                if before:
-                    try: restore_criu(before); record['criu_restored'] = True
-                    except Exception as e: record['criu_restored'] = str(e); record['success'] = False
-                if prior_qos:
-                    try:
-                        for host, limit in prior_qos.items(): set_qos(host, limit)
-                        record['qos_restored'] = True
-                    except Exception as e: record['qos_restored'] = str(e); record['success'] = False
-                (dest / 'experiment.json').write_text(json.dumps(record, indent=2) + '\n')
-                print('BENCH_RESULT=' + str(dest / 'experiment.json'), flush=True)
-            if not record['success']: raise RuntimeError('Trial failed or cleanup incomplete: ' + str(dest))
+            print('BENCH_RESULT=' + str(dest / 'experiment.json'), flush=True)
+        if not record['success']: raise RuntimeError('Trial failed or cleanup incomplete: ' + str(dest))
 
 
 if __name__ == '__main__': main()

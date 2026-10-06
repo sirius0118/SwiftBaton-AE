@@ -1,0 +1,29 @@
+{
+  "name": "robustness-cpu-limit",
+  "workload": "redis",
+  "observe_criu_cpus": true,
+  "parameters": {
+    "records": 1000000,
+    "field_length": 1024,
+    "threads": 32,
+    "duration": 180,
+    "warmup": 20,
+    "zipf_zeta": 0.99,
+    "write_ratio": 0.5,
+    "canary_mib": 8,
+    "numa_node": 0
+  },
+  "variants": [
+    {
+      "name": "unrestricted",
+      "parameters": {},
+      "options": { "qos_gbps": 25, "criu_cpu_cores": 0 }
+    },
+    {
+      "name": "2core",
+      "parameters": {},
+      "options": { "qos_gbps": 25, "criu_cpu_cores": 2 }
+    }
+  ],
+  "note": "Four groups: U/K with default affinity versus all CRIU processes sharing two logical CPUs on distinct physical cores per host. Redis and YCSB CPU resources are unchanged; all groups use NUMA 0 and RDMA 25 Gbps. Dedicated K export/dispatch workers inherit CRIU affinity. Application-context fault callbacks, NIC interrupts and shared kernel services are not capped. U/K retain their normal mode-specific PS budgets and worker counts; compare the CPU effect within each mode."
+}

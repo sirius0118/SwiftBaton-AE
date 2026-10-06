@@ -243,6 +243,7 @@ checkout**; VoltDB/MySQL build an isolated variant from the same source for
 their file-lock and VMA requirements. Results and figures go to
 a sibling directory named `SwiftBaton-AE-benchmark-results/` by default, never inside Git.
 The case runner records its source revision, options, hashes, and validations.
+The [CPU-resource experiment](experiments/robustness/cpu_limit/README.md) compares U/K Redis migration with normal CRIU affinity and two shared CPUs per migration host, using 1M keys x 1 KiB, Zipf 0.99 and YCSB-A. It records actual affinity and has a dedicated throughput plotter.
 Run one case at a time. The [baseline guide](baseline/README.md) describes
 native CRIU, PCLive, post-copy, hybrid-copy, and remote-fork profiles.
 
