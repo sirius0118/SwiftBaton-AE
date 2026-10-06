@@ -57,8 +57,20 @@ def phase_span(trial, begin, end):
 
 
 def ttr(trial, fraction):
-    value = trial['recovery']['recovery_from_zero_run_start']['source_pre_checkpoint']['0.5'].get(str(float(fraction)))
-    return value['start_seconds'] if value else None
+    recovery = trial['recovery']
+    if not recovery.get('ttr_valid'): return None
+    value = recovery['recovery']['target_final_10s']['0.1'].get(str(float(fraction)))
+    if not value: return None
+    # Keep the throughput reference and sustained-recovery rule identical to
+    # the CPU comparison. Only the axis origin is shifted to the measured gap.
+    origin = trial['metrics']['zero_sample_window_seconds'][0]
+    gaps = trial['gaps'].get('cutover_window_gaps', [])
+    if gaps:
+        gap = max(gaps, key=lambda row: row['duration_ms'])
+        with (trial['raw'] / 'throughput-10ms.csv').open() as f:
+            first_wall = float(next(csv.DictReader(f))['unix_seconds'])
+        origin = gap['approximate_start_wall_ns'] / 1e9 - first_wall
+    return value['start_after_service_seconds'] + recovery['service_anchor_elapsed_seconds'] - origin
 
 
 def downtime(trial):
@@ -213,7 +225,7 @@ def main():
         by_case[(trial['case'], bool(trial.get('smoke')))].append(trial)
     summary = {'cases': {}, 'skipped': skipped,
                'definitions': {'downtime': 'Client-wide successful-operation gap when available; otherwise 10 ms zero-run span',
-                               'ttr': '0.5 s rolling throughput, source pre-migration reference, 1 s sustained threshold, zero-run start',
+                               'ttr': '100 ms rolling throughput, valid final destination reference, 1 s sustained threshold, measured completion-gap start (sampled zero-run start if no completion-gap trace)',
                                'plot': 'Only completed validated trials; no missing interval interpolation or simulated data'}}
     for (case, smoke), trials in sorted(by_case.items()):
         label = case + (' [smoke]' if smoke else ' [paper-scale]')

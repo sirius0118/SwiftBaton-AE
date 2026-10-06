@@ -103,7 +103,8 @@ def main():
     if not groups:
         print(json.dumps({'skipped': skipped}, indent=2))
         raise SystemExit('No validated CPU-limit trials')
-    keys = sorted(groups)
+    keys = [key for key in [('u', 'unrestricted'), ('u', '2core'),
+                             ('k', 'unrestricted'), ('k', '2core')] if key in groups]
     chosen = {key: sorted(groups[key], key=lambda t: t['summary']['downtime_ms'])[len(groups[key]) // 2]
               for key in keys}
     colors = {'u': '#2166ac', 'k': '#d66028'}
@@ -121,8 +122,10 @@ def main():
         reference = selected['summary']['destination_ops_s']
         axes[1].plot(x, selected['r100'] / reference, color=colors[key[0]],
                      ls='--' if key[1] == '2core' else '-', lw=1.5, label=label(key))
+    recovery_window = max(12, max(t['summary']['downtime_ms'] / 1000 + 5
+                                  for items in groups.values() for t in items))
     for ax in axes:
-        ax.set_xlim(-2, 30); ax.set_ylim(bottom=0); ax.grid(axis='y', alpha=.2)
+        ax.set_xlim(-1, recovery_window); ax.set_ylim(bottom=0); ax.grid(axis='y', alpha=.2)
         ax.axvline(0, color='#555555', ls=':', lw=.8)
         ax.set_xlabel('Time from measured client completion-gap start (s)')
         ax.legend(fontsize=9, ncol=2)
@@ -132,7 +135,7 @@ def main():
     parameters = chosen[keys[0]]['summary']['parameters']
     fig.suptitle('Redis migration: default CPUs versus 2 CPUs for CRIU\n'
                  f"{parameters['records']:,} keys x {parameters['field_length']/1024:g} KiB; YCSB-A; "
-                 f"Zipf {parameters['zipf_zeta']}; {parameters['threads']} clients; RDMA 25 Gbps"
+                 f"Zipf {parameters['zipf_zeta']}; {parameters['threads']} YCSB threads; RDMA 25 Gbps"
                  + (' [SMOKE DATASET]' if a.smoke else ''))
     fig.savefig(out / 'cpu-limit-recovery.png', dpi=180)
     fig.savefig(out / 'cpu-limit-recovery.pdf'); plt.close(fig)
