@@ -2,6 +2,10 @@
 
 Source code for **SwiftBaton: Dependency-Aware Staged Reconstruction for Live Migration of Stateful Containers**, ACM ATC 2026.
 
+If you previously downloaded a snapshot with `ArtifactEvalution/run_migration.sh`,
+use this README and the `scripts/` entry points when switching to this repository.
+The legacy patch is for that older snapshot and is not needed here.
+
 The experiment uses three machines: **Node 1** runs the workload client, **Node 2** hosts the source container and coordinates the run, and **Node 3** receives the container. This is a role-based naming scheme; the machines can have any DNS names. The artifact includes **SwiftBaton-U** (userspace page installation) and **SwiftBaton-K** (kernel-assisted page installation). Both use pre-transfer, demand fetches, adjacent prefetch, and hot-first background batches. K also needs a patched kernel on Node 3 and a matching module on Nodes 2 and 3.
 
 Only source and reproduction instructions belong in Git. Compiled programs, checkpoint images, logs, figures, and measurements are generated outside the tracked source. By default, a checkout named `SwiftBaton-AE` writes run data to its sibling directory `SwiftBaton-AE-work`.
@@ -130,8 +134,11 @@ The list includes `libprotobuf-c-dev`, `protobuf-c-compiler`,
 `protobuf-compiler`, `python3-protobuf`, and `uthash-dev`, as well as the
 BSD, nftables, AIO, TLS, and RDMA development libraries. These are build
 dependencies; installing them does not establish runtime/kernel compatibility.
-The reference testbed runs Ubuntu 20.04. A clean Ubuntu 22.04/GCC 11 build and
-an end-to-end run on another kernel are separate validation steps.
+Both CRIU trees have been clean-built with GCC 11.4 on Ubuntu 22.04, including
+from a Git-free archive with flattened symlinks and removed executable modes.
+This validates compilation and source recovery, not migration on every Ubuntu
+kernel. The reference migration testbed runs Ubuntu 20.04; K still requires
+the kernel/module setup described below.
 
 Earlier artifact snapshots used `ArtifactEvalution/run_migration.sh` and a Fluid
 workflow. That script is not the entry point for this repository. Follow the
