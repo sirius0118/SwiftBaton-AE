@@ -24,9 +24,11 @@ Runtime source archives are downloaded over HTTPS from GitHub's codeload endpoin
 and checked against the SHA-256 digests recorded in `Dockerfile.ae`. No full Git
 clone is required inside the builder.
 It does not build `dependencies/runc` or `dependencies/containerd` from their
-separate development snapshots. Compilation/export of this bundle still needs
-validation on a clean build host, followed by checkpoint/restore validation
-before treating it as a replacement for the provisioned runtime.
+separate development snapshots. The complete bundle has been compiled and
+exported successfully with a fresh Ubuntu 22.04 builder. Version checks for
+dockerd, runc, containerd, ctr and docker-init also pass in Ubuntu 22.04.
+This verifies the build; checkpoint/restore validation on the destination
+environment is still required before replacing the provisioned runtime.
 
 This native rootful target uses Ubuntu 22.04 packages and the engine's original
 Go 1.17.4 toolchain. It avoids the legacy Debian bullseye package repositories,
