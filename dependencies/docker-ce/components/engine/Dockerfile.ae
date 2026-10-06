@@ -13,7 +13,7 @@ ENV PATH=/usr/local/go/bin:${PATH} GOPATH=/go GO111MODULE=off
 RUN rm -rf /var/lib/apt/lists/* \
     && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update \
     && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates git pkg-config cmake \
+        build-essential ca-certificates curl git pkg-config cmake \
         libapparmor-dev libbtrfs-dev libdevmapper-dev libseccomp-dev \
         libsystemd-dev libudev-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -28,16 +28,35 @@ COPY . .
 RUN hack/make.sh binary
 
 FROM build-base AS runc
-COPY hack/dockerfile/install/ /install/
-RUN PREFIX=/build /install/install.sh runc
+WORKDIR /go/src/github.com/opencontainers/runc
+RUN curl -fL --retry 3 --connect-timeout 20 \
+        https://codeload.github.com/opencontainers/runc/tar.gz/refs/tags/v1.0.3 -o /runc.tar.gz \
+    && echo '0eaf2f6606d72f166a5e7138a8a8d4d8f85d84e43448c08c66a1c93ead17a574  /runc.tar.gz' | sha256sum -c - \
+    && tar -xzf /runc.tar.gz --strip-components=1 \
+    && make COMMIT=f46b6ba2c9314cfc8caae24a32ec5fe9ef1059fe BUILDTAGS=seccomp static \
+    && install -D runc /build/runc
 
 FROM build-base AS containerd
-COPY hack/dockerfile/install/ /install/
-RUN PREFIX=/build /install/install.sh containerd
+WORKDIR /go/src/github.com/containerd/containerd
+RUN curl -fL --retry 3 --connect-timeout 20 \
+        https://codeload.github.com/containerd/containerd/tar.gz/refs/tags/v1.5.8 -o /containerd.tar.gz \
+    && echo '15a5826d8de3a09827c7e96cdf8ac81d7acc7a9dedc8dc573704e99a0bb94499  /containerd.tar.gz' | sha256sum -c - \
+    && tar -xzf /containerd.tar.gz --strip-components=1 \
+    && make VERSION=v1.5.8 REVISION=1e5ef943eb76627a6d3b6de8cd1ef6537f393a71 \
+        BUILDTAGS='netgo osusergo static_build' EXTRA_FLAGS=-buildmode=pie \
+        EXTRA_LDFLAGS='-extldflags "-fno-PIC -static"' \
+        bin/containerd bin/containerd-shim bin/containerd-shim-runc-v2 bin/ctr \
+    && mkdir -p /build \
+    && cp bin/containerd bin/containerd-shim bin/containerd-shim-runc-v2 bin/ctr /build/
 
 FROM build-base AS tini
-COPY hack/dockerfile/install/ /install/
-RUN PREFIX=/build /install/install.sh tini
+WORKDIR /tini
+RUN curl -fL --retry 3 --connect-timeout 20 \
+        https://codeload.github.com/krallin/tini/tar.gz/refs/tags/v0.19.0 -o /tini.tar.gz \
+    && echo '0fd35a7030052acd9f58948d1d900fe1e432ee37103c5561554408bdac6bbf0d  /tini.tar.gz' | sha256sum -c - \
+    && tar -xzf /tini.tar.gz --strip-components=1 \
+    && cmake . && make tini-static \
+    && install -D tini-static /build/docker-init
 
 FROM scratch AS ae-runtime
 COPY --from=engine /build/bundles/binary-daemon/ /binary-daemon/

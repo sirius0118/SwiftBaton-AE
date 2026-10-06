@@ -20,6 +20,9 @@ bash scripts/build-runtime.sh
 
 This target builds dockerd/docker-proxy and includes the engine builder's
 pinned upstream runc (`v1.0.3`), containerd (`v1.5.8`), shims and helpers.
+Runtime source archives are downloaded over HTTPS from GitHub's codeload endpoint
+and checked against the SHA-256 digests recorded in `Dockerfile.ae`. No full Git
+clone is required inside the builder.
 It does not build `dependencies/runc` or `dependencies/containerd` from their
 separate development snapshots. Compilation/export of this bundle still needs
 validation on a clean build host, followed by checkpoint/restore validation
