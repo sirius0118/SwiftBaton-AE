@@ -1,4 +1,4 @@
-/* Cooperative polling for CRIU workers sharing at most two CPUs. RDMA writes
+/* Cooperative polling for CRIU workers sharing at most four CPUs. RDMA writes
  * do not wake a futex, so idle waits are bounded and always recheck the original
  * acquire-load predicate. Active work never waits; normal CPU masks keep PAUSE.
  * This header is userspace-only, including its per-thread affinity snapshot. */
@@ -9,6 +9,7 @@
 #include <sys/prctl.h>
 #include <time.h>
 
+#define SB_IDLE_COOPERATIVE_MAX_CPUS 4
 #define SB_IDLE_SPINS 32U
 #define SB_IDLE_SLEEP_NS 10000L
 #define SB_IDLE_MAX_SLEEP_NS 100000L
@@ -24,7 +25,7 @@ static inline void sb_idle_init(struct sb_idle *idle)
 	cpu_set_t mask;
 	idle->initialized = true;
 	idle->sleep_ns = SB_IDLE_SLEEP_NS;
-	idle->cooperative = !sched_getaffinity(0, sizeof(mask), &mask) && CPU_COUNT(&mask) <= 2;
+	idle->cooperative = !sched_getaffinity(0, sizeof(mask), &mask) && CPU_COUNT(&mask) <= SB_IDLE_COOPERATIVE_MAX_CPUS;
 	/* Default timer slack can exceed the entire polling interval. Only the
 	 * calling low-core worker changes its slack, never a restored application. */
 	if (idle->cooperative)

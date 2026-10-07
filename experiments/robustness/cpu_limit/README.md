@@ -28,7 +28,7 @@ the only changed setting within each mode. The normal U/K PS budgets and
 worker configurations remain mode-specific; use the within-mode comparisons
 to assess CPU sensitivity.
 
-SwiftBaton-U detects the worker's effective CPU affinity. With at most two
+SwiftBaton-U detects the worker's effective CPU affinity. With at most four
 CPUs, empty queues and unchanged ring heads use adaptive cooperative polling:
 32 short spins, followed by a 10–100 microsecond sleep. Actual progress resets
 the wait immediately. This also applies to pre-copy workers waiting for an
@@ -63,6 +63,8 @@ experiments/robustness/cpu_limit/run.sh --dry-run
 experiments/robustness/cpu_limit/run.sh --mode u --variant 2core --trials 1
 # Functionality check; these small runs are excluded from the full plots.
 experiments/robustness/cpu_limit/run.sh --mode both --variant 2core --smoke --trials 1
+# Recheck the U four-core group after a polling-policy change.
+experiments/robustness/cpu_limit/run.sh --mode u --variant 4core --trials 3
 # Four groups, three full trials each, with reversed ordering on even rounds.
 experiments/robustness/cpu_limit/run.sh --mode both --variant unrestricted --variant 2core --trials 3
 # Add the four- and eight-core groups, three trials per mode and mask.
@@ -123,8 +125,9 @@ on each host. The helper refuses to remove a control while CRIU is running
 or when its mask was changed by another owner.
 
 The cooperative polling regression test requires only Linux and a C compiler.
-It checks queue publication without wake syscalls while twelve pollers share
-two CPUs, as well as the unchanged policy for a larger CPU mask:
+It checks queue publication without wake syscalls while seventeen pollers share
+two and four CPUs, checks bounded backoff and reset after progress, and verifies
+that eight CPUs keep the normal spin policy:
 
 ```bash
 gcc -O2 -Wall -Wextra -Werror -pthread -iquote criu/criu/include \
